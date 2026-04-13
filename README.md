@@ -18,7 +18,10 @@ Chrome/Chromium-расширение для дашборда Bosun. Помога
 
 ## Поддерживаемые адреса
 
-Адреса нужно добавить в `manifest.json`.
+- `https://bosun.example.com/*`
+- `https://bosun-test.example.com/*`
+
+В репозитории указаны placeholder-домены. Перед локальной установкой замените их в `manifest.json` на адреса своего Bosun-инстанса.
 
 ## Установка
 
