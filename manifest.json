@@ -21,8 +21,8 @@
   "content_scripts": [
     {
       "matches": [
-        "*://bosun-test.example.com/*",
-        "*://bosun.example.com/*"
+        "*://bosun.example.com/*",
+        "*://bosun-test.example.com/*"
       ],
       "js": [
         "shared-utils.js",
