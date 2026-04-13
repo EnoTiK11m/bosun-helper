@@ -13,16 +13,16 @@
         "bosun_notification_soft_chime.wav"
       ],
       "matches": [
-        "*://bosun.edna.ru/*",
-        "*://bosun-test.edna.ru/*"
+        "*://bosun.example.com/*",
+        "*://bosun-test.example.com/*"
       ]
     }
   ],
   "content_scripts": [
     {
       "matches": [
-        "*://bosun-test.edna.ru/*",
-        "*://bosun.edna.ru/*"
+        "*://bosun.example.com/*",
+        "*://bosun-test.example.com/*"
       ],
       "js": [
         "shared-utils.js",
