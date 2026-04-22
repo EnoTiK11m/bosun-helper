@@ -1,5 +1,6 @@
 const fs = require('fs');
 const vm = require('vm');
+const assert = require('assert');
 
 const listeners = {};
 const documentStub = {
@@ -112,4 +113,34 @@ if (failed.length) {
   console.error('FAILED', failed);
   process.exit(1);
 }
+
+const severityApi = context.BosunSilenceHiderNeedAckSeverity.createNeedAckSeverity({
+  normalizeNeedAckChildren(raw) {
+    if (raw == null) return [];
+    return Array.isArray(raw) ? raw : [raw];
+  }
+});
+
+assert.strictEqual(severityApi.parseNeedAckStatusToBucket('Critical'), 'critical');
+assert.strictEqual(severityApi.parseNeedAckStatusToBucket('warning-high'), 'warning');
+assert.strictEqual(severityApi.parseNeedAckStatusToBucket('normal'), 'unknown');
+assert.strictEqual(
+  severityApi.needAckStableKey({ State: { Id: '42' } }, {}),
+  'id:42'
+);
+assert.strictEqual(
+  severityApi.needAckStableKey(
+    { AlertKey: 'cpu.high', State: { Tags: 'host=db01' } },
+    {}
+  ),
+  'ak:cpu.high|tags:host=db01'
+);
+assert.strictEqual(
+  severityApi.needAckStableKey(
+    { Subject: 'child alert', Ago: '2026-04-23T00:00:00Z' },
+    { Subject: 'group alert' }
+  ),
+  'g:group alert|c:child alert|ago:2026-04-23T00:00:00Z'
+);
+
 console.log('Smoke test passed');

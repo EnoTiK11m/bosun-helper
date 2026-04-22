@@ -25,7 +25,10 @@
           size: previousSnapshotSize
         };
         window.sessionStorage.setItem(sessionKey, JSON.stringify(payload));
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Bosun plugin] Failed to persist NeedAck baseline to sessionStorage:', err);
+        reportDiagnostics('baseline-session-save-failed', err?.message || 'unknown-error');
+      }
     }
 
     function restoreFromSession() {
@@ -40,14 +43,20 @@
         previousSnapshotSize = Number.isFinite(Number(parsed.size))
           ? Math.max(0, Math.round(Number(parsed.size)))
           : previousIds.size;
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Bosun plugin] Failed to restore NeedAck baseline from sessionStorage:', err);
+        reportDiagnostics('baseline-session-restore-failed', err?.message || 'unknown-error');
+      }
     }
 
     function clearSession() {
       if (!window?.sessionStorage) return;
       try {
         window.sessionStorage.removeItem(sessionKey);
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Bosun plugin] Failed to clear NeedAck baseline from sessionStorage:', err);
+        reportDiagnostics('baseline-session-clear-failed', err?.message || 'unknown-error');
+      }
     }
 
     function reset() {

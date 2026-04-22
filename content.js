@@ -6,6 +6,7 @@
   const AUTO_REFRESH_IDLE_SECONDS_KEY = 'bosunAutoRefreshIdleSeconds';
   const HIDDEN_CLASS = 'bosun-silence-hidden';
   const TOP_BAR_ID = 'bosun-top-controls-bar';
+  const TOP_BAR_STATUS_ID = 'bosun-top-controls-status';
   const TOGGLE_ID = 'bosun-silence-toggle';
   const TOGGLE_COUNTER_ID = 'bosun-silence-toggle-counter';
   const AUTO_REFRESH_TOGGLE_ID = 'bosun-auto-refresh-toggle';
@@ -58,6 +59,7 @@
 
   const DATA_REFRESH_MS = 6000;
   const DATA_REFRESH_DEBOUNCE_MS = 250;
+  const STATUS_MESSAGE_TTL_MS = 8000;
   const OLD_NO_NOTE_MINUTES = 0
   const AUTO_REFRESH_DEFAULT_IDLE_SECONDS = 60;
   const AUTO_REFRESH_MIN_IDLE_SECONDS = 10;
@@ -82,6 +84,11 @@
   let topBarMountObserver = null;
   let soundAlertsEnabled = true;
   let diagnosticsEnabled = false;
+  let toolbarStatusSource = '';
+  let toolbarStatusLevel = '';
+  let toolbarStatusMessage = '';
+  let toolbarStatusTitle = '';
+  let toolbarStatusTimer = null;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -323,6 +330,7 @@
       oldNoNoteIconClass: OLD_NO_NOTE_ICON_CLASS,
       hasNoteIconClass: HAS_NOTE_ICON_CLASS,
       topBarId: TOP_BAR_ID,
+      topBarStatusId: TOP_BAR_STATUS_ID,
       toggleId: TOGGLE_ID,
       toggleCounterId: TOGGLE_COUNTER_ID,
       autoRefreshToggleId: AUTO_REFRESH_TOGGLE_ID,
@@ -612,6 +620,69 @@
     );
   }
 
+  function getClosestElementFromNode(node) {
+    if (!node) return null;
+    if (node.nodeType === 1) return node;
+    return node.parentElement || null;
+  }
+
+  function selectionIsInsideAlertHeading(selection) {
+    if (!selection || selection.rangeCount < 1 || selection.isCollapsed) return false;
+
+    const anchorEl = getClosestElementFromNode(selection.anchorNode);
+    const focusEl = getClosestElementFromNode(selection.focusNode);
+    const anchorHeading = anchorEl?.closest?.('.panel-heading') || null;
+    const focusHeading = focusEl?.closest?.('.panel-heading') || null;
+    if (anchorHeading || focusHeading) return true;
+
+    for (let i = 0; i < selection.rangeCount; i += 1) {
+      const range = selection.getRangeAt(i);
+      const commonEl = getClosestElementFromNode(range?.commonAncestorContainer);
+      if (!commonEl) continue;
+      if (commonEl.closest?.('.panel-heading, .panel-title')) return true;
+      if (commonEl.querySelector?.('.panel-heading, .panel-title')) return true;
+    }
+
+    return false;
+  }
+
+  function normalizeSelectedAlertText(text) {
+    return String(text || '')
+      .replace(/\u00a0/g, ' ')
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s+/, '').replace(/\s+$/, ''))
+      .join('\n')
+      .trim();
+  }
+
+  function installSelectionCopySanitizer() {
+    if (window.__bosunSelectionCopySanitizerInstalled) return;
+    window.__bosunSelectionCopySanitizerInstalled = true;
+
+    document.addEventListener(
+      'copy',
+      (event) => {
+        const selection = window.getSelection?.();
+        if (!selectionIsInsideAlertHeading(selection)) return;
+
+        const rawText = selection?.toString?.() || '';
+        const normalizedText = normalizeSelectedAlertText(rawText);
+        if (!normalizedText) return;
+
+        if (event.clipboardData?.setData) {
+          event.clipboardData.setData('text/plain', normalizedText);
+          event.preventDefault();
+          return;
+        }
+
+        if (navigator?.clipboard?.writeText) {
+          navigator.clipboard.writeText(normalizedText).catch(() => {});
+        }
+      },
+      true
+    );
+  }
+
   function isSilencedPanel(panel) {
     const heading = getPanelHeading(panel);
     return !!heading?.querySelector('.fa-volume-off');
@@ -748,24 +819,90 @@
     return globalThis.chrome?.runtime?.lastError || null;
   }
 
+  function clearToolbarStatusTimer() {
+    if (!toolbarStatusTimer) return;
+    clearTimeout(toolbarStatusTimer);
+    toolbarStatusTimer = null;
+  }
+
+  function updateToolbarStatus() {
+    const status = document.getElementById(TOP_BAR_STATUS_ID);
+    if (!status) return;
+
+    const isVisible = Boolean(toolbarStatusMessage);
+    status.textContent = isVisible ? toolbarStatusMessage : '';
+    status.title = isVisible ? (toolbarStatusTitle || toolbarStatusMessage) : '';
+    status.hidden = !isVisible;
+    status.classList.toggle('is-info', toolbarStatusLevel === 'info');
+    status.classList.toggle('is-warn', toolbarStatusLevel === 'warn');
+    status.classList.toggle('is-error', toolbarStatusLevel === 'error');
+  }
+
+  function clearToolbarStatus(source) {
+    if (source && toolbarStatusSource && toolbarStatusSource !== source) return;
+
+    toolbarStatusSource = '';
+    toolbarStatusLevel = '';
+    toolbarStatusMessage = '';
+    toolbarStatusTitle = '';
+    clearToolbarStatusTimer();
+    updateToolbarStatus();
+  }
+
+  function setToolbarStatus(source, message, level = 'info', options = {}) {
+    const {
+      sticky = false,
+      ttlMs = STATUS_MESSAGE_TTL_MS,
+      title = ''
+    } = options;
+
+    toolbarStatusSource = String(source || '');
+    toolbarStatusLevel = level;
+    toolbarStatusMessage = String(message || '');
+    toolbarStatusTitle = String(title || toolbarStatusMessage);
+    clearToolbarStatusTimer();
+    updateToolbarStatus();
+
+    if (sticky || !toolbarStatusMessage) return;
+
+    toolbarStatusTimer = setTimeout(() => {
+      clearToolbarStatus(source);
+    }, Math.max(1000, Number(ttlMs) || STATUS_MESSAGE_TTL_MS));
+  }
+
   function getChromeLocalStorage() {
     return globalThis.chrome?.storage?.local || null;
   }
 
   function saveToLocalStorage(values, context) {
     const storage = getChromeLocalStorage();
-    if (!storage) return;
+    if (!storage) {
+      setToolbarStatus('storage-read', 'Storage unavailable; using in-memory settings', 'warn', {
+        sticky: true,
+        title: 'chrome.storage.local is unavailable, so settings will not persist after reload'
+      });
+      return;
+    }
 
     try {
       storage.set(values, () => {
         const err = getChromeStorageLastError();
-        if (!err) return;
+        if (!err) {
+          clearToolbarStatus('storage-write');
+          return;
+        }
         console.warn(`[Bosun plugin] Failed to save ${context}:`, err.message || err);
         reportDiagnostics('storage-save-failed', `${context}: ${err.message || err}`);
+        setToolbarStatus('storage-write', 'Settings were not saved', 'warn', {
+          title: `${context}: ${err.message || err}`
+        });
       });
     } catch (err) {
       console.warn(`[Bosun plugin] Failed to save ${context}:`, err);
       reportDiagnostics('storage-save-failed', `${context}: ${err?.message || 'unknown-error'}`);
+      setToolbarStatus('storage-write', 'Settings were not saved', 'warn', {
+        title: `${context}: ${err?.message || 'unknown-error'}`
+      });
     }
   }
 
@@ -860,6 +997,12 @@
   function loadState(callback) {
     const storage = getChromeLocalStorage();
     if (!storage) {
+      console.warn('[Bosun plugin] chrome.storage.local unavailable; using defaults');
+      reportDiagnostics('storage-load-unavailable', 'chrome.storage.local unavailable');
+      setToolbarStatus('storage-read', 'Storage unavailable; using defaults', 'warn', {
+        sticky: true,
+        title: 'chrome.storage.local is unavailable, so saved settings cannot be loaded'
+      });
       callback();
       return;
     }
@@ -872,7 +1015,11 @@
           if (err) {
             console.warn('[Bosun plugin] Failed to load saved settings:', err.message || err);
             reportDiagnostics('storage-load-failed', err.message || 'unknown-error');
+            setToolbarStatus('storage-read', 'Saved settings were not loaded', 'warn', {
+              title: err.message || String(err)
+            });
           }
+          if (!err) clearToolbarStatus('storage-read');
           result = result && typeof result === 'object' ? result : {};
           showSilenced = Boolean(result[STORAGE_KEY]);
           autoRefreshEnabled = typeof result[AUTO_REFRESH_ENABLED_KEY] === 'boolean'
@@ -894,6 +1041,9 @@
     } catch (err) {
       console.warn('[Bosun plugin] Failed to load saved settings:', err);
       reportDiagnostics('storage-load-failed', err?.message || 'unknown-error');
+      setToolbarStatus('storage-read', 'Saved settings were not loaded', 'warn', {
+        title: err?.message || 'unknown-error'
+      });
       callback();
     }
   }
@@ -1264,6 +1414,19 @@
     updateAutoRefreshControls();
   }
 
+  function ensureToolbarStatusIndicator(actions) {
+    let status = actions.querySelector(`#${TOP_BAR_STATUS_ID}`);
+    if (!status) {
+      status = document.createElement('span');
+      status.id = TOP_BAR_STATUS_ID;
+      status.className = 'bosun-toolbar-status';
+      status.hidden = true;
+      actions.appendChild(status);
+    }
+
+    updateToolbarStatus();
+  }
+
   function maybeAutoRefreshPage() {
     if (activityApi?.startAutoRefreshLoop) return;
     if (isActionPage()) return;
@@ -1389,6 +1552,7 @@
     if (!actions) return;
     ensureSoundAlertsControls(actions);
     ensureAutoRefreshControls(actions);
+    ensureToolbarStatusIndicator(actions);
 
     let btn = document.getElementById(TOGGLE_ID);
     let counter = document.getElementById(TOGGLE_COUNTER_ID);
@@ -1618,7 +1782,7 @@
       if (noteIcon) noteIcon.remove();
       if (!warnIcon) {
         const icon = document.createElement('span');
-        icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS}`;
+        icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS} ${NO_SELECT_CLASS}`;
         icon.title = `Older than ${OLD_NO_NOTE_MINUTES} minutes and has no Note`;
         title.insertBefore(icon, title.firstChild);
       }
@@ -1629,7 +1793,7 @@
       if (warnIcon) warnIcon.remove();
       if (!noteIcon) {
         const icon = document.createElement('span');
-        icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS}`;
+        icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} ${NO_SELECT_CLASS}`;
         icon.title = 'Contains Note';
         title.insertBefore(icon, title.firstChild);
       }
@@ -1676,7 +1840,7 @@
       if (noteIcon) noteIcon.remove();
       if (!warnIcon) {
         const icon = document.createElement('span');
-        icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS} bosun-parent-marker`;
+        icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS} bosun-parent-marker ${NO_SELECT_CLASS}`;
         icon.title = `Contains alerts older than ${OLD_NO_NOTE_MINUTES} minutes without Note`;
         title.insertBefore(icon, title.firstChild);
       }
@@ -1687,7 +1851,7 @@
       if (warnIcon) warnIcon.remove();
       if (!noteIcon) {
         const icon = document.createElement('span');
-        icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} bosun-parent-marker`;
+        icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} bosun-parent-marker ${NO_SELECT_CLASS}`;
         icon.title = 'Contains alerts with Note';
         title.insertBefore(icon, title.firstChild);
       }
@@ -1837,11 +2001,6 @@
       dataRefreshDebounceTimer = null;
     }
 
-    if (dataRefreshInFlight) {
-      dataRefreshQueued = true;
-      return;
-    }
-
     dataRefreshInFlight = true;
 
     try {
@@ -1866,9 +2025,14 @@
       markNoSelectElements();
       refreshSilencedBadges();
       reportDiagnostics('refresh-ok', 'alerts payload received');
+      clearToolbarStatus('refresh');
     } catch (err) {
       console.warn('[Bosun plugin] Failed to refresh alerts data:', err);
       reportDiagnostics('refresh-failed', err?.message || 'unknown-error');
+      setToolbarStatus('refresh', 'Alerts sync failed', 'error', {
+        title: err?.message || 'unknown-error',
+        ttlMs: 12000
+      });
     } finally {
       dataRefreshInFlight = false;
 
@@ -1907,36 +2071,58 @@
       return !!node.querySelector?.('[ts-ack-group="schedule.Groups.NeedAck"]');
     }
 
+    function collectRelevantMutationNodes(mutation) {
+      const nodes = [];
+      if (mutation.target && mutation.target.nodeType === 1) {
+        nodes.push(mutation.target);
+      } else if (mutation.target?.parentElement) {
+        nodes.push(mutation.target.parentElement);
+      }
+
+      if (mutation.type === 'childList') {
+        if (mutation.addedNodes) nodes.push(...Array.from(mutation.addedNodes));
+        if (mutation.removedNodes) nodes.push(...Array.from(mutation.removedNodes));
+      }
+
+      return uniqueNodes(nodes);
+    }
+
+    function isUiRelevantNode(node) {
+      if (!node || node.nodeType !== 1) return false;
+      if (node.id === TOGGLE_ID || node.closest?.(`#${TOGGLE_ID}`)) return false;
+      if (node.id === TOP_BAR_ID || node.closest?.(`#${TOP_BAR_ID}`)) return false;
+      if (node.classList?.contains(OLD_NO_NOTE_ICON_CLASS) || node.closest?.(`.${OLD_NO_NOTE_ICON_CLASS}`)) return false;
+      if (node.classList?.contains(HAS_NOTE_ICON_CLASS) || node.closest?.(`.${HAS_NOTE_ICON_CLASS}`)) return false;
+
+      if (
+        node === document.body ||
+        node.matches?.('.container, .panel, .panel-heading, .navbar, [ts-ack-group], [ts-ack-item], [ng-repeat], [ng-bind]') ||
+        node.closest?.('.container, .panel, .navbar, [ts-ack-group], [ts-ack-item]') ||
+        node.querySelector?.('.panel, [ts-ack-group], [ts-ack-item], [ng-repeat], [ng-bind]')
+      ) {
+        return true;
+      }
+
+      return false;
+    }
+
     const observer = new MutationObserver((mutations) => {
       let shouldRefreshUi = false;
       let shouldRefreshData = false;
       const needsAckRoot = getNeedsAckRoot();
 
       for (const mutation of mutations) {
-        const target = mutation.target && mutation.target.nodeType === 1
-          ? mutation.target
-          : mutation.target?.parentElement;
+        const changedNodes = collectRelevantMutationNodes(mutation);
+        if (!changedNodes.length) continue;
 
-        if (!target) continue;
-        if (target.id === TOGGLE_ID || target.closest?.(`#${TOGGLE_ID}`)) continue;
-        if (target.id === TOP_BAR_ID || target.closest?.(`#${TOP_BAR_ID}`)) continue;
-        if (target.classList?.contains(OLD_NO_NOTE_ICON_CLASS) || target.closest?.(`.${OLD_NO_NOTE_ICON_CLASS}`)) continue;
-        if (target.classList?.contains(HAS_NOTE_ICON_CLASS) || target.closest?.(`.${HAS_NOTE_ICON_CLASS}`)) continue;
+        for (const node of changedNodes) {
+          if (!shouldRefreshUi && isUiRelevantNode(node)) {
+            shouldRefreshUi = true;
+          }
 
-        shouldRefreshUi = true;
-
-        if (isNeedsAckNode(target, needsAckRoot)) {
-          shouldRefreshData = true;
-          continue;
-        }
-
-        if (mutation.type === 'childList') {
-          const addedNodes = mutation.addedNodes ? Array.from(mutation.addedNodes) : [];
-          const removedNodes = mutation.removedNodes ? Array.from(mutation.removedNodes) : [];
-          const changedNodes = [...addedNodes, ...removedNodes];
-
-          if (changedNodes.some((node) => isNeedsAckNode(node, needsAckRoot))) {
+          if (isNeedsAckNode(node, needsAckRoot)) {
             shouldRefreshData = true;
+            break;
           }
         }
       }
@@ -1954,7 +2140,7 @@
       childList: true,
       subtree: true,
       attributes: true,
-      characterData: true
+      attributeFilter: ['class', 'ts-ack-group', 'ts-ack-item']
     });
   }
 
@@ -1962,6 +2148,7 @@
     restoreDiagnosticsLogFromStorage();
     injectStyles();
     installSelectionGuard();
+    installSelectionCopySanitizer();
     installUserActivityTracking();
     soundApi?.installAudioUnlockTracking?.();
     soundApi?.ensureAudioObjects?.();
