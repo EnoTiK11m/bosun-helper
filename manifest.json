@@ -3,27 +3,19 @@
   "name": "Bosun Helper",
   "version": "1.0.0",
   "description": "Браузерный плагин для дашборда Bosun, который снижает визуальный шум и ускоряет работу дежурного с алертами",
-  "permissions": [
-    "storage"
-  ],
+  "permissions": ["storage"],
   "web_accessible_resources": [
     {
       "resources": [
         "bosun_notification_alert_chime.wav",
         "bosun_notification_soft_chime.wav"
       ],
-      "matches": [
-        "*://bosun.example.com/*",
-        "*://bosun-test.example.com/*"
-      ]
+      "matches": ["*://bosun.edna.ru/*", "*://bosun-test.edna.ru/*"]
     }
   ],
   "content_scripts": [
     {
-      "matches": [
-        "*://bosun.example.com/*",
-        "*://bosun-test.example.com/*"
-      ],
+      "matches": ["*://bosun.edna.ru/*", "*://bosun-test.edna.ru/*"],
       "js": [
         "shared-utils.js",
         "diagnostics.js",

@@ -28,7 +28,9 @@
       try {
         const payload = JSON.stringify(logEntries.slice(-maxEntries));
         window.localStorage.setItem(logStorageKey, payload);
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Bosun plugin] Failed to save diagnostics log to localStorage:', err);
+      }
     }
 
     function restoreLogFromStorage() {
@@ -46,7 +48,9 @@
             details: String(entry.details || '')
           }))
           .slice(-maxEntries);
-      } catch (_) {}
+      } catch (err) {
+        console.warn('[Bosun plugin] Failed to restore diagnostics log from localStorage:', err);
+      }
     }
 
     function appendLogItem(list, text) {
