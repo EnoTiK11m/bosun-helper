@@ -11,6 +11,7 @@
       oldNoNoteIconClass,
       hasNoteIconClass,
       topBarId,
+      topBarStatusId,
       toggleId,
       toggleCounterId,
       autoRefreshToggleId,
@@ -79,6 +80,9 @@
         margin-right: 6px;
         font-size: 14px;
         vertical-align: middle;
+        user-select: none;
+        -webkit-user-select: none;
+        pointer-events: none;
       }
       .${oldNoNoteIconClass} { color: #ff9800 !important; }
       .${hasNoteIconClass} { color: #9ea19d !important; }
@@ -119,6 +123,43 @@
         align-items: center;
         gap: 6px;
         flex-wrap: nowrap;
+      }
+
+      #${topBarStatusId}.bosun-toolbar-status {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        max-width: 320px;
+        margin-left: auto;
+        padding: 3px 8px;
+        border: 1px solid #d7d7d7;
+        border-radius: 999px;
+        background: #fafafa;
+        color: #555;
+        font-size: 11px;
+        font-weight: 700;
+        line-height: 1.35;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      #${topBarStatusId}.bosun-toolbar-status.is-info {
+        border-color: #a8c4e4;
+        background: #eef6ff;
+        color: #245585;
+      }
+
+      #${topBarStatusId}.bosun-toolbar-status.is-warn {
+        border-color: #ddc37f;
+        background: #fff8e6;
+        color: #8b6114;
+      }
+
+      #${topBarStatusId}.bosun-toolbar-status.is-error {
+        border-color: #d9a2a2;
+        background: #fff0f0;
+        color: #9a3a3a;
       }
 
       #${topBarId} .bosun-toolbar-btn {
