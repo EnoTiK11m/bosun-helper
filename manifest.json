@@ -10,12 +10,12 @@
         "bosun_notification_alert_chime.wav",
         "bosun_notification_soft_chime.wav"
       ],
-      "matches": ["*://bosun.edna.ru/*", "*://bosun-test.edna.ru/*"]
+      "matches": []
     }
   ],
   "content_scripts": [
     {
-      "matches": ["*://bosun.edna.ru/*", "*://bosun-test.edna.ru/*"],
+      "matches": [],
       "js": [
         "shared-utils.js",
         "diagnostics.js",
