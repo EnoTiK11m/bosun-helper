@@ -36,8 +36,20 @@
   const SOUND_FILE_SOFT = 'bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
   const COPY_ALL_BUTTON_CLASS = 'bosun-copy-all-alerts-btn';
+  const GRAFANA_QUERY_BUTTON_CLASS = 'bosun-grafana-query-btn';
   const NO_SELECT_CLASS = 'bosun-no-select';
   const SILENCED_BADGE_CLASS = 'bosun-silenced-badge';
+  const GRAFANA_QUERY_STORAGE_KEY = 'bosunGrafanaPendingQueryV1';
+  const GRAFANA_PENDING_QUERY_TTL_MS = 2 * 60 * 1000;
+  const DEFAULT_EXTENSION_CONFIG = {
+    bosunHosts: ['bosun.example.com', 'bosun-test.example.com'],
+    grafanaHost: 'grafana.example.com',
+    grafanaPanelUrl: 'https://grafana.example.com/d/example/example?orgId=1&from=now-1h&to=now&timezone=browser&editPanel=1'
+  };
+  const extensionConfig = {
+    ...DEFAULT_EXTENSION_CONFIG,
+    ...(globalThis.BosunHelperLocalConfig || {})
+  };
 
   /**
    * Показывать ли в тулбаре блок «Диагностика» (чекбокс, кнопки «Открыть лог» / модалка журнала).
@@ -103,6 +115,8 @@
   const groupHasOldNoNoteBySubject = new Map();
   const groupHasAnyNoteBySubject = new Map();
   const lastResolvedParentStateByKey = new Map();
+  const grafanaQueryById = new Map();
+  const grafanaQueryByKey = new Map();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
   const diagnosticsApi = globalThis.BosunSilenceHiderDiagnostics?.createDiagnostics?.({
     modalId: DIAGNOSTICS_MODAL_ID,
@@ -183,6 +197,11 @@
     return pageUtils?.isActionPage?.() ?? (window.location.pathname === '/action' && window.location.search.includes('type='));
   }
 
+  function isConfiguredBosunHost() {
+    return Array.isArray(extensionConfig.bosunHosts) &&
+      extensionConfig.bosunHosts.includes(window.location.hostname);
+  }
+
   function isDashboardHome() {
     return pageUtils?.isDashboardHome?.() ?? window.location.pathname === '/';
   }
@@ -249,6 +268,428 @@
     textarea.dispatchEvent(new Event('blur', { bubbles: true }));
     textarea.focus();
     moveTextareaCursorToEnd(textarea);
+  }
+
+  function isGrafanaPanelPage() {
+    if (window.location.hostname !== extensionConfig.grafanaHost) return false;
+
+    try {
+      const configured = new URL(extensionConfig.grafanaPanelUrl);
+      return window.location.pathname === configured.pathname &&
+        window.location.search.includes('editPanel=');
+    } catch (_) {
+      return window.location.pathname.startsWith('/d/') &&
+        window.location.search.includes('editPanel=');
+    }
+  }
+
+  function loadGrafanaPendingQuery() {
+    return new Promise((resolve) => {
+      try {
+        if (chrome?.storage?.local?.get) {
+          chrome.storage.local.get([GRAFANA_QUERY_STORAGE_KEY], (items) => {
+            resolve(items?.[GRAFANA_QUERY_STORAGE_KEY] || null);
+          });
+          return;
+        }
+      } catch (_) {}
+
+      try {
+        resolve(JSON.parse(window.localStorage.getItem(GRAFANA_QUERY_STORAGE_KEY) || 'null'));
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
+  function clearGrafanaPendingQuery() {
+    try {
+      if (chrome?.storage?.local?.remove) {
+        chrome.storage.local.remove([GRAFANA_QUERY_STORAGE_KEY]);
+      }
+    } catch (_) {}
+
+    try {
+      window.localStorage.removeItem(GRAFANA_QUERY_STORAGE_KEY);
+    } catch (_) {}
+  }
+
+  function isElementUsable(el) {
+    if (!el) return false;
+    const rect = el.getBoundingClientRect?.();
+    if (rect && rect.width <= 0 && rect.height <= 0) return false;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    return !(style && (style.display === 'none' || style.visibility === 'hidden'));
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function normalizeEditorText(value) {
+    return String(value || '').replace(/\r\n/g, '\n').trim();
+  }
+
+  async function setEditableText(el, value) {
+    if (!el) return false;
+
+    el.focus?.();
+    el.click?.();
+
+    const codeMirrorView = findCodeMirrorView(el);
+    if (codeMirrorView) {
+      const docLength = codeMirrorView.state?.doc?.length ?? String(codeMirrorView.state?.doc || '').length;
+      codeMirrorView.dispatch({
+        changes: { from: 0, to: docLength, insert: value },
+        selection: { anchor: value.length },
+        scrollIntoView: true
+      });
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertReplacementText' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      await wait(50);
+      return normalizeEditorText(getEditableText(el)) === normalizeEditorText(value);
+    }
+
+    clearEditableText(el);
+    await wait(120);
+
+    if (normalizeEditorText(getEditableText(el))) return false;
+
+    insertEditableText(el, value);
+    await wait(120);
+
+    return normalizeEditorText(getEditableText(el)) === normalizeEditorText(value);
+  }
+
+  function getEditableText(el) {
+    const codeMirrorView = findCodeMirrorView(el);
+    if (codeMirrorView?.state?.doc) {
+      return codeMirrorView.state.doc.toString();
+    }
+
+    if (el?.tagName === 'TEXTAREA' || el?.tagName === 'INPUT') {
+      return el.value || '';
+    }
+
+    return el?.innerText || el?.textContent || '';
+  }
+
+  function clearEditableText(el) {
+    if (!el) return false;
+
+    const codeMirrorView = findCodeMirrorView(el);
+    if (codeMirrorView) {
+      const docLength = codeMirrorView.state?.doc?.length ?? String(codeMirrorView.state?.doc || '').length;
+      codeMirrorView.dispatch({
+        changes: { from: 0, to: docLength, insert: '' },
+        selection: { anchor: 0 },
+        scrollIntoView: true
+      });
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    const selectAll = () => {
+      try {
+        document.execCommand?.('selectAll', false, null);
+      } catch (_) {}
+      el.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'a',
+        code: 'KeyA',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true
+      }));
+      el.dispatchEvent(new KeyboardEvent('keyup', {
+        key: 'a',
+        code: 'KeyA',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true
+      }));
+    };
+
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      const proto = Object.getPrototypeOf(el);
+      const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+      const setter = descriptor && typeof descriptor.set === 'function' ? descriptor.set : null;
+      if (typeof el.select === 'function') el.select();
+      if (setter) setter.call(el, '');
+      else el.value = '';
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') {
+      selectAll();
+
+      const editorRoot = el.closest?.('.cm-editor') || el;
+      const contentRoot = editorRoot.querySelector?.('.cm-content[contenteditable="true"]') || el;
+      const selection = window.getSelection?.();
+      const range = document.createRange();
+      range.selectNodeContents(contentRoot);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+
+      const deleted = document.execCommand?.('delete', false, null);
+      if (!deleted) contentRoot.textContent = '';
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    return false;
+  }
+
+  function insertEditableText(el, value) {
+    if (!el) return false;
+
+    const codeMirrorView = findCodeMirrorView(el);
+    if (codeMirrorView) {
+      codeMirrorView.dispatch({
+        changes: { from: 0, to: 0, insert: value },
+        selection: { anchor: value.length },
+        scrollIntoView: true
+      });
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+      const proto = Object.getPrototypeOf(el);
+      const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
+      const setter = descriptor && typeof descriptor.set === 'function' ? descriptor.set : null;
+      if (setter) setter.call(el, value);
+      else el.value = value;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') {
+      const editorRoot = el.closest?.('.cm-editor') || el;
+      const contentRoot = editorRoot.querySelector?.('.cm-content[contenteditable="true"]') || el;
+      contentRoot.focus?.();
+      const inserted = document.execCommand?.('insertText', false, value);
+      if (!inserted) {
+        contentRoot.textContent = value;
+      }
+      contentRoot.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+      contentRoot.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }
+
+    return false;
+  }
+
+  function findCodeMirrorView(el) {
+    const candidates = [];
+    let node = el;
+
+    while (node && candidates.length < 12) {
+      candidates.push(node);
+      node = node.parentElement;
+    }
+
+    try {
+      candidates.push(...document.querySelectorAll('.cm-editor, .cm-content, .cm-scroller'));
+    } catch (_) {}
+
+    for (const candidate of candidates) {
+      const directView = getCodeMirrorViewFromObject(candidate) || getCodeMirrorViewFromObject(candidate?.cmView);
+      if (directView) return directView;
+
+      const ownKeys = [];
+      try {
+        ownKeys.push(...Object.keys(candidate || {}));
+      } catch (_) {}
+      try {
+        ownKeys.push(...Object.getOwnPropertyNames(candidate || {}));
+      } catch (_) {}
+
+      for (const key of ownKeys) {
+        const view = getCodeMirrorViewFromObject(candidate?.[key]);
+        if (view) return view;
+      }
+    }
+
+    return null;
+  }
+
+  function getCodeMirrorViewFromObject(value) {
+    if (!value || typeof value !== 'object') return null;
+
+    if (value.state?.doc && typeof value.dispatch === 'function') {
+      return value;
+    }
+
+    if (value.rootView?.view?.state?.doc && typeof value.rootView.view.dispatch === 'function') {
+      return value.rootView.view;
+    }
+
+    if (value.view?.state?.doc && typeof value.view.dispatch === 'function') {
+      return value.view;
+    }
+
+    const seen = new Set();
+    const queue = [
+      value.view,
+      value.editorView,
+      value.rootView,
+      value.rootView?.view,
+      value.cmView,
+      value.cmView?.view,
+      value.cmView?.rootView,
+      value.cmView?.rootView?.view
+    ].filter(Boolean);
+
+    while (queue.length) {
+      const item = queue.shift();
+      if (!item || typeof item !== 'object' || seen.has(item)) continue;
+      seen.add(item);
+
+      if (item.state?.doc && typeof item.dispatch === 'function') return item;
+
+      const keys = [];
+      try {
+        keys.push(...Object.keys(item));
+      } catch (_) {}
+      try {
+        keys.push(...Object.getOwnPropertyNames(item));
+      } catch (_) {}
+
+      for (const key of keys.slice(0, 40)) {
+        if (/parent|dom|contentDOM/i.test(key)) continue;
+        try {
+          const next = item[key];
+          if (next && typeof next === 'object' && !seen.has(next)) queue.push(next);
+        } catch (_) {}
+      }
+    }
+
+    return null;
+  }
+
+  function findGrafanaQueryEditor() {
+    const selectors = [
+      '.cm-editor .cm-content[contenteditable="true"]',
+      '.cm-content[contenteditable="true"]',
+      '.monaco-editor textarea',
+      '[role="textbox"][contenteditable="true"]',
+      'textarea',
+      '[role="textbox"]'
+    ];
+
+    for (const selector of selectors) {
+      const candidates = Array.from(document.querySelectorAll(selector)).filter(isElementUsable);
+      if (candidates.length) return candidates[candidates.length - 1];
+    }
+
+    return null;
+  }
+
+  function findButtonByText(text) {
+    const normalizedNeedle = text.toLowerCase();
+    return Array.from(document.querySelectorAll('button')).find((button) => {
+      const label = button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() || '';
+      return label === normalizedNeedle || label.includes(normalizedNeedle);
+    }) || null;
+  }
+
+  function clickGrafanaRunQueries() {
+    const runButton = findButtonByText('Run queries');
+    if (!runButton) return false;
+    runButton.click();
+    return true;
+  }
+
+  function injectGrafanaPageBridge() {
+    if (document.getElementById('bosun-helper-grafana-page-bridge')) return true;
+
+    try {
+      const script = document.createElement('script');
+      script.id = 'bosun-helper-grafana-page-bridge';
+      script.src = chrome.runtime.getURL('grafana-page.js');
+      script.onload = () => script.remove();
+      (document.documentElement || document.head || document.body).appendChild(script);
+      return true;
+    } catch (err) {
+      console.warn('[Bosun Helper] Failed to inject Grafana page bridge:', err);
+      return false;
+    }
+  }
+
+  function applyGrafanaQueryViaPageBridge(query) {
+    return new Promise((resolve) => {
+      if (!injectGrafanaPageBridge()) {
+        resolve(false);
+        return;
+      }
+
+      const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const timeoutId = setTimeout(() => {
+        window.removeEventListener('message', onMessage);
+        resolve(false);
+      }, 3000);
+
+      function onMessage(event) {
+        if (event.source !== window || event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT') return;
+        if (event.data.requestId !== requestId) return;
+
+        clearTimeout(timeoutId);
+        window.removeEventListener('message', onMessage);
+        resolve(event.data.result?.ok === true);
+      }
+
+      window.addEventListener('message', onMessage);
+
+      setTimeout(() => {
+        window.postMessage({
+          type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
+          requestId,
+          query
+        }, '*');
+      }, 200);
+    });
+  }
+
+  async function waitForGrafanaEditorAndApply(query, attemptsLeft = 80) {
+    const editor = findGrafanaQueryEditor();
+    const bridgeApplied = await applyGrafanaQueryViaPageBridge(query);
+    if (bridgeApplied) {
+      clearGrafanaPendingQuery();
+      return;
+    }
+
+    if (editor && await setEditableText(editor, query)) {
+      setTimeout(() => {
+        clickGrafanaRunQueries();
+        clearGrafanaPendingQuery();
+      }, 250);
+      return;
+    }
+
+    if (attemptsLeft <= 0) return;
+    setTimeout(() => waitForGrafanaEditorAndApply(query, attemptsLeft - 1), 250);
+  }
+
+  async function applyPendingGrafanaQuery() {
+    if (!isGrafanaPanelPage()) return;
+
+    const payload = await loadGrafanaPendingQuery();
+    const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
+    const createdAt = Number(payload?.createdAt || 0);
+
+    if (!query) return;
+    if (!Number.isFinite(createdAt) || Date.now() - createdAt > GRAFANA_PENDING_QUERY_TTL_MS) {
+      clearGrafanaPendingQuery();
+      return;
+    }
+
+    waitForGrafanaEditorAndApply(query);
   }
 
   function ensureActionTemplates() {
@@ -325,6 +766,7 @@
       hiddenClass: HIDDEN_CLASS,
       copyButtonClass: COPY_BUTTON_CLASS,
       copyAllButtonClass: COPY_ALL_BUTTON_CLASS,
+      grafanaQueryButtonClass: GRAFANA_QUERY_BUTTON_CLASS,
       noSelectClass: NO_SELECT_CLASS,
       silencedBadgeClass: SILENCED_BADGE_CLASS,
       oldNoNoteIconClass: OLD_NO_NOTE_ICON_CLASS,
@@ -472,6 +914,325 @@
     button.dataset.flashTimer = String(timerId);
   }
 
+  function flashButtonState(button, text, ok = true) {
+    if (!button) return;
+    if (button.dataset.flashTimer) {
+      clearTimeout(Number(button.dataset.flashTimer));
+    }
+    const originalText = button.dataset.originalText || button.textContent;
+    button.dataset.originalText = originalText;
+    button.textContent = text;
+    button.dataset.copied = ok ? 'true' : 'false';
+    const timerId = setTimeout(() => {
+      button.textContent = originalText;
+      delete button.dataset.copied;
+      delete button.dataset.originalText;
+      delete button.dataset.flashTimer;
+    }, ok ? 1200 : 2500);
+    button.dataset.flashTimer = String(timerId);
+  }
+
+  function extractPromrasQuery(expr) {
+    if (typeof expr !== 'string' || !expr.trim()) return '';
+
+    const querySectionMatch = expr.match(/(?:^|\n)\s*Query:\s*([\s\S]*?)(?=\n\s*[A-Z][A-Za-z0-9 _-]*:\s|$)/i);
+    const source = querySectionMatch ? querySectionMatch[1] : expr;
+    const seenQueries = new Set();
+    const matches = Array.from(source.matchAll(/promras\(\s*'''([\s\S]*?)'''/gi))
+      .map((match) => match[1].replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .filter((query) => {
+        if (seenQueries.has(query)) return false;
+        seenQueries.add(query);
+        return true;
+      });
+
+    if (!matches.length) return '';
+    if (matches.length === 1) return matches[0];
+
+    return matches.map((query) => `(${query})`).join(' or ');
+  }
+
+  function parseAlertTags(rawTags, alertKey = '') {
+    if (rawTags && typeof rawTags === 'object' && !Array.isArray(rawTags)) {
+      return Object.keys(rawTags)
+        .filter((name) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))
+        .map((name) => ({ name, value: rawTags[name] }))
+        .filter((tag) => tag.value != null && String(tag.value).trim() !== '');
+    }
+
+    const source = typeof rawTags === 'string' && rawTags.trim()
+      ? rawTags
+      : ((typeof alertKey === 'string' && alertKey.includes('{'))
+        ? alertKey.slice(alertKey.indexOf('{') + 1, alertKey.lastIndexOf('}'))
+        : '');
+
+    const tags = [];
+    source.split(',').forEach((part) => {
+      const match = part.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"?([^",]+)"?$/);
+      if (!match) return;
+      tags.push({ name: match[1], value: match[2] });
+    });
+    return tags;
+  }
+
+  function escapePromLabelValue(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  }
+
+  function getNearestPromAggregationLabels(query, selectorIndex) {
+    const prefix = query.slice(Math.max(0, selectorIndex - 500), selectorIndex);
+    const aggregations = Array.from(prefix.matchAll(/\b(sum|avg|min|max|count|stddev|stdvar|topk|bottomk|quantile)\s+(by|without)\s*\(([^)]*)\)\s*\(/gi));
+    const last = aggregations[aggregations.length - 1];
+    if (!last) return null;
+
+    const labels = last[3]
+      .split(',')
+      .map((label) => label.trim())
+      .filter(Boolean);
+
+    return {
+      mode: last[2].toLowerCase(),
+      labels: new Set(labels)
+    };
+  }
+
+  function shouldInjectAlertTagIntoSelector(tagName, aggregation) {
+    if (!aggregation) return true;
+    if (aggregation.mode === 'by') return aggregation.labels.has(tagName);
+    if (aggregation.mode === 'without') return !aggregation.labels.has(tagName);
+    return true;
+  }
+
+  function selectorHasLabel(matchers, labelName) {
+    const re = new RegExp(`(^|,)\\s*${labelName}\\s*(=|!=|=~|!~)`);
+    return re.test(matchers);
+  }
+
+  function replaceMatcherLabelValue(matchers, labelName, value) {
+    const escapedValue = escapePromLabelValue(value);
+    const matcherRe = new RegExp(`(^|,)\\s*${labelName}\\s*(=~|!~|=|!=)\\s*"((?:\\\\.|[^"\\\\])*)"`, 'g');
+    let replaced = false;
+    const next = matchers.replace(matcherRe, (full, prefix) => {
+      replaced = true;
+      return `${prefix || ''} ${labelName}="${escapedValue}"`;
+    });
+
+    return {
+      matchers: next.trim().replace(/^,\s*/, ''),
+      replaced
+    };
+  }
+
+  function getAlertTagMatchersForSelector(tags, query, offset, matchers = '') {
+    const aggregation = getNearestPromAggregationLabels(query, offset);
+    return tags
+      .filter((tag) => shouldInjectAlertTagIntoSelector(tag.name, aggregation))
+      .filter((tag) => !selectorHasLabel(matchers, tag.name))
+      .map((tag) => `${tag.name}="${escapePromLabelValue(tag.value)}"`);
+  }
+
+  function applyAlertTagMatcherOverrides(matchers, tags, query, offset) {
+    const aggregation = getNearestPromAggregationLabels(query, offset);
+    let nextMatchers = matchers;
+    const replacedLabels = new Set();
+
+    tags
+      .filter((tag) => shouldInjectAlertTagIntoSelector(tag.name, aggregation))
+      .forEach((tag) => {
+        if (!selectorHasLabel(nextMatchers, tag.name)) return;
+        const replaced = replaceMatcherLabelValue(nextMatchers, tag.name, tag.value);
+        nextMatchers = replaced.matchers;
+        if (replaced.replaced) replacedLabels.add(tag.name);
+      });
+
+    return { matchers: nextMatchers, replacedLabels };
+  }
+
+  function isPromKeywordOrFunction(name) {
+    return /^(and|or|unless|by|without|on|ignoring|group_left|group_right|bool|offset|sum|avg|min|max|count|stddev|stdvar|topk|bottomk|quantile|rate|irate|increase|delta|deriv|idelta|changes|resets|abs|ceil|floor|round|clamp|clamp_min|clamp_max|histogram_quantile|label_replace|label_join|sort|sort_desc|avg_over_time|min_over_time|max_over_time|sum_over_time|count_over_time|quantile_over_time|stddev_over_time|stdvar_over_time|last_over_time|present_over_time|time|vector|scalar)$/i.test(name);
+  }
+
+  function isInsidePromLabelList(query, offset) {
+    const prefix = query.slice(0, offset);
+    const lastOpen = prefix.lastIndexOf('(');
+    const lastClose = prefix.lastIndexOf(')');
+    if (lastOpen <= lastClose) return false;
+
+    const beforeOpen = prefix.slice(Math.max(0, lastOpen - 40), lastOpen);
+    return /\b(by|without|on|ignoring)\s*$/i.test(beforeOpen);
+  }
+
+  function isInsidePromString(query, offset) {
+    let quote = '';
+    let escaped = false;
+
+    for (let i = 0; i < offset; i += 1) {
+      const ch = query[i];
+
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+
+      if (quote) {
+        if (ch === quote) quote = '';
+        continue;
+      }
+
+      if (ch === '"' || ch === "'") {
+        quote = ch;
+      }
+    }
+
+    return Boolean(quote);
+  }
+
+  function isInsidePromSelectorBraces(query, offset) {
+    const lastOpen = query.lastIndexOf('{', offset);
+    const lastClose = query.lastIndexOf('}', offset);
+    return lastOpen > lastClose;
+  }
+
+  function addTagsToBarePromSelectors(query, tags) {
+    return query.replace(/\b([a-zA-Z_:][a-zA-Z0-9_:]*)\b(\s*(?:\[[^\]]+\])?)/g, (full, metricName, suffix, offset, whole) => {
+      if (isPromKeywordOrFunction(metricName)) return full;
+      if (isInsidePromLabelList(whole, offset)) return full;
+      if (isInsidePromString(whole, offset)) return full;
+      if (isInsidePromSelectorBraces(whole, offset)) return full;
+
+      const prev = whole.slice(Math.max(0, offset - 2), offset);
+      const nextChar = whole.slice(offset + metricName.length).trimStart()[0] || '';
+      if (prev.includes('"') || prev.includes("'")) return full;
+      if (nextChar === '(' || nextChar === '{' || nextChar === '=' || nextChar === '"' || nextChar === "'") return full;
+      if (whole[offset - 1] === '.' || whole[offset + metricName.length] === '.') return full;
+
+      const additions = getAlertTagMatchersForSelector(tags, whole, offset);
+      if (!additions.length) return full;
+
+      return `${metricName}{${additions.join(', ')}}${suffix || ''}`;
+    });
+  }
+
+  function applyAlertTagsToPromQuery(query, rawTags, alertKey = '') {
+    const tags = parseAlertTags(rawTags, alertKey);
+    if (!query || !tags.length) return query;
+
+    const withExistingSelectors = query.replace(/([a-zA-Z_:][a-zA-Z0-9_:]*)\s*\{([^{}]*)\}/g, (full, metricName, matchers, offset) => {
+      if (!metricName || /^(by|without|on|ignoring|group_left|group_right)$/.test(metricName)) {
+        return full;
+      }
+
+      const overridden = applyAlertTagMatcherOverrides(matchers, tags, query, offset);
+      const additions = getAlertTagMatchersForSelector(
+        tags.filter((tag) => !overridden.replacedLabels.has(tag.name)),
+        query,
+        offset,
+        overridden.matchers
+      );
+
+      if (!additions.length && overridden.matchers === matchers) return full;
+
+      const trimmedMatchers = overridden.matchers.trim();
+      const nextMatchers = [
+        trimmedMatchers,
+        additions.join(', ')
+      ].filter(Boolean).join(', ');
+
+      return `${metricName}{${nextMatchers}}`;
+    });
+
+    return addTagsToBarePromSelectors(withExistingSelectors, tags);
+  }
+
+  function getGrafanaQueryForPanel(panel) {
+    const heading = getChildHeading(panel);
+    if (!heading) return '';
+
+    const panelId = getPanelIdFromHeading(heading);
+    if (panelId && grafanaQueryById.has(panelId)) {
+      return grafanaQueryById.get(panelId) || '';
+    }
+
+    const groupPanel = findParentGroupPanelForChild(panel);
+    const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
+    return childKey ? (grafanaQueryByKey.get(childKey) || '') : '';
+  }
+
+  function saveGrafanaPendingQuery(query) {
+    const payload = {
+      query,
+      createdAt: Date.now()
+    };
+
+    return new Promise((resolve) => {
+      try {
+        if (chrome?.storage?.local?.set) {
+          chrome.storage.local.set({ [GRAFANA_QUERY_STORAGE_KEY]: payload }, () => resolve(true));
+          return;
+        }
+      } catch (_) {}
+
+      try {
+        window.localStorage.setItem(GRAFANA_QUERY_STORAGE_KEY, JSON.stringify(payload));
+        resolve(true);
+      } catch (_) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function openGrafanaPanelWithQuery(query, button) {
+    if (!query) {
+      flashButtonState(button, 'no query', false);
+      return;
+    }
+
+    const saved = await saveGrafanaPendingQuery(query);
+    if (!saved) {
+      flashButtonState(button, 'storage error', false);
+      return;
+    }
+
+    window.open(extensionConfig.grafanaPanelUrl, '_blank', 'noopener');
+  }
+
+  function ensureGrafanaQueryButton(panel) {
+    if (!getChildSubjectNode(panel)) return;
+
+    const subjectNode = getChildSubjectNode(panel);
+    if (!subjectNode || subjectNode.parentElement?.querySelector(`.${GRAFANA_QUERY_BUTTON_CLASS}`)) return;
+
+    const query = getGrafanaQueryForPanel(panel);
+    if (!query) return;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = GRAFANA_QUERY_BUTTON_CLASS;
+    btn.textContent = 'Grafana';
+    btn.title = 'Open Grafana panel with this alert query';
+    btn.setAttribute('unselectable', 'on');
+
+    btn.addEventListener('click', async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const currentQuery = getGrafanaQueryForPanel(panel);
+      await openGrafanaPanelWithQuery(currentQuery, btn);
+    });
+
+    const copyButton = subjectNode.parentElement?.querySelector(`.${COPY_BUTTON_CLASS}`);
+    if (copyButton) {
+      copyButton.insertAdjacentElement('afterend', btn);
+    } else {
+      subjectNode.insertAdjacentElement('afterend', btn);
+    }
+  }
+
   function ensureCopyButton(panel) {
     const subjectNode = getGroupSubjectNode(panel) || getChildSubjectNode(panel);
     if (!subjectNode) return;
@@ -539,6 +1300,7 @@
     getAcknowledgedPanels().forEach((panel) => {
       ensureCopyButton(panel);
       ensureCopyAllButton(panel);
+      ensureGrafanaQueryButton(panel);
     });
 
     getGroupPanels().forEach((panel) => {
@@ -546,7 +1308,10 @@
       ensureCopyAllButton(panel);
     });
 
-    getChildAlertPanels().forEach((panel) => ensureCopyButton(panel));
+    getChildAlertPanels().forEach((panel) => {
+      ensureCopyButton(panel);
+      ensureGrafanaQueryButton(panel);
+    });
   }
 
   function getPanelHeading(panel) {
@@ -1720,6 +2485,46 @@
     return buildGroupMarkerKey(groupSubject, childKeys);
   }
 
+  function getAlertGroupsFromPayload(payload) {
+    const groups = payload?.Groups;
+    if (!groups || typeof groups !== 'object') return [];
+
+    const result = [];
+    Object.keys(groups).forEach((name) => {
+      const list = groups[name];
+      if (Array.isArray(list)) result.push(...list);
+    });
+    return result;
+  }
+
+  function rebuildGrafanaQueryIndex(payload) {
+    grafanaQueryById.clear();
+    grafanaQueryByKey.clear();
+
+    for (const group of getAlertGroupsFromPayload(payload)) {
+      const children = sharedUtils?.normalizeNeedAckChildren
+        ? sharedUtils.normalizeNeedAckChildren(group?.Children)
+        : (Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []));
+
+      for (const child of children) {
+        const expr = child?.State?.Expr || child?.Expr || '';
+        const rawQuery = extractPromrasQuery(expr);
+        const query = applyAlertTagsToPromQuery(
+          rawQuery,
+          child?.State?.Tags || child?.Tags || '',
+          child?.State?.AlertKey || child?.AlertKey || ''
+        );
+        if (!query) continue;
+
+        const childId = child?.State?.Id != null ? String(child.State.Id) : null;
+        const childKey = buildChildMarkerKeyFromData(child, group);
+
+        if (childId) grafanaQueryById.set(childId, query);
+        if (childKey) grafanaQueryByKey.set(childKey, query);
+      }
+    }
+  }
+
   function buildGroupMarkerKeyFromDom(groupPanel) {
     const groupSubject = getGroupSubjectFromPanel(groupPanel) || '';
     const childKeys = getGroupChildPanels(groupPanel)
@@ -1767,6 +2572,7 @@
     for (const [key, value] of nextIndex.groupHasAnyNoteByKey) groupHasAnyNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasOldNoNoteBySubject) groupHasOldNoNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteBySubject) groupHasAnyNoteBySubject.set(key, value);
+    rebuildGrafanaQueryIndex(payload);
   }
 
   function ensureStateIcon(title, type) {
@@ -2145,6 +2951,13 @@
   }
 
   function init() {
+    if (isGrafanaPanelPage()) {
+      applyPendingGrafanaQuery();
+      return;
+    }
+
+    if (!isConfiguredBosunHost()) return;
+
     restoreDiagnosticsLogFromStorage();
     injectStyles();
     installSelectionGuard();
