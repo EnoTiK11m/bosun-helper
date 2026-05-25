@@ -6,6 +6,7 @@
       hiddenClass,
       copyButtonClass,
       copyAllButtonClass,
+      grafanaQueryButtonClass,
       noSelectClass,
       silencedBadgeClass,
       oldNoNoteIconClass,
@@ -38,7 +39,7 @@
     
       .${hiddenClass} { display: none !important; }
 
-      .${copyButtonClass}, .${copyAllButtonClass} {
+      .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} {
         margin-left: 8px;
         padding: 1px 6px;
         border: 1px solid rgba(194, 180, 180, 0.85);
@@ -53,12 +54,16 @@
         user-select: none;
       }
       .${copyAllButtonClass} { margin-right: 8px; float: right; }
-      .${copyButtonClass}:hover, .${copyAllButtonClass}:hover { background: rgba(255,255,255,0.16); }
-      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"] { opacity: 0.85; }
+      .${grafanaQueryButtonClass} {
+        border-color: rgba(229, 132, 33, 0.85);
+        color: #d96c0b;
+      }
+      .${copyButtonClass}:hover, .${copyAllButtonClass}:hover, .${grafanaQueryButtonClass}:hover { background: rgba(255,255,255,0.16); }
+      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"], .${grafanaQueryButtonClass}[data-copied="true"] { opacity: 0.85; }
 
       .${noSelectClass} { user-select: none; }
-      .${noSelectClass}::selection, .${copyButtonClass}::selection, .${copyAllButtonClass}::selection { background: transparent; }
-      .${noSelectClass}::-moz-selection, .${copyButtonClass}::-moz-selection, .${copyAllButtonClass}::-moz-selection { background: transparent; }
+      .${noSelectClass}::selection, .${copyButtonClass}::selection, .${copyAllButtonClass}::selection, .${grafanaQueryButtonClass}::selection { background: transparent; }
+      .${noSelectClass}::-moz-selection, .${copyButtonClass}::-moz-selection, .${copyAllButtonClass}::-moz-selection, .${grafanaQueryButtonClass}::-moz-selection { background: transparent; }
 
       .${silencedBadgeClass} {
         display: inline-block;

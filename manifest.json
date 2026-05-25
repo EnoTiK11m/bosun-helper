@@ -8,15 +8,17 @@
     {
       "resources": [
         "bosun_notification_alert_chime.wav",
-        "bosun_notification_soft_chime.wav"
+        "bosun_notification_soft_chime.wav",
+        "grafana-page.js"
       ],
-      "matches": []
+      "matches": ["<all_urls>"]
     }
   ],
   "content_scripts": [
     {
-      "matches": [],
+      "matches": ["<all_urls>"],
       "js": [
+        "config.local.js",
         "shared-utils.js",
         "diagnostics.js",
         "sound.js",
