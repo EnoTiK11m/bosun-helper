@@ -81,6 +81,7 @@ context.window.navigator = context.navigator;
 context.window.requestAnimationFrame = context.requestAnimationFrame;
 
 for (const file of [
+  'config.js',
   'shared-utils.js',
   'diagnostics.js',
   'sound.js',

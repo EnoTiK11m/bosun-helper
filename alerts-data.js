@@ -28,7 +28,8 @@
     function rebuildAlertDataIndex(payload, helpers) {
       const {
         buildChildMarkerKeyFromData,
-        buildGroupMarkerKeyFromData
+        buildGroupMarkerKeyFromData,
+        normalizeNeedAckChildren
       } = helpers;
 
       const nextIndex = {
@@ -49,7 +50,9 @@
         let groupHasOldNoNote = false;
         let groupHasAnyNote = false;
 
-        const children = Array.isArray(group?.Children) ? group.Children : [];
+        const children = typeof normalizeNeedAckChildren === 'function'
+          ? normalizeNeedAckChildren(group?.Children)
+          : (Array.isArray(group?.Children) ? group.Children : []);
         for (const child of children) {
           const childId = child?.State?.Id != null ? String(child.State.Id) : null;
           const childKey = buildChildMarkerKeyFromData(child, group);
