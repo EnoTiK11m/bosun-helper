@@ -1173,7 +1173,22 @@
     return new Promise((resolve) => {
       try {
         if (chrome?.storage?.local?.set) {
-          chrome.storage.local.set({ [GRAFANA_QUERY_STORAGE_KEY]: payload }, () => resolve(true));
+          chrome.storage.local.set({ [GRAFANA_QUERY_STORAGE_KEY]: payload }, () => {
+            const err = getChromeStorageLastError();
+            if (!err) {
+              resolve(true);
+              return;
+            }
+
+            console.warn('[Bosun Helper] Failed to save Grafana pending query:', err.message || err);
+            reportDiagnostics('grafana-query-save-failed', err.message || 'unknown-error');
+            try {
+              window.localStorage.setItem(GRAFANA_QUERY_STORAGE_KEY, JSON.stringify(payload));
+              resolve(true);
+            } catch (_) {
+              resolve(false);
+            }
+          });
           return;
         }
       } catch (_) {}
@@ -2478,7 +2493,9 @@
 
   function buildGroupMarkerKeyFromData(group) {
     const groupSubject = typeof group?.Subject === 'string' ? group.Subject : '';
-    const children = Array.isArray(group?.Children) ? group.Children : [];
+    const children = sharedUtils?.normalizeNeedAckChildren
+      ? sharedUtils.normalizeNeedAckChildren(group?.Children)
+      : (Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []));
     const childKeys = children
       .map((child) => buildChildMarkerKeyFromData(child, group))
       .filter((key) => typeof key === 'string' && key);
@@ -2545,7 +2562,14 @@
   function rebuildAlertDataIndex(payload) {
     const nextIndex = alertsDataApi?.rebuildAlertDataIndex?.(payload, {
       buildChildMarkerKeyFromData,
-      buildGroupMarkerKeyFromData
+      buildGroupMarkerKeyFromData,
+      normalizeNeedAckChildren: (raw) => {
+        if (sharedUtils?.normalizeNeedAckChildren) {
+          return sharedUtils.normalizeNeedAckChildren(raw);
+        }
+        if (raw == null) return [];
+        return Array.isArray(raw) ? raw : [raw];
+      }
     }) || {
       childOldNoNoteById: new Map(),
       childOldNoNoteByKey: new Map(),

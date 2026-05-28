@@ -1,35 +1,30 @@
 # Bosun Helper
 
-Chrome/Chromium-расширение для дашборда Bosun. Помогает дежурному быстрее разбирать алерты: скрывает лишний шум, подсвечивает состояние алертов, упрощает копирование, обновляет страницу при простое и подает звук при появлении новых событий.
+Chrome/Chromium-расширение для дашборда Bosun. Оно помогает дежурному быстрее разбирать алерты: уменьшает визуальный шум, подсвечивает важные состояния, упрощает копирование и открытие связанных запросов в Grafana.
 
 Расширение работает только в браузере и не меняет данные на сервере Bosun.
 
 ## Что умеет
 
-- скрывает silenced alerts только в секции **Acknowledged**;
+- скрывает silenced alerts в секции **Acknowledged**;
 - оставляет silenced alerts видимыми в **Needs Acknowledgement**;
-- добавляет метку **Silenced** рядом с muted-алертами;
-- подсвечивает алерты и группы в **Needs Acknowledgement** по наличию Note;
-- добавляет кнопки **Copy** и **Copy all**;
-- делает выделение текста чище, убирая служебные элементы из selection;
-- дополнительно нормализует копирование выделенных alert-заголовков, чтобы в буфер не попадали лишние ведущие пробелы;
-- автоматически обновляет главную страницу Bosun при простое;
+- добавляет заметную метку **Silenced** к muted-алертам;
+- подсвечивает алерты и группы, где есть Note или где Note пока нет;
+- добавляет кнопки **Copy** и **Copy all** для быстрого копирования текста алертов;
+- очищает копируемое выделение от служебных элементов интерфейса;
+- автоматически обновляет главную страницу Bosun после простоя;
 - проигрывает звук при появлении новых Needs Ack алертов;
-- снимает чекбокс `Notify` на странице `/action`.
-
-## Последние изменения
-
-- в верхний тулбар добавлен компактный статус-индикатор для ошибок синхронизации и проблем с `chrome.storage.local`;
-- поток обновления UI и `MutationObserver` стал более экономным и меньше реагирует на нерелевантные DOM-мутации;
-- ошибки `sessionStorage` и `localStorage` больше не проглатываются молча и попадают в консоль/diagnostics;
-- `smoke-test.js` теперь дополнительно проверяет `parseNeedAckStatusToBucket()` и `needAckStableKey()`.
+- добавляет быстрый переход в Grafana с запросом из алерта;
+- открывает Grafana с автообновлением панели раз в 30 секунд;
+- снимает checkbox `Notify` на странице `/action`.
 
 ## Поддерживаемые адреса
 
 - `https://bosun.example.com/*`
 - `https://bosun-test.example.com/*`
+- `https://grafana.example.com/*`
 
-Если у вас другой Bosun-инстанс, замените адреса в `manifest.json` под свое окружение перед локальной установкой.
+Основные адреса задаются в `config.js`. Локальные настройки можно держать в `config.local.js`, но он не используется манифестом по умолчанию и не хранится в git.
 
 ## Установка
 
@@ -40,76 +35,3 @@ Chrome/Chromium-расширение для дашборда Bosun. Помога
 5. Обновите страницу Bosun.
 
 После изменения файлов расширения нажмите **Reload** у расширения в `chrome://extensions/` и обновите страницу Bosun.
-
-## Проверка
-
-Быстрая локальная проверка:
-
-```bash
-node smoke-test.js
-```
-
-Проверка синтаксиса:
-
-```bash
-node --check shared-utils.js
-node --check diagnostics.js
-node --check sound.js
-node --check alerts-data.js
-node --check needack-baseline.js
-node --check needack-severity.js
-node --check page-utils.js
-node --check styles.js
-node --check activity.js
-node --check content.js
-node --check smoke-test.js
-node -e "JSON.parse(require('fs').readFileSync('manifest.json', 'utf8')); console.log('manifest json ok')"
-```
-
-## Структура
-
-```text
-manifest.json                     # Manifest V3, permissions, content scripts
-content.js                        # основная логика расширения
-shared-utils.js                   # общие helpers
-diagnostics.js                    # внутренний диагностический лог
-sound.js                          # звуковые уведомления
-alerts-data.js                    # загрузка и разбор /api/alerts
-needack-baseline.js               # baseline для новых Needs Ack алертов
-needack-severity.js               # severity и стабильные ключи алертов
-page-utils.js                     # helpers для страниц Bosun
-styles.js                         # CSS расширения
-activity.js                       # активность пользователя и автообновление
-smoke-test.js                     # локальная smoke-проверка
-bosun_notification_alert_chime.wav
-bosun_notification_soft_chime.wav
-```
-
-## Важные настройки
-
-В `content.js`:
-
-```js
-const DATA_REFRESH_MS = 6000;
-const AUTO_REFRESH_DEFAULT_IDLE_SECONDS = 60;
-const AUTO_REFRESH_MIN_IDLE_SECONDS = 10;
-const AUTO_REFRESH_MAX_IDLE_SECONDS = 3600;
-```
-
-В `alerts-data.js`:
-
-```js
-const DEFAULT_REQUEST_TIMEOUT_MS = 4500;
-const DEFAULT_RETRY_DELAY_MS = 350;
-const DEFAULT_RETRY_ATTEMPTS = 2;
-```
-
-## Production notes
-
-- `/api/alerts` вызывается только на главной странице Bosun;
-- сетевые запросы имеют timeout и короткий retry;
-- ошибки внешнего API не ломают интерфейс;
-- ошибки `chrome.storage.local` логируются;
-- диагностический лог рендерит данные безопасно через `textContent`;
-- расширение не использует внешние скрипты и не делает запросы на сторонние домены;
-- секреты, токены и пароли в проекте не хранятся.

@@ -11,14 +11,22 @@
         "bosun_notification_soft_chime.wav",
         "grafana-page.js"
       ],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "https://bosun.example.com/*",
+        "https://bosun-test.example.com/*",
+        "https://grafana.example.com/*"
+      ]
     }
   ],
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "https://bosun.example.com/*",
+        "https://bosun-test.example.com/*",
+        "https://grafana.example.com/*"
+      ],
       "js": [
-        "config.local.js",
+        "config.js",
         "shared-utils.js",
         "diagnostics.js",
         "sound.js",
