@@ -5,7 +5,7 @@
     const { oldNoNoteMinutes } = options;
     const DEFAULT_REQUEST_TIMEOUT_MS = 4500;
     const DEFAULT_RETRY_DELAY_MS = 350;
-    const DEFAULT_RETRY_ATTEMPTS = 2;
+    const DEFAULT_RETRY_ATTEMPTS = 3;
 
     function isOlderThanThreshold(agoValue) {
       if (!agoValue) return false;
@@ -192,7 +192,23 @@
     }
 
     function createTimeoutError(source, timeoutMs) {
-      return new Error(`${source} timed out after ${timeoutMs}ms`);
+      const error = new Error(`${source} timed out after ${timeoutMs}ms`);
+      error.code = 'ETIMEDOUT';
+      return error;
+    }
+
+    function createHttpError(status) {
+      const error = new Error(`HTTP ${status}`);
+      error.status = Number(status);
+      return error;
+    }
+
+    function isRetryableError(error) {
+      const status = Number(error?.status || 0);
+      if (status) return status === 408 || status === 429 || status >= 500;
+      return error?.code === 'ETIMEDOUT' ||
+        error?.name === 'TypeError' ||
+        /network|failed to fetch|load failed/i.test(String(error?.message || ''));
     }
 
     async function fetchAlertsDataViaFetch(options = {}) {
@@ -216,7 +232,7 @@
         });
 
         if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
+          throw createHttpError(resp.status);
         }
 
         return await resp.json();
@@ -243,7 +259,7 @@
 
         xhr.onload = function () {
           if (xhr.status < 200 || xhr.status >= 300) {
-            reject(new Error(`HTTP ${xhr.status}`));
+            reject(createHttpError(xhr.status));
             return;
           }
 
@@ -280,18 +296,19 @@
       let lastError = null;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
-          return await fetchAlertsDataViaFetch({ timeoutMs });
-        } catch (fetchErr) {
-          lastError = fetchErr;
-          try {
-            return await fetchAlertsDataViaXHR({ timeoutMs });
-          } catch (xhrErr) {
-            lastError = xhrErr;
+          if (typeof fetch === 'function') {
+            return await fetchAlertsDataViaFetch({ timeoutMs });
           }
+          return await fetchAlertsDataViaXHR({ timeoutMs });
+        } catch (requestError) {
+          lastError = requestError;
+          if (!isRetryableError(requestError)) throw requestError;
         }
 
         if (attempt < attempts && retryDelayMs > 0) {
-          await delay(retryDelayMs);
+          const exponentialDelay = retryDelayMs * (2 ** (attempt - 1));
+          const jitter = Math.round(exponentialDelay * Math.random() * 0.25);
+          await delay(exponentialDelay + jitter);
         }
       }
 
@@ -305,6 +322,7 @@
       rebuildAlertDataIndex,
       fetchAlertsDataViaFetch,
       fetchAlertsDataViaXHR,
+      isRetryableError,
       fetchAlertsDataWithRetry
     };
   }

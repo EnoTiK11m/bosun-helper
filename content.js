@@ -81,13 +81,14 @@
   const HAS_NOTE_ICON_CLASS = 'bosun-has-note-icon';
 
   const DATA_REFRESH_MS = 6000;
+  const DATA_REFRESH_HIDDEN_MS = 30000;
   const DATA_REFRESH_DEBOUNCE_MS = 250;
   const STATUS_MESSAGE_TTL_MS = 8000;
   const OLD_NO_NOTE_MINUTES = 0
   const AUTO_REFRESH_DEFAULT_IDLE_SECONDS = 60;
   const AUTO_REFRESH_MIN_IDLE_SECONDS = 10;
   const AUTO_REFRESH_MAX_IDLE_SECONDS = 3600;
-  const AUTO_REFRESH_FORCE_REENABLE_MS = 10 * 60 * 1000;
+  const AUTO_REFRESH_FORCE_REENABLE_MS = 0;
 
   let showSilenced = false;
   let refreshTimer = null;
@@ -98,10 +99,9 @@
   let dataRefreshTimer = null;
   let dataRefreshQueued = false;
   let dataRefreshDebounceTimer = null;
+  let dataVisibilityTrackingInstalled = false;
   let autoRefreshEnabled = true;
   let autoRefreshIdleSeconds = AUTO_REFRESH_DEFAULT_IDLE_SECONDS;
-  let autoRefreshTimer = null;
-  let autoRefreshReEnableTimer = null;
   let lastUserActivityTs = Date.now();
   let lastKnownUrl = window.location.href;
   let topBarMountObserver = null;
@@ -1632,7 +1632,11 @@
   }
 
   function refreshSilencedBadges() {
-    document.querySelectorAll('.panel').forEach((panel) => {
+    const roots = [getNeedsAckRoot(), getAcknowledgedRoot()].filter(Boolean);
+    const panels = uniqueNodes(
+      roots.flatMap((root) => Array.from(root.querySelectorAll('.panel')))
+    );
+    panels.forEach((panel) => {
       if (isSilencedPanel(panel)) {
         ensureSilencedBadge(panel);
       } else {
@@ -2092,6 +2096,52 @@
     }
   }
 
+  function installStorageChangeTracking() {
+    const onChanged = globalThis.chrome?.storage?.onChanged;
+    if (!onChanged?.addListener) return;
+
+    onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !changes || typeof changes !== 'object') return;
+
+      if (STORAGE_KEY in changes) {
+        showSilenced = Boolean(changes[STORAGE_KEY].newValue);
+        applyVisibility();
+      }
+      if (AUTO_REFRESH_ENABLED_KEY in changes) {
+        autoRefreshEnabled = changes[AUTO_REFRESH_ENABLED_KEY].newValue !== false;
+        if (autoRefreshEnabled) clearAutoRefreshReEnableTimer();
+        updateAutoRefreshControls();
+      }
+      if (AUTO_REFRESH_IDLE_SECONDS_KEY in changes) {
+        autoRefreshIdleSeconds = normalizeAutoRefreshIdleSeconds(
+          changes[AUTO_REFRESH_IDLE_SECONDS_KEY].newValue
+        );
+        updateAutoRefreshControls();
+      }
+      if (USER_COMMENT_FILTER_ENABLED_KEY in changes) {
+        userCommentFilterEnabled = Boolean(changes[USER_COMMENT_FILTER_ENABLED_KEY].newValue);
+        applyUserCommentFilter();
+        updateUserCommentFilterControl();
+      }
+      if (ACKNOWLEDGED_COLLAPSE_ENABLED_KEY in changes) {
+        acknowledgedCollapseEnabled = Boolean(
+          changes[ACKNOWLEDGED_COLLAPSE_ENABLED_KEY].newValue
+        );
+        applyAcknowledgedCollapse();
+        updateAcknowledgedCollapseControl();
+      }
+      if (SOUND_ALERTS_ENABLED_KEY in changes) {
+        soundAlertsEnabled = changes[SOUND_ALERTS_ENABLED_KEY].newValue !== false;
+        resetNeedAckSoundBaseline();
+        updateSoundAlertsControl();
+      }
+      if (DIAGNOSTICS_ENABLED_KEY in changes) {
+        diagnosticsEnabled = Boolean(changes[DIAGNOSTICS_ENABLED_KEY].newValue);
+        updateDiagnosticsControl();
+      }
+    });
+  }
+
   function updateToggleText() {
     const btn = document.getElementById(TOGGLE_ID);
     const counter = document.getElementById(TOGGLE_COUNTER_ID);
@@ -2180,7 +2230,7 @@
 
     if (!autoRefreshEnabled) {
       countdown.textContent = 'off';
-      countdown.title = 'Отключить автообновление';
+      countdown.title = 'Включить автообновление';
       return;
     }
 
@@ -2213,30 +2263,11 @@
   }
 
   function clearAutoRefreshReEnableTimer() {
-    if (activityApi?.clearAutoRefreshReEnableTimer) {
-      activityApi.clearAutoRefreshReEnableTimer();
-      return;
-    }
-    if (!autoRefreshReEnableTimer) return;
-    clearTimeout(autoRefreshReEnableTimer);
-    autoRefreshReEnableTimer = null;
+    activityApi?.clearAutoRefreshReEnableTimer?.();
   }
 
   function scheduleAutoRefreshReEnable() {
-    if (activityApi?.scheduleAutoRefreshReEnable) {
-      activityApi.scheduleAutoRefreshReEnable();
-      return;
-    }
-    clearAutoRefreshReEnableTimer();
-    autoRefreshReEnableTimer = setTimeout(() => {
-      autoRefreshReEnableTimer = null;
-      if (autoRefreshEnabled) return;
-
-      autoRefreshEnabled = true;
-      markUserActivity();
-      saveAutoRefreshState();
-      updateAutoRefreshControls();
-    }, AUTO_REFRESH_FORCE_REENABLE_MS);
+    activityApi?.scheduleAutoRefreshReEnable?.();
   }
 
   function handleAutoRefreshToggleChange(e) {
@@ -2250,8 +2281,6 @@
       return;
     }
     autoRefreshEnabled = nextEnabled;
-    if (autoRefreshEnabled) clearAutoRefreshReEnableTimer();
-    else scheduleAutoRefreshReEnable();
     markUserActivity();
     saveAutoRefreshState();
     updateAutoRefreshControls();
@@ -2284,10 +2313,7 @@
       activityApi.handleCountdownClick();
       return;
     }
-    if (!autoRefreshEnabled) return;
-
-    autoRefreshEnabled = false;
-    scheduleAutoRefreshReEnable();
+    autoRefreshEnabled = !autoRefreshEnabled;
     markUserActivity();
     saveAutoRefreshState();
     updateAutoRefreshControls();
@@ -2569,35 +2595,12 @@
     updateToolbarStatus();
   }
 
-  function maybeAutoRefreshPage() {
-    if (activityApi?.startAutoRefreshLoop) return;
-    if (isActionPage()) return;
-    if (!autoRefreshEnabled || !isDashboardHome()) return;
-    if (Date.now() - lastUserActivityTs < autoRefreshIdleSeconds * 1000) return;
-
-    window.location.reload();
-  }
-
   function startAutoRefreshLoop() {
     if (activityApi?.startAutoRefreshLoop) {
       activityApi.startAutoRefreshLoop(updateAutoRefreshCountdown);
       return;
     }
-
-    if (autoRefreshTimer) return;
-
-    autoRefreshTimer = setInterval(() => {
-      const currentUrl = window.location.href;
-      if (currentUrl !== lastKnownUrl) {
-        lastKnownUrl = currentUrl;
-        markUserActivity();
-        resetNeedAckSoundBaseline();
-        handleRouteChange();
-      }
-
-      updateAutoRefreshCountdown();
-      maybeAutoRefreshPage();
-    }, 1000);
+    console.warn('[Bosun plugin] Activity module unavailable; auto-refresh is disabled.');
   }
 
   function installUserActivityTracking() {
@@ -2605,10 +2608,7 @@
       activityApi.installUserActivityTracking();
       return;
     }
-    const activityEvents = ['click', 'keydown'];
-    activityEvents.forEach((eventName) => {
-      window.addEventListener(eventName, markUserActivity, { passive: true, capture: true });
-    });
+    console.warn('[Bosun plugin] Activity module unavailable; activity tracking is disabled.');
   }
 
   function findMainContentAnchor() {
@@ -2916,9 +2916,16 @@
 
   function findParentGroupPanelForChild(childPanel) {
     if (!childPanel) return null;
-    const groups = getGroupPanels();
-    for (const groupPanel of groups) {
-      if (groupPanel.contains(childPanel)) return groupPanel;
+
+    let ancestor = childPanel.parentElement;
+    while (ancestor) {
+      if (
+        ancestor.classList?.contains('panel') &&
+        getPanelHeading(ancestor)?.querySelector('[ng-bind="group.Subject"]')
+      ) {
+        return ancestor;
+      }
+      ancestor = ancestor.parentElement;
     }
     return null;
   }
@@ -3249,17 +3256,47 @@
   function startDataRefreshLoop() {
     if (dataRefreshTimer) return;
 
-    dataRefreshTimer = setInterval(() => {
-      refreshAlertsData();
-    }, DATA_REFRESH_MS);
+    const scheduleNext = () => {
+      const delayMs = document.visibilityState === 'hidden' || !isDashboardEnhancementsPage()
+        ? DATA_REFRESH_HIDDEN_MS
+        : DATA_REFRESH_MS;
+      dataRefreshTimer = setTimeout(async () => {
+        dataRefreshTimer = null;
+        await refreshAlertsData();
+        scheduleNext();
+      }, delayMs);
+    };
+
+    scheduleNext();
+
+    if (!dataVisibilityTrackingInstalled) {
+      dataVisibilityTrackingInstalled = true;
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && isDashboardEnhancementsPage()) {
+          scheduleAlertsDataRefresh();
+        }
+      }, { passive: true });
+    }
   }
 
   function startObserver() {
     if (observerStarted || !document.body) return;
     observerStarted = true;
 
-    function isNeedsAckNode(node, needsAckRoot) {
+    function isExtensionOwnedNode(node) {
       if (!node || node.nodeType !== 1) return false;
+      return Boolean(
+        node.id === TOP_BAR_ID ||
+        node.closest?.(`#${TOP_BAR_ID}`) ||
+        node.matches?.(
+          `.${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${SILENCED_BADGE_CLASS}, ` +
+          `.${COPY_BUTTON_CLASS}, .${COPY_ALL_BUTTON_CLASS}, .${GRAFANA_QUERY_BUTTON_CLASS}`
+        )
+      );
+    }
+
+    function isNeedsAckNode(node, needsAckRoot) {
+      if (!node || node.nodeType !== 1 || isExtensionOwnedNode(node)) return false;
 
       if (needsAckRoot && (node === needsAckRoot || needsAckRoot.contains(node))) {
         return true;
@@ -3315,13 +3352,24 @@
       for (const mutation of mutations) {
         const changedNodes = collectRelevantMutationNodes(mutation);
         if (!changedNodes.length) continue;
+        const changedChildren = mutation.type === 'childList'
+          ? [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])]
+              .filter((node) => node?.nodeType === 1)
+          : [];
+        const extensionOnlyChildChange =
+          changedChildren.length > 0 &&
+          changedChildren.every(isExtensionOwnedNode);
 
         for (const node of changedNodes) {
           if (!shouldRefreshUi && isUiRelevantNode(node)) {
             shouldRefreshUi = true;
           }
 
-          if (isNeedsAckNode(node, needsAckRoot)) {
+          const mutationCanChangeAlertData =
+            (mutation.type === 'childList' && !extensionOnlyChildChange) ||
+            mutation.attributeName === 'ts-ack-group' ||
+            mutation.attributeName === 'ts-ack-item';
+          if (mutationCanChangeAlertData && isNeedsAckNode(node, needsAckRoot)) {
             shouldRefreshData = true;
             break;
           }
@@ -3358,6 +3406,7 @@
     installSelectionGuard();
     installSelectionCopySanitizer();
     installUserActivityTracking();
+    installStorageChangeTracking();
     soundApi?.installAudioUnlockTracking?.();
     soundApi?.ensureAudioObjects?.();
     scheduleTopBarMount();
