@@ -3,6 +3,17 @@
 
   const APPLY_MESSAGE = 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
   const RESULT_MESSAGE = 'BOSUN_HELPER_GRAFANA_QUERY_RESULT';
+  const CHANNEL_TOKEN = document.currentScript?.dataset?.channelToken || '';
+  const INSTALL_FLAG = '__bosunHelperGrafanaBridgeInstalledV2';
+  document.currentScript?.removeAttribute?.('data-channel-token');
+
+  if (!CHANNEL_TOKEN || window[INSTALL_FLAG]) return;
+  Object.defineProperty(window, INSTALL_FLAG, {
+    value: true,
+    configurable: false,
+    enumerable: false,
+    writable: false
+  });
 
   function normalizeText(value) {
     return String(value || '').replace(/\r\n/g, '\n').trim();
@@ -90,7 +101,11 @@
   }
 
   function findCodeMirrorView() {
-    const nodes = Array.from(document.querySelectorAll('.cm-editor, .cm-content, .cm-scroller'));
+    const content = findQueryEditorContent();
+    const editorRoot = content?.closest?.('.cm-editor') || null;
+    const nodes = editorRoot
+      ? [editorRoot, ...Array.from(editorRoot.querySelectorAll('.cm-content, .cm-scroller'))]
+      : [];
 
     for (const node of nodes) {
       const keys = [];
@@ -147,8 +162,9 @@
         /[a-zA-Z_:][a-zA-Z0-9_:]*\s*\{/.test(value);
     });
 
-    if (promModels.length) return promModels[promModels.length - 1];
-    return models[models.length - 1] || null;
+    if (promModels.length === 1) return promModels[0];
+    if (models.length === 1) return models[0];
+    return null;
   }
 
   function commitMonacoTextarea() {
@@ -196,172 +212,10 @@
     };
   }
 
-  function getReactProps(node) {
-    if (!node) return null;
-
-    const keys = [];
-    try {
-      keys.push(...Object.keys(node));
-    } catch (_) {}
-    try {
-      keys.push(...Object.getOwnPropertyNames(node));
-    } catch (_) {}
-
-    for (const key of keys) {
-      if (key.startsWith('__reactProps$')) return node[key];
-    }
-
-    return null;
-  }
-
-  function getReactFiber(node) {
-    if (!node) return null;
-
-    const keys = [];
-    try {
-      keys.push(...Object.keys(node));
-    } catch (_) {}
-    try {
-      keys.push(...Object.getOwnPropertyNames(node));
-    } catch (_) {}
-
-    for (const key of keys) {
-      if (key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$')) {
-        return node[key];
-      }
-    }
-
-    return null;
-  }
-
-  function collectFiberProps(fiber, out, seen) {
-    const stack = [fiber].filter(Boolean);
-
-    while (stack.length && out.length < 250) {
-      const item = stack.pop();
-      if (!item || typeof item !== 'object' || seen.has(item)) continue;
-      seen.add(item);
-
-      if (item.memoizedProps && typeof item.memoizedProps === 'object') {
-        out.push(item.memoizedProps);
-      }
-      if (item.pendingProps && typeof item.pendingProps === 'object') {
-        out.push(item.pendingProps);
-      }
-
-      if (item.return) stack.push(item.return);
-      if (item.child) stack.push(item.child);
-      if (item.sibling) stack.push(item.sibling);
-    }
-  }
-
-  function createQueryCandidate(props, type, applyFns) {
-    return {
-      type,
-      props,
-      applyFns
-    };
-  }
-
-  function collectGrafanaQueryReactBindings() {
-    const nodes = Array.from(document.querySelectorAll('*'));
-    const propObjects = [];
-    const seenFibers = new Set();
-
-    for (const node of nodes) {
-      const props = getReactProps(node);
-      if (props && typeof props === 'object') propObjects.push(props);
-
-      collectFiberProps(getReactFiber(node), propObjects, seenFibers);
-    }
-
-    const bindings = [];
-    const seenProps = new Set();
-
-    for (const props of propObjects) {
-      if (!props || typeof props !== 'object' || seenProps.has(props)) continue;
-      seenProps.add(props);
-
-      if (props.query?.expr && typeof props.onChange === 'function') {
-        bindings.push(createQueryCandidate(props, 'query-onchange', [
-          (query) => props.onChange({ ...props.query, expr: query }),
-          (query) => props.onChange({ ...props.query, expr: query }, true)
-        ]));
-      }
-
-      if (props.query && typeof props.query === 'object' && typeof props.onChange === 'function') {
-        bindings.push(createQueryCandidate(props, 'query-object-onchange', [
-          (query) => props.onChange({ ...props.query, expr: query }),
-          (query) => props.onChange({ ...props.query, expression: query }),
-          (query) => props.onChange({ ...props.query, query })
-        ]));
-      }
-
-      if (props.data?.query?.expr && typeof props.onChange === 'function') {
-        bindings.push(createQueryCandidate(props, 'data-query-onchange', [
-          (query) => props.onChange({ ...props.data.query, expr: query })
-        ]));
-      }
-
-      if (typeof props.onChangeQuery === 'function' && props.query) {
-        bindings.push(createQueryCandidate(props, 'onchange-query', [
-          (query) => props.onChangeQuery({ ...props.query, expr: query })
-        ]));
-      }
-    }
-
-    return bindings;
-  }
-
-  async function applyQueryViaReact(query) {
-    const bindings = collectGrafanaQueryReactBindings();
-    if (!bindings.length) {
-      return { ok: false, reason: 'react-query-binding-not-found' };
-    }
-
-    const errors = [];
-
-    for (const binding of bindings) {
-      for (const applyFn of binding.applyFns) {
-        try {
-          applyFn(query);
-          await wait(250);
-
-          if (!isQueryVisible(query)) {
-            errors.push({
-              type: binding.type,
-              message: 'handler-did-not-update-visible-editor'
-            });
-            continue;
-          }
-
-          findButtonByText('Run queries')?.click();
-
-          return {
-            ok: true,
-            via: binding.type,
-            candidates: bindings.length
-          };
-        } catch (err) {
-          errors.push({
-            type: binding.type,
-            message: err?.message || String(err)
-          });
-        }
-      }
-    }
-
-    return {
-      ok: false,
-      reason: 'react-query-apply-failed',
-      candidates: bindings.length,
-      errors: errors.slice(0, 5)
-    };
-  }
-
   async function applyQueryViaFocusedEditor(query) {
     const editor = findQueryEditorContent();
     if (!editor) return { ok: false, reason: 'query-editor-not-found' };
+    const originalText = getVisibleEditorText();
 
     editor.focus();
     editor.click();
@@ -388,6 +242,13 @@
     await wait(150);
 
     if (!isQueryVisible(query)) {
+      const rollbackSelection = window.getSelection();
+      const rollbackRange = document.createRange();
+      rollbackRange.selectNodeContents(editor);
+      rollbackSelection.removeAllRanges();
+      rollbackSelection.addRange(rollbackRange);
+      document.execCommand('delete', false, null);
+      document.execCommand('insertText', false, originalText);
       return {
         ok: false,
         reason: 'query-editor-insert-failed',
@@ -400,70 +261,82 @@
   }
 
   async function applyQuery(query) {
+    const view = findCodeMirrorView();
+    if (view) {
+      const oldText = view.state.doc.toString();
+      view.dispatch({
+        changes: { from: 0, to: oldText.length, insert: query },
+        selection: { anchor: query.length },
+        scrollIntoView: true
+      });
+
+      const nextText = view.state.doc.toString();
+      if (normalizeText(nextText) === normalizeText(query)) {
+        setTimeout(() => {
+          findButtonByText('Run queries')?.click();
+        }, 150);
+        return {
+          ok: true,
+          via: 'codemirror-view',
+          oldLength: oldText.length,
+          nextLength: nextText.length
+        };
+      }
+
+      view.dispatch({
+        changes: { from: 0, to: nextText.length, insert: oldText },
+        selection: { anchor: oldText.length }
+      });
+    }
+
     const monacoResult = await applyQueryViaMonaco(query);
     if (monacoResult.ok) return monacoResult;
 
     const editorResult = await applyQueryViaFocusedEditor(query);
     if (editorResult.ok) return editorResult;
 
-    const reactResult = await applyQueryViaReact(query);
-    if (reactResult.ok) return reactResult;
-
-    const view = findCodeMirrorView();
-    if (!view) {
-      return {
-        ok: false,
-        reason: 'editor-binding-not-found',
-        monacoReason: monacoResult.reason,
-        editorReason: editorResult.reason,
-        editorVisibleText: editorResult.visibleText,
-        reactReason: reactResult.reason,
-        reactErrors: reactResult.errors
-      };
-    }
-
-    const oldText = view.state.doc.toString();
-    view.dispatch({
-      changes: { from: 0, to: oldText.length, insert: query },
-      selection: { anchor: query.length },
-      scrollIntoView: true
-    });
-
-    const nextText = view.state.doc.toString();
-    if (normalizeText(nextText) !== normalizeText(query)) {
-      return {
-        ok: false,
-        reason: 'replace-not-applied',
-        oldLength: oldText.length,
-        nextLength: nextText.length
-      };
-    }
-
-    setTimeout(() => {
-      findButtonByText('Run queries')?.click();
-    }, 150);
-
     return {
-      ok: true,
-      oldLength: oldText.length,
-      nextLength: nextText.length
+      ok: false,
+      reason: 'editor-binding-not-found',
+      monacoReason: monacoResult.reason,
+      editorReason: editorResult.reason,
+      editorVisibleText: editorResult.visibleText
     };
   }
 
   window.addEventListener('message', async (event) => {
-    if (event.source !== window || event.data?.type !== APPLY_MESSAGE) return;
+    if (
+      event.source !== window ||
+      event.origin !== window.location.origin ||
+      event.data?.type !== APPLY_MESSAGE ||
+      event.data?.channelToken !== CHANNEL_TOKEN
+    ) return;
 
     const query = typeof event.data.query === 'string' ? event.data.query : '';
-    const result = query
-      ? await applyQuery(query)
-      : { ok: false, reason: 'empty-query' };
+    let result;
+    try {
+      result = query
+        ? await applyQuery(query)
+        : { ok: false, reason: 'empty-query' };
+    } catch (err) {
+      result = {
+        ok: false,
+        reason: 'unexpected-apply-error',
+        message: err?.message || String(err)
+      };
+    }
 
     window.postMessage({
       type: RESULT_MESSAGE,
+      channelToken: CHANNEL_TOKEN,
       requestId: event.data.requestId,
       result
-    }, '*');
+    }, window.location.origin);
   });
 
-  window.postMessage({ type: RESULT_MESSAGE, result: { ok: true, ready: true } }, '*');
+  window.postMessage({
+    type: RESULT_MESSAGE,
+    channelToken: CHANNEL_TOKEN,
+    result: { ok: true, ready: true }
+  }, window.location.origin);
 })();
