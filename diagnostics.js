@@ -14,16 +14,25 @@
     const formatTimestamp = sharedUtils?.formatDiagnosticsTimestamp
       ? sharedUtils.formatDiagnosticsTimestamp
       : (date) => {
+          const yyyy = String(date.getFullYear());
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
           const hh = String(date.getHours()).padStart(2, '0');
           const mm = String(date.getMinutes()).padStart(2, '0');
           const ss = String(date.getSeconds()).padStart(2, '0');
-          return `${hh}:${mm}:${ss}`;
+          return `${yyyy}-${month}-${day} ${hh}:${mm}:${ss}`;
         };
 
     let modalOpen = false;
     let logEntries = [];
+    let saveTimer = null;
+    let previouslyFocusedElement = null;
 
     function saveLogToStorage() {
+      if (saveTimer) {
+        clearTimeout(saveTimer);
+        saveTimer = null;
+      }
       if (!window?.localStorage) return;
       try {
         const payload = JSON.stringify(logEntries.slice(-maxEntries));
@@ -31,6 +40,11 @@
       } catch (err) {
         console.warn('[Bosun plugin] Failed to save diagnostics log to localStorage:', err);
       }
+    }
+
+    function scheduleLogSave() {
+      if (saveTimer) return;
+      saveTimer = setTimeout(saveLogToStorage, 500);
     }
 
     function restoreLogFromStorage() {
@@ -81,7 +95,14 @@
       if (!modal) return;
       modalOpen = isOpen;
       modal.classList.toggle('is-open', isOpen);
-      if (isOpen) renderLogList();
+      if (isOpen) {
+        previouslyFocusedElement = document.activeElement;
+        renderLogList();
+        modal.querySelector('[data-role="close"]')?.focus?.();
+      } else {
+        previouslyFocusedElement?.focus?.();
+        previouslyFocusedElement = null;
+      }
     }
 
     function appendLog(eventName, details = '') {
@@ -93,7 +114,7 @@
       if (logEntries.length > maxEntries) {
         logEntries = logEntries.slice(-maxEntries);
       }
-      saveLogToStorage();
+      scheduleLogSave();
       if (modalOpen) renderLogList();
     }
 
@@ -142,6 +163,14 @@
         }
       });
 
+      modal.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setModalOpen(false);
+          if (typeof onVisibilityMaybeChanged === 'function') onVisibilityMaybeChanged();
+        }
+      });
+
       document.body.appendChild(modal);
       renderLogList();
       return modal;
@@ -149,6 +178,7 @@
 
     return {
       saveLogToStorage,
+      scheduleLogSave,
       restoreLogFromStorage,
       renderLogList,
       setModalOpen,

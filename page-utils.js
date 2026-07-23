@@ -3,7 +3,13 @@
 
   function createPageUtils() {
     function isActionPage() {
-      return window.location.pathname === '/action' && window.location.search.includes('type=');
+      const path = window.location.pathname.replace(/\/+$/, '') || '/';
+      if (path !== '/action') return false;
+      try {
+        return new URLSearchParams(window.location.search).has('type');
+      } catch (_) {
+        return false;
+      }
     }
 
     function isDashboardHome() {
@@ -24,7 +30,7 @@
           input.getAttribute('x-ng-model') ||
           '';
 
-        if (!/notify/i.test(model) || !input.checked) return;
+        if (!/(^|\.)notify$/i.test(model.trim()) || !input.checked) return;
 
         input.click();
 
