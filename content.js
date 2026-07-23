@@ -45,8 +45,13 @@
   const GRAFANA_QUERY_BUTTON_CLASS = 'bosun-grafana-query-btn';
   const NO_SELECT_CLASS = 'bosun-no-select';
   const SILENCED_BADGE_CLASS = 'bosun-silenced-badge';
-  const GRAFANA_QUERY_STORAGE_KEY = 'bosunGrafanaPendingQueryV1';
+  const GRAFANA_QUERY_STORAGE_PREFIX = 'bosunGrafanaPendingQueryV2:';
+  const LEGACY_GRAFANA_QUERY_STORAGE_KEY = 'bosunGrafanaPendingQueryV1';
+  const GRAFANA_REQUEST_PARAM = 'bosunHelperRequest';
   const GRAFANA_PENDING_QUERY_TTL_MS = 2 * 60 * 1000;
+  const GRAFANA_BRIDGE_MARKER_ID = 'bosun-helper-grafana-page-bridge';
+  const GRAFANA_APPLY_MESSAGE = 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
+  const GRAFANA_RESULT_MESSAGE = 'BOSUN_HELPER_GRAFANA_QUERY_RESULT';
   const DEFAULT_EXTENSION_CONFIG = {
     bosunHosts: ['bosun.example.com', 'bosun-test.example.com'],
     grafanaHost: 'grafana.example.com',
@@ -110,6 +115,8 @@
   let toolbarStatusTitle = '';
   let toolbarStatusTimer = null;
   let alertDataIndexReady = false;
+  let grafanaBridgeToken = '';
+  let grafanaBridgeInjected = false;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -298,34 +305,57 @@
     }
   }
 
-  function loadGrafanaPendingQuery() {
+  function getGrafanaRequestIdFromUrl() {
+    try {
+      return new URL(window.location.href).searchParams.get(GRAFANA_REQUEST_PARAM) || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function getGrafanaQueryStorageKey(requestId) {
+    return requestId ? `${GRAFANA_QUERY_STORAGE_PREFIX}${requestId}` : '';
+  }
+
+  function loadGrafanaPendingQuery(requestId) {
     return new Promise((resolve) => {
+      const storageKey = getGrafanaQueryStorageKey(requestId);
+      if (!storageKey) {
+        resolve(null);
+        return;
+      }
+
       try {
         if (chrome?.storage?.local?.get) {
-          chrome.storage.local.get([GRAFANA_QUERY_STORAGE_KEY], (items) => {
-            resolve(items?.[GRAFANA_QUERY_STORAGE_KEY] || null);
+          chrome.storage.local.get([storageKey], (items) => {
+            const err = getChromeStorageLastError();
+            if (err) {
+              reportDiagnostics('grafana-query-load-failed', err.message || 'unknown-error');
+              resolve(null);
+              return;
+            }
+            resolve(items?.[storageKey] || null);
           });
           return;
         }
       } catch (_) {}
-
-      try {
-        resolve(JSON.parse(window.localStorage.getItem(GRAFANA_QUERY_STORAGE_KEY) || 'null'));
-      } catch (_) {
-        resolve(null);
-      }
+      resolve(null);
     });
   }
 
-  function clearGrafanaPendingQuery() {
-    try {
-      if (chrome?.storage?.local?.remove) {
-        chrome.storage.local.remove([GRAFANA_QUERY_STORAGE_KEY]);
-      }
-    } catch (_) {}
+  function clearGrafanaPendingQuery(requestId) {
+    const storageKey = getGrafanaQueryStorageKey(requestId);
+    if (!storageKey) return;
 
     try {
-      window.localStorage.removeItem(GRAFANA_QUERY_STORAGE_KEY);
+      if (chrome?.storage?.local?.remove) {
+        chrome.storage.local.remove([storageKey], () => {
+          const err = getChromeStorageLastError();
+          if (err) {
+            reportDiagnostics('grafana-query-clear-failed', err.message || 'unknown-error');
+          }
+        });
+      }
     } catch (_) {}
   }
 
@@ -347,6 +377,7 @@
 
   async function setEditableText(el, value) {
     if (!el) return false;
+    const originalValue = getEditableText(el);
 
     el.focus?.();
     el.click?.();
@@ -373,7 +404,14 @@
     insertEditableText(el, value);
     await wait(120);
 
-    return normalizeEditorText(getEditableText(el)) === normalizeEditorText(value);
+    if (normalizeEditorText(getEditableText(el)) === normalizeEditorText(value)) {
+      return true;
+    }
+
+    clearEditableText(el);
+    insertEditableText(el, originalValue);
+    await wait(50);
+    return false;
   }
 
   function getEditableText(el) {
@@ -622,14 +660,24 @@
   }
 
   function injectGrafanaPageBridge() {
-    if (document.getElementById('bosun-helper-grafana-page-bridge')) return true;
+    if (grafanaBridgeInjected || document.getElementById(GRAFANA_BRIDGE_MARKER_ID)) {
+      grafanaBridgeInjected = true;
+      return true;
+    }
 
     try {
+      grafanaBridgeToken = globalThis.crypto?.randomUUID?.() ||
+        `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const script = document.createElement('script');
-      script.id = 'bosun-helper-grafana-page-bridge';
+      script.id = GRAFANA_BRIDGE_MARKER_ID;
+      script.dataset.channelToken = grafanaBridgeToken;
       script.src = chrome.runtime.getURL('grafana-page.js');
-      script.onload = () => script.remove();
+      script.addEventListener('error', () => {
+        grafanaBridgeInjected = false;
+        script.remove();
+      }, { once: true });
       (document.documentElement || document.head || document.body).appendChild(script);
+      grafanaBridgeInjected = true;
       return true;
     } catch (err) {
       console.warn('[Bosun Helper] Failed to inject Grafana page bridge:', err);
@@ -651,7 +699,12 @@
       }, 3000);
 
       function onMessage(event) {
-        if (event.source !== window || event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT') return;
+        if (
+          event.source !== window ||
+          event.origin !== window.location.origin ||
+          event.data?.type !== GRAFANA_RESULT_MESSAGE ||
+          event.data?.channelToken !== grafanaBridgeToken
+        ) return;
         if (event.data.requestId !== requestId) return;
 
         clearTimeout(timeoutId);
@@ -663,48 +716,61 @@
 
       setTimeout(() => {
         window.postMessage({
-          type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
+          type: GRAFANA_APPLY_MESSAGE,
+          channelToken: grafanaBridgeToken,
           requestId,
           query
-        }, '*');
+        }, window.location.origin);
       }, 200);
     });
   }
 
-  async function waitForGrafanaEditorAndApply(query, attemptsLeft = 80) {
+  async function waitForGrafanaEditorAndApply(query, requestId, deadlineAt = Date.now() + 20000) {
     const editor = findGrafanaQueryEditor();
     const bridgeApplied = await applyGrafanaQueryViaPageBridge(query);
     if (bridgeApplied) {
-      clearGrafanaPendingQuery();
+      clearGrafanaPendingQuery(requestId);
       return;
     }
 
     if (editor && await setEditableText(editor, query)) {
       setTimeout(() => {
         clickGrafanaRunQueries();
-        clearGrafanaPendingQuery();
+        clearGrafanaPendingQuery(requestId);
       }, 250);
       return;
     }
 
-    if (attemptsLeft <= 0) return;
-    setTimeout(() => waitForGrafanaEditorAndApply(query, attemptsLeft - 1), 250);
+    if (Date.now() >= deadlineAt) {
+      reportDiagnostics('grafana-query-apply-timeout', `requestId=${requestId}`);
+      return;
+    }
+    setTimeout(() => waitForGrafanaEditorAndApply(query, requestId, deadlineAt), 500);
   }
 
   async function applyPendingGrafanaQuery() {
     if (!isGrafanaPanelPage()) return;
 
-    const payload = await loadGrafanaPendingQuery();
+    const requestId = getGrafanaRequestIdFromUrl();
+    if (!requestId) return;
+    const payload = await loadGrafanaPendingQuery(requestId);
     const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
     const createdAt = Number(payload?.createdAt || 0);
 
-    if (!query) return;
-    if (!Number.isFinite(createdAt) || Date.now() - createdAt > GRAFANA_PENDING_QUERY_TTL_MS) {
-      clearGrafanaPendingQuery();
+    if (!query) {
+      reportDiagnostics('grafana-query-not-found', `requestId=${requestId}`);
+      return;
+    }
+    if (
+      !Number.isFinite(createdAt) ||
+      createdAt > Date.now() + 5000 ||
+      Date.now() - createdAt > GRAFANA_PENDING_QUERY_TTL_MS
+    ) {
+      clearGrafanaPendingQuery(requestId);
       return;
     }
 
-    waitForGrafanaEditorAndApply(query);
+    waitForGrafanaEditorAndApply(query, requestId);
   }
 
   function ensureActionTemplates() {
@@ -1193,7 +1259,45 @@
     return childKey ? (grafanaQueryByKey.get(childKey) || '') : '';
   }
 
-  function saveGrafanaPendingQuery(query) {
+  function createGrafanaRequestId() {
+    return globalThis.crypto?.randomUUID?.() ||
+      `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function buildGrafanaPanelUrl(requestId) {
+    try {
+      const url = new URL(extensionConfig.grafanaPanelUrl);
+      if (url.protocol !== 'https:' || url.hostname !== extensionConfig.grafanaHost) return '';
+      url.searchParams.set(GRAFANA_REQUEST_PARAM, requestId);
+      return url.toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function cleanupExpiredGrafanaQueries() {
+    const storage = getChromeLocalStorage();
+    if (!storage?.get || !storage?.remove) return;
+
+    storage.get(null, (items) => {
+      if (getChromeStorageLastError() || !items || typeof items !== 'object') return;
+      const now = Date.now();
+      const expiredKeys = Object.entries(items)
+        .filter(([key, value]) => {
+          if (key === LEGACY_GRAFANA_QUERY_STORAGE_KEY) return true;
+          if (!key.startsWith(GRAFANA_QUERY_STORAGE_PREFIX)) return false;
+          const createdAt = Number(value?.createdAt || 0);
+          return !Number.isFinite(createdAt) ||
+            createdAt > now + 5000 ||
+            now - createdAt > GRAFANA_PENDING_QUERY_TTL_MS;
+        })
+        .map(([key]) => key);
+      if (expiredKeys.length) storage.remove(expiredKeys);
+    });
+  }
+
+  function saveGrafanaPendingQuery(requestId, query) {
+    const storageKey = getGrafanaQueryStorageKey(requestId);
     const payload = {
       query,
       createdAt: Date.now()
@@ -1201,8 +1305,8 @@
 
     return new Promise((resolve) => {
       try {
-        if (chrome?.storage?.local?.set) {
-          chrome.storage.local.set({ [GRAFANA_QUERY_STORAGE_KEY]: payload }, () => {
+        if (storageKey && chrome?.storage?.local?.set) {
+          chrome.storage.local.set({ [storageKey]: payload }, () => {
             const err = getChromeStorageLastError();
             if (!err) {
               resolve(true);
@@ -1211,23 +1315,12 @@
 
             console.warn('[Bosun Helper] Failed to save Grafana pending query:', err.message || err);
             reportDiagnostics('grafana-query-save-failed', err.message || 'unknown-error');
-            try {
-              window.localStorage.setItem(GRAFANA_QUERY_STORAGE_KEY, JSON.stringify(payload));
-              resolve(true);
-            } catch (_) {
-              resolve(false);
-            }
+            resolve(false);
           });
           return;
         }
       } catch (_) {}
-
-      try {
-        window.localStorage.setItem(GRAFANA_QUERY_STORAGE_KEY, JSON.stringify(payload));
-        resolve(true);
-      } catch (_) {
-        resolve(false);
-      }
+      resolve(false);
     });
   }
 
@@ -1237,13 +1330,33 @@
       return;
     }
 
-    const saved = await saveGrafanaPendingQuery(query);
+    let popup = null;
+    try {
+      popup = window.open('about:blank', '_blank');
+      if (popup) popup.opener = null;
+    } catch (_) {}
+
+    const requestId = createGrafanaRequestId();
+    const saved = await saveGrafanaPendingQuery(requestId, query);
     if (!saved) {
+      popup?.close?.();
       flashButtonState(button, 'storage error', false);
       return;
     }
 
-    window.open(extensionConfig.grafanaPanelUrl, '_blank', 'noopener');
+    cleanupExpiredGrafanaQueries();
+    const targetUrl = buildGrafanaPanelUrl(requestId);
+    if (!targetUrl) {
+      clearGrafanaPendingQuery(requestId);
+      popup?.close?.();
+      flashButtonState(button, 'config error', false);
+      return;
+    }
+    if (popup) {
+      popup.location.replace(targetUrl);
+      return;
+    }
+    window.open(targetUrl, '_blank', 'noopener');
   }
 
   function ensureGrafanaQueryButton(panel) {
