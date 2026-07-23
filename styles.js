@@ -4,6 +4,8 @@
   function injectStyles(config) {
     const {
       hiddenClass,
+      userCommentFilterHiddenClass,
+      acknowledgedCollapsedClass,
       copyButtonClass,
       copyAllButtonClass,
       grafanaQueryButtonClass,
@@ -28,16 +30,7 @@
     const style = document.createElement("style");
     style.id = "bosun-silence-hider-styles";
     style.textContent = `
-      a:focus,
-      button:focus,
-      div:focus,
-      span:focus {
-        outline: none !important;
-        outline-offset: 0 !important;
-        box-shadow: none !important;
-      }
-    
-      .${hiddenClass} { display: none !important; }
+      .${hiddenClass}, .${userCommentFilterHiddenClass}, .${acknowledgedCollapsedClass} { display: none !important; }
 
       .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} {
         margin-left: 8px;
@@ -189,7 +182,14 @@
       }
       #${topBarId} .bosun-toolbar-btn:hover { background: #f7f7f7; border-color: #bdbdbd; }
       #${topBarId} .bosun-toolbar-btn:active { transform: translateY(1px); }
-      #${topBarId} .bosun-toolbar-btn:focus { outline: none; border-color: #6aa0d8; box-shadow: 0 0 0 3px rgba(80,140,220,.15); }
+      #${topBarId} .bosun-toolbar-btn:focus-visible,
+      #${topBarId} .bosun-toolbar-input:focus-visible,
+      #${autoRefreshCountdownId}:focus-visible {
+        outline: 2px solid #2f6fad;
+        outline-offset: 2px;
+        border-color: #2f6fad;
+        box-shadow: 0 0 0 3px rgba(47,111,173,.18);
+      }
       #${topBarId} .bosun-toolbar-btn-icon {
         display: inline-flex;
         align-items: center;
@@ -265,6 +265,7 @@
         line-height: 1;
         white-space: nowrap;
         cursor: pointer;
+        font-family: inherit;
       }
 
       #${topBarId} .bosun-diagnostics-group {
@@ -366,6 +367,19 @@
         word-break: break-word;
       }
       #${diagnosticsLogListId} li:nth-child(odd) { background: #fafafa; }
+
+      @media (max-width: 900px) {
+        #${topBarId} .bosun-top-controls-inner,
+        #${topBarId} .bosun-top-controls-actions {
+          align-items: flex-start;
+          flex-wrap: wrap;
+        }
+        #${topBarStatusId}.bosun-toolbar-status {
+          width: 100%;
+          max-width: none;
+          margin-left: 0;
+        }
+      }
     `;
 
     document.head.appendChild(style);

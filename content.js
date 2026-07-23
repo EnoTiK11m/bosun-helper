@@ -57,10 +57,37 @@
     grafanaHost: 'grafana.example.com',
     grafanaPanelUrl: 'https://grafana.example.com/d/example/example?orgId=1&from=now-1h&to=now&timezone=browser&editPanel=1'
   };
-  const extensionConfig = {
-    ...DEFAULT_EXTENSION_CONFIG,
-    ...(globalThis.BosunHelperLocalConfig || {})
-  };
+
+  function normalizeExtensionConfig(rawConfig) {
+    const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const normalizeHost = (value) => {
+      const host = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return /^[a-z0-9.-]+(?::\d+)?$/.test(host) ? host : '';
+    };
+    const configuredBosunHosts = Array.isArray(raw.bosunHosts)
+      ? raw.bosunHosts.map(normalizeHost).filter(Boolean)
+      : [];
+    const bosunHosts = configuredBosunHosts.length
+      ? Array.from(new Set(configuredBosunHosts))
+      : DEFAULT_EXTENSION_CONFIG.bosunHosts;
+    const grafanaHost = normalizeHost(raw.grafanaHost) || DEFAULT_EXTENSION_CONFIG.grafanaHost;
+
+    let grafanaPanelUrl = '';
+    try {
+      const candidate = new URL(String(raw.grafanaPanelUrl || ''));
+      if (candidate.protocol === 'https:' && candidate.host.toLowerCase() === grafanaHost) {
+        grafanaPanelUrl = candidate.toString();
+      }
+    } catch (_) {}
+
+    return Object.freeze({
+      bosunHosts: Object.freeze(bosunHosts),
+      grafanaHost,
+      grafanaPanelUrl
+    });
+  }
+
+  const extensionConfig = normalizeExtensionConfig(globalThis.BosunHelperLocalConfig);
 
   /**
    * Показывать ли в тулбаре блок «Диагностика» (чекбокс, кнопки «Открыть лог» / модалка журнала).
@@ -178,7 +205,10 @@
       }
   }) || null;
 
-  if (!soundApi || !needAckBaselineApi || !needAckSeverityApi || !alertsDataApi) {
+  if (
+    isConfiguredBosunHost() &&
+    (!soundApi || !needAckBaselineApi || !needAckSeverityApi || !alertsDataApi)
+  ) {
     console.warn(
       '[Bosun plugin] One or more extension modules failed to load; sound, NeedAck baseline, severity, or alerts index may be disabled.',
       {
@@ -2077,9 +2107,13 @@
           soundAlertsEnabled = typeof result[SOUND_ALERTS_ENABLED_KEY] === 'boolean'
             ? result[SOUND_ALERTS_ENABLED_KEY]
             : true;
-          diagnosticsEnabled = typeof result[DIAGNOSTICS_ENABLED_KEY] === 'boolean'
+          diagnosticsEnabled = DIAGNOSTICS_TOOLBAR_UI_ENABLED &&
+            typeof result[DIAGNOSTICS_ENABLED_KEY] === 'boolean'
             ? result[DIAGNOSTICS_ENABLED_KEY]
             : false;
+          if (!DIAGNOSTICS_TOOLBAR_UI_ENABLED && result[DIAGNOSTICS_ENABLED_KEY] === true) {
+            storage.set({ [DIAGNOSTICS_ENABLED_KEY]: false });
+          }
           if (!autoRefreshEnabled) {
             scheduleAutoRefreshReEnable();
           }
@@ -2337,13 +2371,13 @@
     setToolbarToggleButtonState(button, userCommentFilterEnabled, {
       onIcon: '!',
       offIcon: '!',
-      label: 'No notes',
+      label: 'Без комментария',
       offUsesNeutral: true
     });
     if (button) {
       button.title = userCommentFilterEnabled
-        ? 'Showing only alerts without user comments'
-        : 'Showing all Needs Ack alerts';
+        ? 'Показаны только алерты без пользовательских комментариев'
+        : 'Показаны все алерты Needs Acknowledgement';
     }
   }
 
@@ -2352,13 +2386,13 @@
     setToolbarToggleButtonState(button, acknowledgedCollapseEnabled, {
       onIcon: '-',
       offIcon: '+',
-      label: 'Ack',
+      label: acknowledgedCollapseEnabled ? 'Показать Ack' : 'Скрыть Ack',
       offUsesNeutral: true
     });
     if (button) {
       button.title = acknowledgedCollapseEnabled
-        ? 'Acknowledged section is hidden'
-        : 'Acknowledged section is visible';
+        ? 'Секция Acknowledged скрыта'
+        : 'Секция Acknowledged показана';
     }
   }
 
@@ -2464,7 +2498,7 @@
       button.className = 'bosun-toolbar-btn';
       button.innerHTML = `
         <span class="bosun-toolbar-btn-icon">!</span>
-        <span class="bosun-toolbar-btn-label">No notes</span>
+        <span class="bosun-toolbar-btn-label">Без комментария</span>
       `;
       button.addEventListener('click', handleUserCommentFilterToggle);
       wrap.appendChild(button);
@@ -2486,7 +2520,7 @@
       button.className = 'bosun-toolbar-btn';
       button.innerHTML = `
         <span class="bosun-toolbar-btn-icon">+</span>
-        <span class="bosun-toolbar-btn-label">Ack</span>
+        <span class="bosun-toolbar-btn-label">Скрыть Ack</span>
       `;
       button.addEventListener('click', handleAcknowledgedCollapseToggle);
       wrap.appendChild(button);
@@ -2567,10 +2601,12 @@
       input.addEventListener('change', handleAutoRefreshIdleChange);
       input.addEventListener('keydown', handleAutoRefreshIdleKeydown);
 
-      const countdown = document.createElement('span');
+      const countdown = document.createElement('button');
+      countdown.type = 'button';
       countdown.id = AUTO_REFRESH_COUNTDOWN_ID;
       countdown.className = 'bosun-toolbar-countdown';
       countdown.title = 'Отключить автообновление';
+      countdown.setAttribute('aria-label', 'Переключить автообновление страницы');
       countdown.addEventListener('click', handleAutoRefreshCountdownClick);
 
       group.appendChild(toggle);
@@ -2588,6 +2624,8 @@
       status = document.createElement('span');
       status.id = TOP_BAR_STATUS_ID;
       status.className = 'bosun-toolbar-status';
+      status.setAttribute('role', 'status');
+      status.setAttribute('aria-live', 'polite');
       status.hidden = true;
       actions.appendChild(status);
     }

@@ -8,12 +8,16 @@
     {
       "resources": [
         "bosun_notification_alert_chime.wav",
-        "bosun_notification_soft_chime.wav",
-        "grafana-page.js"
+        "bosun_notification_soft_chime.wav"
       ],
       "matches": [
         "https://bosun.example.com/*",
-        "https://bosun-test.example.com/*",
+        "https://bosun-test.example.com/*"
+      ]
+    },
+    {
+      "resources": ["grafana-page.js"],
+      "matches": [
         "https://grafana.example.com/*"
       ]
     }
@@ -22,8 +26,7 @@
     {
       "matches": [
         "https://bosun.example.com/*",
-        "https://bosun-test.example.com/*",
-        "https://grafana.example.com/*"
+        "https://bosun-test.example.com/*"
       ],
       "js": [
         "config.js",
@@ -37,6 +40,16 @@
         "page-utils.js",
         "styles.js",
         "activity.js",
+        "content.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "https://grafana.example.com/*"
+      ],
+      "js": [
+        "config.js",
         "content.js"
       ],
       "run_at": "document_end"
