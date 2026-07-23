@@ -174,6 +174,10 @@ assert.strictEqual(
   ]),
   false
 );
+assert.strictEqual(alertsDataApi.isRetryableError({ status: 503 }), true);
+assert.strictEqual(alertsDataApi.isRetryableError({ status: 429 }), true);
+assert.strictEqual(alertsDataApi.isRetryableError({ status: 404 }), false);
+assert.strictEqual(alertsDataApi.isRetryableError({ code: 'ETIMEDOUT' }), true);
 
 const commentIndex = alertsDataApi.rebuildAlertDataIndex({
   Groups: {

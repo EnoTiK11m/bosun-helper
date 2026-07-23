@@ -24,6 +24,7 @@
 
     let autoRefreshTimer = null;
     let autoRefreshReEnableTimer = null;
+    let lastHighFrequencyActivityAt = 0;
 
     function markUserActivity() {
       setLastUserActivityTs(Date.now());
@@ -40,7 +41,7 @@
 
       if (!getAutoRefreshEnabled()) {
         countdownElement.textContent = 'off';
-        countdownElement.title = 'Отключить автообновление';
+        countdownElement.title = 'Включить автообновление';
         return;
       }
 
@@ -57,6 +58,16 @@
     function maybeAutoRefreshPage() {
       if (!getAutoRefreshEnabled() || !pageUtils.isDashboardHome()) return;
       if (Date.now() - getLastUserActivityTs() < getAutoRefreshIdleSeconds() * 1000) return;
+      const activeElement = document.activeElement;
+      const isEditing = Boolean(activeElement?.matches?.(
+        'input, textarea, select, [contenteditable="true"], [role="textbox"]'
+      ));
+      const hasSelection = Boolean(window.getSelection?.()?.toString?.().trim());
+      if (isEditing || hasSelection) {
+        markUserActivity();
+        reportDiagnostics?.('auto-refresh-deferred', isEditing ? 'editing' : 'text-selection');
+        return;
+      }
 
       reportDiagnostics?.('auto-refresh', 'reloading page after idle timeout');
       if (typeof onIdleRefresh === 'function') onIdleRefresh();
@@ -72,6 +83,9 @@
 
     function scheduleAutoRefreshReEnable() {
       clearAutoRefreshReEnableTimer();
+      if (!Number.isFinite(autoRefreshForceReenableMs) || autoRefreshForceReenableMs <= 0) {
+        return;
+      }
       autoRefreshReEnableTimer = setTimeout(() => {
         autoRefreshReEnableTimer = null;
         if (getAutoRefreshEnabled()) return;
@@ -94,21 +108,34 @@
     }
 
     function handleCountdownClick() {
-      if (!getAutoRefreshEnabled()) return;
-      setAutoRefreshEnabled(false);
-      scheduleAutoRefreshReEnable();
+      const nextEnabled = !getAutoRefreshEnabled();
+      setAutoRefreshEnabled(nextEnabled);
+      if (nextEnabled) clearAutoRefreshReEnableTimer();
+      else scheduleAutoRefreshReEnable();
       markUserActivity();
       saveAutoRefreshState?.();
       updateAutoRefreshControls?.();
     }
 
     function installUserActivityTracking() {
+      const markHighFrequencyActivity = () => {
+        const now = Date.now();
+        if (now - lastHighFrequencyActivityAt < 500) return;
+        lastHighFrequencyActivityAt = now;
+        markUserActivity();
+      };
+
       [
-        ['click', markUserActivity],
-        ['keydown', markUserActivity]
+        ['pointerdown', markUserActivity],
+        ['keydown', markUserActivity],
+        ['touchstart', markUserActivity],
+        ['wheel', markHighFrequencyActivity],
+        ['scroll', markHighFrequencyActivity]
       ].forEach(([eventName, handler]) => {
         window.addEventListener(eventName, handler, { passive: true, capture: true });
       });
+
+      document.addEventListener('visibilitychange', markUserActivity, { passive: true });
     }
 
     function startAutoRefreshLoop(updateCountdown) {
