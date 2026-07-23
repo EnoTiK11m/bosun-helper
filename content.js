@@ -127,7 +127,7 @@
   const groupHasOldNoNoteBySubject = new Map();
   const groupHasAnyNoteBySubject = new Map();
   const groupHasAnyUserCommentBySubject = new Map();
-  const lastResolvedParentStateByKey = new Map();
+  const groupCountBySubject = new Map();
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
@@ -143,7 +143,8 @@
     alertFile: SOUND_FILE_ALERT,
     softFile: SOUND_FILE_SOFT,
     getEnabled: () => soundAlertsEnabled,
-    reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details)
+    reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
+    crossTabStorageKey: 'bosunNeedAckSoundClaimV1'
   }) || null;
   const alertsDataApi = globalThis.BosunSilenceHiderAlertsData?.createAlertsData?.({
     oldNoNoteMinutes: OLD_NO_NOTE_MINUTES
@@ -1582,6 +1583,7 @@
     } else {
       disconnectTopBarMountObserver();
       document.getElementById(TOP_BAR_ID)?.remove();
+      alertDataIndexReady = false;
     }
 
     if (!isActionPage()) {
@@ -1644,9 +1646,7 @@
       hasLastActionUserComment = childHasUserCommentByKey.get(childKey) === true;
     }
 
-    return hasLastActionUserComment ||
-      resolveChildState(panel, groupPanel) === 'note' ||
-      !!panel.querySelector(`.${HAS_NOTE_ICON_CLASS}:not(.bosun-parent-marker)`);
+    return hasLastActionUserComment;
   }
 
   function resolveGroupHasUserComment(groupPanel) {
@@ -1658,13 +1658,16 @@
       hasLastActionUserComment = groupHasAnyUserCommentByKey.get(groupKey) === true;
     }
 
-    if (!hasLastActionUserComment && groupSubject && groupHasAnyUserCommentBySubject.has(groupSubject)) {
+    if (
+      !hasLastActionUserComment &&
+      groupSubject &&
+      groupCountBySubject.get(groupSubject) === 1 &&
+      groupHasAnyUserCommentBySubject.has(groupSubject)
+    ) {
       hasLastActionUserComment = groupHasAnyUserCommentBySubject.get(groupSubject) === true;
     }
 
-    return hasLastActionUserComment ||
-      resolveGroupState(groupPanel) === 'note' ||
-      !!groupPanel.querySelector(`.${HAS_NOTE_ICON_CLASS}`);
+    return hasLastActionUserComment;
   }
 
   function shouldShowAlertByUserCommentFilter(panel, parentGroupPanel = null) {
@@ -2830,7 +2833,8 @@
       groupHasAnyUserCommentByKey: new Map(),
       groupHasOldNoNoteBySubject: new Map(),
       groupHasAnyNoteBySubject: new Map(),
-      groupHasAnyUserCommentBySubject: new Map()
+      groupHasAnyUserCommentBySubject: new Map(),
+      groupCountBySubject: new Map()
     };
     childOldNoNoteById.clear();
     childOldNoNoteByKey.clear();
@@ -2844,6 +2848,7 @@
     groupHasOldNoNoteBySubject.clear();
     groupHasAnyNoteBySubject.clear();
     groupHasAnyUserCommentBySubject.clear();
+    groupCountBySubject.clear();
     for (const [key, value] of nextIndex.childOldNoNoteById) childOldNoNoteById.set(key, value);
     for (const [key, value] of nextIndex.childOldNoNoteByKey) childOldNoNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.childHasNoteById) childHasNoteById.set(key, value);
@@ -2856,6 +2861,7 @@
     for (const [key, value] of nextIndex.groupHasOldNoNoteBySubject) groupHasOldNoNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteBySubject) groupHasAnyNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyUserCommentBySubject || []) groupHasAnyUserCommentBySubject.set(key, value);
+    for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
     alertDataIndexReady = true;
     rebuildGrafanaQueryIndex(payload);
   }
@@ -3010,31 +3016,21 @@
     const groupSubject = getGroupSubjectFromPanel(groupPanel);
 
     const domState = resolveGroupStateFromDom(groupPanel);
-    if (domState !== 'none') {
-      if (groupKey) lastResolvedParentStateByKey.set(groupKey, domState);
-      return domState;
-    }
+    if (domState !== 'none') return domState;
 
     if (groupKey) {
       const hasOldNoNote = groupHasOldNoNoteByKey.get(groupKey) === true;
       const hasAnyNote = groupHasAnyNoteByKey.get(groupKey) === true;
 
       if (hasOldNoNote) {
-        lastResolvedParentStateByKey.set(groupKey, 'warning');
         return 'warning';
       }
       if (hasAnyNote) {
-        lastResolvedParentStateByKey.set(groupKey, 'note');
         return 'note';
-      }
-
-      const stickyState = lastResolvedParentStateByKey.get(groupKey);
-      if (stickyState === 'warning' || stickyState === 'note') {
-        return stickyState;
       }
     }
 
-    if (groupSubject) {
+    if (groupSubject && groupCountBySubject.get(groupSubject) === 1) {
       const hasOldNoNoteBySubject = groupHasOldNoNoteBySubject.get(groupSubject) === true;
       const hasAnyNoteBySubject = groupHasAnyNoteBySubject.get(groupSubject) === true;
 

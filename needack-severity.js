@@ -4,6 +4,15 @@
   function createNeedAckSeverity(options) {
     const { normalizeNeedAckChildren } = options;
 
+    function normalizeStableTags(raw) {
+      if (typeof raw === 'string') return raw.trim();
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return '';
+      return Object.keys(raw)
+        .sort()
+        .map((key) => `${key}=${String(raw[key])}`)
+        .join(',');
+    }
+
     function parseNeedAckStatusToBucket(raw) {
       const s = String(raw ?? '').toLowerCase().trim();
       if (s === 'critical') return 'critical';
@@ -55,12 +64,10 @@
 
       const alertKey =
         (typeof child?.AlertKey === 'string' && child.AlertKey.trim()) ||
+        (typeof state?.AlertKey === 'string' && state.AlertKey.trim()) ||
         (typeof state?.Alert === 'string' && state.Alert.trim()) ||
         '';
-      const tags =
-        typeof state?.Tags === 'string' && state.Tags.trim()
-          ? state.Tags.trim()
-          : '';
+      const tags = normalizeStableTags(state?.Tags ?? child?.Tags);
 
       if (alertKey && tags) return `ak:${alertKey}|tags:${tags}`;
       if (alertKey) return `ak:${alertKey}`;
@@ -85,6 +92,19 @@
       return null;
     }
 
+    function needAckGroupStableKey(group) {
+      const alertKey =
+        (typeof group?.AlertKey === 'string' && group.AlertKey.trim()) ||
+        (typeof group?.State?.AlertKey === 'string' && group.State.AlertKey.trim()) ||
+        '';
+      const tags = normalizeStableTags(group?.State?.Tags ?? group?.Tags);
+      if (alertKey && tags) return `grp-ak:${alertKey}|tags:${tags}`;
+      if (alertKey) return `grp-ak:${alertKey}`;
+
+      const subject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
+      return subject ? `grp:${subject}` : null;
+    }
+
     function collectCurrentIdsAndSeverity(payload) {
       const groups = payload?.Groups?.NeedAck;
       const currentIds = new Set();
@@ -92,11 +112,11 @@
       if (!Array.isArray(groups)) return { currentIds, idToSeverity };
 
       for (const group of groups) {
-        const groupSubject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
         const children = normalizeNeedAckChildren(group?.Children);
 
-        if (!children.length && groupSubject) {
-          const key = `grp:${groupSubject}`;
+        if (!children.length) {
+          const key = needAckGroupStableKey(group);
+          if (!key) continue;
           currentIds.add(key);
           idToSeverity.set(key, getNeedAckSeverityFromGroupOnly(group));
           continue;
@@ -110,8 +130,9 @@
           currentIds.add(key);
           idToSeverity.set(key, getNeedAckSeverityBucket(child, group));
         }
-        if (!anyChildKey && groupSubject) {
-          const key = `grp:${groupSubject}`;
+        if (!anyChildKey) {
+          const key = needAckGroupStableKey(group);
+          if (!key) continue;
           currentIds.add(key);
           idToSeverity.set(key, getNeedAckSeverityFromGroupOnly(group));
         }
@@ -125,6 +146,7 @@
       getNeedAckSeverityBucket,
       getNeedAckSeverityFromGroupOnly,
       needAckStableKey,
+      needAckGroupStableKey,
       collectCurrentIdsAndSeverity
     };
   }
