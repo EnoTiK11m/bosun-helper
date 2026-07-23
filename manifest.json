@@ -50,7 +50,7 @@
       ],
       "js": [
         "config.js",
-        "content.js"
+        "grafana-content.js"
       ],
       "run_at": "document_end"
     }

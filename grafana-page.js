@@ -29,11 +29,14 @@
       return activeEditor.innerText || activeEditor.textContent || '';
     }
 
-    const textarea = document.querySelector('.monaco-editor textarea, textarea');
-    if (textarea) return textarea.value || '';
+    const textareas = Array.from(document.querySelectorAll('.monaco-editor textarea, textarea'));
+    if (textareas.length === 1) return textareas[0].value || '';
 
-    const textbox = document.querySelector('[role="textbox"]');
-    return textbox?.innerText || textbox?.textContent || '';
+    const textboxes = Array.from(document.querySelectorAll('[role="textbox"]'));
+    if (textboxes.length === 1) {
+      return textboxes[0].innerText || textboxes[0].textContent || '';
+    }
+    return '';
   }
 
   function findQueryEditorContent() {
@@ -44,10 +47,10 @@
     const queryArea = queryRow?.parentElement || document;
 
     const editors = Array.from(queryArea.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'));
-    if (editors.length) return editors[editors.length - 1];
+    if (editors.length === 1) return editors[0];
 
     const allEditors = Array.from(document.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'));
-    return allEditors[allEditors.length - 1] || null;
+    return allEditors.length === 1 ? allEditors[0] : null;
   }
 
   function isQueryVisible(query) {
@@ -130,10 +133,15 @@
 
   function findButtonByText(text) {
     const needle = text.toLowerCase();
-    return Array.from(document.querySelectorAll('button')).find((button) => {
+    const matches = Array.from(document.querySelectorAll('button')).filter((button) => {
       const label = button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() || '';
       return label === needle || label.includes(needle);
-    }) || null;
+    });
+    const exact = matches.filter((button) => {
+      return button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() === needle;
+    });
+    if (exact.length === 1) return exact[0];
+    return matches.length === 1 ? matches[0] : null;
   }
 
   function findPrometheusMonacoModel() {

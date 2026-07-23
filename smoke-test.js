@@ -271,6 +271,33 @@ assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery('sum by (host) (rate(cpu_total[5m]))', { host: 'db' }),
   'sum by (host) (rate(cpu_total{host="db"}[5m]))'
 );
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'left_metric / on(host) group_left(zone) right_metric offset 5m',
+    { host: 'db' }
+  ),
+  'left_metric{host="db"} / on(host) group_left(zone) right_metric{host="db"} offset 5m'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'metric{pattern=~"a,b|c",host!="db"} # metric_in_comment\n+ other',
+    { host: 'web', zone: 'a' }
+  ),
+  'metric{pattern=~"a,b|c",host!="db", zone="a"} # metric_in_comment\n+ other{host="web", zone="a"}'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'rate($metric[$__rate_interval])',
+    { host: 'db' }
+  ),
+  'rate($metric[$__rate_interval])'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(
+    "promras('''first_metric''')\npromras('''second_metric''')"
+  ),
+  '(first_metric) or (second_metric)'
+);
 
 function createBaselineHarness() {
   const events = [];

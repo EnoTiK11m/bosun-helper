@@ -114,7 +114,7 @@
 
         unlockAudioOnce();
         setTimeout(() => {
-          playNeedAckChime(retryKind);
+          playNeedAckChimeUnlocked(retryKind);
         }, 0);
       };
 

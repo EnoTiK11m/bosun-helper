@@ -49,9 +49,6 @@
   const LEGACY_GRAFANA_QUERY_STORAGE_KEY = 'bosunGrafanaPendingQueryV1';
   const GRAFANA_REQUEST_PARAM = 'bosunHelperRequest';
   const GRAFANA_PENDING_QUERY_TTL_MS = 2 * 60 * 1000;
-  const GRAFANA_BRIDGE_MARKER_ID = 'bosun-helper-grafana-page-bridge';
-  const GRAFANA_APPLY_MESSAGE = 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
-  const GRAFANA_RESULT_MESSAGE = 'BOSUN_HELPER_GRAFANA_QUERY_RESULT';
   const DEFAULT_EXTENSION_CONFIG = {
     bosunHosts: ['bosun.example.com', 'bosun-test.example.com'],
     grafanaHost: 'grafana.example.com',
@@ -111,7 +108,7 @@
   const DATA_REFRESH_HIDDEN_MS = 30000;
   const DATA_REFRESH_DEBOUNCE_MS = 250;
   const STATUS_MESSAGE_TTL_MS = 8000;
-  const OLD_NO_NOTE_MINUTES = 0
+  const OLD_NO_NOTE_MINUTES = 0;
   const AUTO_REFRESH_DEFAULT_IDLE_SECONDS = 60;
   const AUTO_REFRESH_MIN_IDLE_SECONDS = 10;
   const AUTO_REFRESH_MAX_IDLE_SECONDS = 3600;
@@ -142,8 +139,6 @@
   let toolbarStatusTitle = '';
   let toolbarStatusTimer = null;
   let alertDataIndexReady = false;
-  let grafanaBridgeToken = '';
-  let grafanaBridgeInjected = false;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -322,55 +317,8 @@
     moveTextareaCursorToEnd(textarea);
   }
 
-  function isGrafanaPanelPage() {
-    if (window.location.hostname !== extensionConfig.grafanaHost) return false;
-
-    try {
-      const configured = new URL(extensionConfig.grafanaPanelUrl);
-      return window.location.pathname === configured.pathname &&
-        window.location.search.includes('editPanel=');
-    } catch (_) {
-      return window.location.pathname.startsWith('/d/') &&
-        window.location.search.includes('editPanel=');
-    }
-  }
-
-  function getGrafanaRequestIdFromUrl() {
-    try {
-      return new URL(window.location.href).searchParams.get(GRAFANA_REQUEST_PARAM) || '';
-    } catch (_) {
-      return '';
-    }
-  }
-
   function getGrafanaQueryStorageKey(requestId) {
     return requestId ? `${GRAFANA_QUERY_STORAGE_PREFIX}${requestId}` : '';
-  }
-
-  function loadGrafanaPendingQuery(requestId) {
-    return new Promise((resolve) => {
-      const storageKey = getGrafanaQueryStorageKey(requestId);
-      if (!storageKey) {
-        resolve(null);
-        return;
-      }
-
-      try {
-        if (chrome?.storage?.local?.get) {
-          chrome.storage.local.get([storageKey], (items) => {
-            const err = getChromeStorageLastError();
-            if (err) {
-              reportDiagnostics('grafana-query-load-failed', err.message || 'unknown-error');
-              resolve(null);
-              return;
-            }
-            resolve(items?.[storageKey] || null);
-          });
-          return;
-        }
-      } catch (_) {}
-      resolve(null);
-    });
   }
 
   function clearGrafanaPendingQuery(requestId) {
@@ -387,420 +335,6 @@
         });
       }
     } catch (_) {}
-  }
-
-  function isElementUsable(el) {
-    if (!el) return false;
-    const rect = el.getBoundingClientRect?.();
-    if (rect && rect.width <= 0 && rect.height <= 0) return false;
-    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
-    return !(style && (style.display === 'none' || style.visibility === 'hidden'));
-  }
-
-  function wait(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  function normalizeEditorText(value) {
-    return String(value || '').replace(/\r\n/g, '\n').trim();
-  }
-
-  async function setEditableText(el, value) {
-    if (!el) return false;
-    const originalValue = getEditableText(el);
-
-    el.focus?.();
-    el.click?.();
-
-    const codeMirrorView = findCodeMirrorView(el);
-    if (codeMirrorView) {
-      const docLength = codeMirrorView.state?.doc?.length ?? String(codeMirrorView.state?.doc || '').length;
-      codeMirrorView.dispatch({
-        changes: { from: 0, to: docLength, insert: value },
-        selection: { anchor: value.length },
-        scrollIntoView: true
-      });
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertReplacementText' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      await wait(50);
-      return normalizeEditorText(getEditableText(el)) === normalizeEditorText(value);
-    }
-
-    clearEditableText(el);
-    await wait(120);
-
-    if (normalizeEditorText(getEditableText(el))) return false;
-
-    insertEditableText(el, value);
-    await wait(120);
-
-    if (normalizeEditorText(getEditableText(el)) === normalizeEditorText(value)) {
-      return true;
-    }
-
-    clearEditableText(el);
-    insertEditableText(el, originalValue);
-    await wait(50);
-    return false;
-  }
-
-  function getEditableText(el) {
-    const codeMirrorView = findCodeMirrorView(el);
-    if (codeMirrorView?.state?.doc) {
-      return codeMirrorView.state.doc.toString();
-    }
-
-    if (el?.tagName === 'TEXTAREA' || el?.tagName === 'INPUT') {
-      return el.value || '';
-    }
-
-    return el?.innerText || el?.textContent || '';
-  }
-
-  function clearEditableText(el) {
-    if (!el) return false;
-
-    const codeMirrorView = findCodeMirrorView(el);
-    if (codeMirrorView) {
-      const docLength = codeMirrorView.state?.doc?.length ?? String(codeMirrorView.state?.doc || '').length;
-      codeMirrorView.dispatch({
-        changes: { from: 0, to: docLength, insert: '' },
-        selection: { anchor: 0 },
-        scrollIntoView: true
-      });
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    const selectAll = () => {
-      try {
-        document.execCommand?.('selectAll', false, null);
-      } catch (_) {}
-      el.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 'a',
-        code: 'KeyA',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true
-      }));
-      el.dispatchEvent(new KeyboardEvent('keyup', {
-        key: 'a',
-        code: 'KeyA',
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true
-      }));
-    };
-
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      const proto = Object.getPrototypeOf(el);
-      const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-      const setter = descriptor && typeof descriptor.set === 'function' ? descriptor.set : null;
-      if (typeof el.select === 'function') el.select();
-      if (setter) setter.call(el, '');
-      else el.value = '';
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') {
-      selectAll();
-
-      const editorRoot = el.closest?.('.cm-editor') || el;
-      const contentRoot = editorRoot.querySelector?.('.cm-content[contenteditable="true"]') || el;
-      const selection = window.getSelection?.();
-      const range = document.createRange();
-      range.selectNodeContents(contentRoot);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-
-      const deleted = document.execCommand?.('delete', false, null);
-      if (!deleted) contentRoot.textContent = '';
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    return false;
-  }
-
-  function insertEditableText(el, value) {
-    if (!el) return false;
-
-    const codeMirrorView = findCodeMirrorView(el);
-    if (codeMirrorView) {
-      codeMirrorView.dispatch({
-        changes: { from: 0, to: 0, insert: value },
-        selection: { anchor: value.length },
-        scrollIntoView: true
-      });
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      const proto = Object.getPrototypeOf(el);
-      const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-      const setter = descriptor && typeof descriptor.set === 'function' ? descriptor.set : null;
-      if (setter) setter.call(el, value);
-      else el.value = value;
-      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    if (el.isContentEditable || el.getAttribute('contenteditable') === 'true' || el.getAttribute('role') === 'textbox') {
-      const editorRoot = el.closest?.('.cm-editor') || el;
-      const contentRoot = editorRoot.querySelector?.('.cm-content[contenteditable="true"]') || el;
-      contentRoot.focus?.();
-      const inserted = document.execCommand?.('insertText', false, value);
-      if (!inserted) {
-        contentRoot.textContent = value;
-      }
-      contentRoot.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-      contentRoot.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-
-    return false;
-  }
-
-  function findCodeMirrorView(el) {
-    const candidates = [];
-    let node = el;
-
-    while (node && candidates.length < 12) {
-      candidates.push(node);
-      node = node.parentElement;
-    }
-
-    try {
-      candidates.push(...document.querySelectorAll('.cm-editor, .cm-content, .cm-scroller'));
-    } catch (_) {}
-
-    for (const candidate of candidates) {
-      const directView = getCodeMirrorViewFromObject(candidate) || getCodeMirrorViewFromObject(candidate?.cmView);
-      if (directView) return directView;
-
-      const ownKeys = [];
-      try {
-        ownKeys.push(...Object.keys(candidate || {}));
-      } catch (_) {}
-      try {
-        ownKeys.push(...Object.getOwnPropertyNames(candidate || {}));
-      } catch (_) {}
-
-      for (const key of ownKeys) {
-        const view = getCodeMirrorViewFromObject(candidate?.[key]);
-        if (view) return view;
-      }
-    }
-
-    return null;
-  }
-
-  function getCodeMirrorViewFromObject(value) {
-    if (!value || typeof value !== 'object') return null;
-
-    if (value.state?.doc && typeof value.dispatch === 'function') {
-      return value;
-    }
-
-    if (value.rootView?.view?.state?.doc && typeof value.rootView.view.dispatch === 'function') {
-      return value.rootView.view;
-    }
-
-    if (value.view?.state?.doc && typeof value.view.dispatch === 'function') {
-      return value.view;
-    }
-
-    const seen = new Set();
-    const queue = [
-      value.view,
-      value.editorView,
-      value.rootView,
-      value.rootView?.view,
-      value.cmView,
-      value.cmView?.view,
-      value.cmView?.rootView,
-      value.cmView?.rootView?.view
-    ].filter(Boolean);
-
-    while (queue.length) {
-      const item = queue.shift();
-      if (!item || typeof item !== 'object' || seen.has(item)) continue;
-      seen.add(item);
-
-      if (item.state?.doc && typeof item.dispatch === 'function') return item;
-
-      const keys = [];
-      try {
-        keys.push(...Object.keys(item));
-      } catch (_) {}
-      try {
-        keys.push(...Object.getOwnPropertyNames(item));
-      } catch (_) {}
-
-      for (const key of keys.slice(0, 40)) {
-        if (/parent|dom|contentDOM/i.test(key)) continue;
-        try {
-          const next = item[key];
-          if (next && typeof next === 'object' && !seen.has(next)) queue.push(next);
-        } catch (_) {}
-      }
-    }
-
-    return null;
-  }
-
-  function findGrafanaQueryEditor() {
-    const selectors = [
-      '.cm-editor .cm-content[contenteditable="true"]',
-      '.cm-content[contenteditable="true"]',
-      '.monaco-editor textarea',
-      '[role="textbox"][contenteditable="true"]',
-      'textarea',
-      '[role="textbox"]'
-    ];
-
-    for (const selector of selectors) {
-      const candidates = Array.from(document.querySelectorAll(selector)).filter(isElementUsable);
-      if (candidates.length) return candidates[candidates.length - 1];
-    }
-
-    return null;
-  }
-
-  function findButtonByText(text) {
-    const normalizedNeedle = text.toLowerCase();
-    return Array.from(document.querySelectorAll('button')).find((button) => {
-      const label = button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() || '';
-      return label === normalizedNeedle || label.includes(normalizedNeedle);
-    }) || null;
-  }
-
-  function clickGrafanaRunQueries() {
-    const runButton = findButtonByText('Run queries');
-    if (!runButton) return false;
-    runButton.click();
-    return true;
-  }
-
-  function injectGrafanaPageBridge() {
-    if (grafanaBridgeInjected || document.getElementById(GRAFANA_BRIDGE_MARKER_ID)) {
-      grafanaBridgeInjected = true;
-      return true;
-    }
-
-    try {
-      grafanaBridgeToken = globalThis.crypto?.randomUUID?.() ||
-        `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const script = document.createElement('script');
-      script.id = GRAFANA_BRIDGE_MARKER_ID;
-      script.dataset.channelToken = grafanaBridgeToken;
-      script.src = chrome.runtime.getURL('grafana-page.js');
-      script.addEventListener('error', () => {
-        grafanaBridgeInjected = false;
-        script.remove();
-      }, { once: true });
-      (document.documentElement || document.head || document.body).appendChild(script);
-      grafanaBridgeInjected = true;
-      return true;
-    } catch (err) {
-      console.warn('[Bosun Helper] Failed to inject Grafana page bridge:', err);
-      return false;
-    }
-  }
-
-  function applyGrafanaQueryViaPageBridge(query) {
-    return new Promise((resolve) => {
-      if (!injectGrafanaPageBridge()) {
-        resolve(false);
-        return;
-      }
-
-      const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-      const timeoutId = setTimeout(() => {
-        window.removeEventListener('message', onMessage);
-        resolve(false);
-      }, 3000);
-
-      function onMessage(event) {
-        if (
-          event.source !== window ||
-          event.origin !== window.location.origin ||
-          event.data?.type !== GRAFANA_RESULT_MESSAGE ||
-          event.data?.channelToken !== grafanaBridgeToken
-        ) return;
-        if (event.data.requestId !== requestId) return;
-
-        clearTimeout(timeoutId);
-        window.removeEventListener('message', onMessage);
-        resolve(event.data.result?.ok === true);
-      }
-
-      window.addEventListener('message', onMessage);
-
-      setTimeout(() => {
-        window.postMessage({
-          type: GRAFANA_APPLY_MESSAGE,
-          channelToken: grafanaBridgeToken,
-          requestId,
-          query
-        }, window.location.origin);
-      }, 200);
-    });
-  }
-
-  async function waitForGrafanaEditorAndApply(query, requestId, deadlineAt = Date.now() + 20000) {
-    const editor = findGrafanaQueryEditor();
-    const bridgeApplied = await applyGrafanaQueryViaPageBridge(query);
-    if (bridgeApplied) {
-      clearGrafanaPendingQuery(requestId);
-      return;
-    }
-
-    if (editor && await setEditableText(editor, query)) {
-      setTimeout(() => {
-        clickGrafanaRunQueries();
-        clearGrafanaPendingQuery(requestId);
-      }, 250);
-      return;
-    }
-
-    if (Date.now() >= deadlineAt) {
-      reportDiagnostics('grafana-query-apply-timeout', `requestId=${requestId}`);
-      return;
-    }
-    setTimeout(() => waitForGrafanaEditorAndApply(query, requestId, deadlineAt), 500);
-  }
-
-  async function applyPendingGrafanaQuery() {
-    if (!isGrafanaPanelPage()) return;
-
-    const requestId = getGrafanaRequestIdFromUrl();
-    if (!requestId) return;
-    const payload = await loadGrafanaPendingQuery(requestId);
-    const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
-    const createdAt = Number(payload?.createdAt || 0);
-
-    if (!query) {
-      reportDiagnostics('grafana-query-not-found', `requestId=${requestId}`);
-      return;
-    }
-    if (
-      !Number.isFinite(createdAt) ||
-      createdAt > Date.now() + 5000 ||
-      Date.now() - createdAt > GRAFANA_PENDING_QUERY_TTL_MS
-    ) {
-      clearGrafanaPendingQuery(requestId);
-      return;
-    }
-
-    waitForGrafanaEditorAndApply(query, requestId);
   }
 
   function ensureActionTemplates() {
@@ -1046,233 +580,11 @@
   }
 
   function extractPromrasQuery(expr) {
-    if (promqlApi?.extractPromrasQuery) {
-      return promqlApi.extractPromrasQuery(expr);
-    }
-    if (typeof expr !== 'string' || !expr.trim()) return '';
-
-    const querySectionMatch = expr.match(/(?:^|\n)\s*Query:\s*([\s\S]*?)(?=\n\s*[A-Z][A-Za-z0-9 _-]*:\s|$)/i);
-    const source = querySectionMatch ? querySectionMatch[1] : expr;
-    const seenQueries = new Set();
-    const matches = Array.from(source.matchAll(/promras\(\s*'''([\s\S]*?)'''/gi))
-      .map((match) => match[1].replace(/\s+/g, ' ').trim())
-      .filter(Boolean)
-      .filter((query) => {
-        if (seenQueries.has(query)) return false;
-        seenQueries.add(query);
-        return true;
-      });
-
-    if (!matches.length) return '';
-    if (matches.length === 1) return matches[0];
-
-    return matches.map((query) => `(${query})`).join(' or ');
-  }
-
-  function parseAlertTags(rawTags, alertKey = '') {
-    if (promqlApi?.parseAlertTags) {
-      return promqlApi.parseAlertTags(rawTags, alertKey);
-    }
-    if (rawTags && typeof rawTags === 'object' && !Array.isArray(rawTags)) {
-      return Object.keys(rawTags)
-        .filter((name) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))
-        .map((name) => ({ name, value: rawTags[name] }))
-        .filter((tag) => tag.value != null && String(tag.value).trim() !== '');
-    }
-
-    const source = typeof rawTags === 'string' && rawTags.trim()
-      ? rawTags
-      : ((typeof alertKey === 'string' && alertKey.includes('{'))
-        ? alertKey.slice(alertKey.indexOf('{') + 1, alertKey.lastIndexOf('}'))
-        : '');
-
-    const tags = [];
-    source.split(',').forEach((part) => {
-      const match = part.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"?([^",]+)"?$/);
-      if (!match) return;
-      tags.push({ name: match[1], value: match[2] });
-    });
-    return tags;
-  }
-
-  function escapePromLabelValue(value) {
-    if (promqlApi?.escapePromLabelValue) {
-      return promqlApi.escapePromLabelValue(value);
-    }
-    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-  }
-
-  function getNearestPromAggregationLabels(query, selectorIndex) {
-    const prefix = query.slice(Math.max(0, selectorIndex - 500), selectorIndex);
-    const aggregations = Array.from(prefix.matchAll(/\b(sum|avg|min|max|count|stddev|stdvar|topk|bottomk|quantile)\s+(by|without)\s*\(([^)]*)\)\s*\(/gi));
-    const last = aggregations[aggregations.length - 1];
-    if (!last) return null;
-
-    const labels = last[3]
-      .split(',')
-      .map((label) => label.trim())
-      .filter(Boolean);
-
-    return {
-      mode: last[2].toLowerCase(),
-      labels: new Set(labels)
-    };
-  }
-
-  function shouldInjectAlertTagIntoSelector(tagName, aggregation) {
-    if (!aggregation) return true;
-    if (aggregation.mode === 'by') return aggregation.labels.has(tagName);
-    if (aggregation.mode === 'without') return !aggregation.labels.has(tagName);
-    return true;
-  }
-
-  function selectorHasLabel(matchers, labelName) {
-    const re = new RegExp(`(^|,)\\s*${labelName}\\s*(=|!=|=~|!~)`);
-    return re.test(matchers);
-  }
-
-  function replaceMatcherLabelValue(matchers, labelName, value) {
-    const escapedValue = escapePromLabelValue(value);
-    const matcherRe = new RegExp(`(^|,)\\s*${labelName}\\s*(=~|!~|=|!=)\\s*"((?:\\\\.|[^"\\\\])*)"`, 'g');
-    let replaced = false;
-    const next = matchers.replace(matcherRe, (full, prefix) => {
-      replaced = true;
-      return `${prefix || ''} ${labelName}="${escapedValue}"`;
-    });
-
-    return {
-      matchers: next.trim().replace(/^,\s*/, ''),
-      replaced
-    };
-  }
-
-  function getAlertTagMatchersForSelector(tags, query, offset, matchers = '') {
-    const aggregation = getNearestPromAggregationLabels(query, offset);
-    return tags
-      .filter((tag) => shouldInjectAlertTagIntoSelector(tag.name, aggregation))
-      .filter((tag) => !selectorHasLabel(matchers, tag.name))
-      .map((tag) => `${tag.name}="${escapePromLabelValue(tag.value)}"`);
-  }
-
-  function applyAlertTagMatcherOverrides(matchers, tags, query, offset) {
-    const aggregation = getNearestPromAggregationLabels(query, offset);
-    let nextMatchers = matchers;
-    const replacedLabels = new Set();
-
-    tags
-      .filter((tag) => shouldInjectAlertTagIntoSelector(tag.name, aggregation))
-      .forEach((tag) => {
-        if (!selectorHasLabel(nextMatchers, tag.name)) return;
-        const replaced = replaceMatcherLabelValue(nextMatchers, tag.name, tag.value);
-        nextMatchers = replaced.matchers;
-        if (replaced.replaced) replacedLabels.add(tag.name);
-      });
-
-    return { matchers: nextMatchers, replacedLabels };
-  }
-
-  function isPromKeywordOrFunction(name) {
-    return /^(and|or|unless|by|without|on|ignoring|group_left|group_right|bool|offset|sum|avg|min|max|count|stddev|stdvar|topk|bottomk|quantile|rate|irate|increase|delta|deriv|idelta|changes|resets|abs|ceil|floor|round|clamp|clamp_min|clamp_max|histogram_quantile|label_replace|label_join|sort|sort_desc|avg_over_time|min_over_time|max_over_time|sum_over_time|count_over_time|quantile_over_time|stddev_over_time|stdvar_over_time|last_over_time|present_over_time|time|vector|scalar)$/i.test(name);
-  }
-
-  function isInsidePromLabelList(query, offset) {
-    const prefix = query.slice(0, offset);
-    const lastOpen = prefix.lastIndexOf('(');
-    const lastClose = prefix.lastIndexOf(')');
-    if (lastOpen <= lastClose) return false;
-
-    const beforeOpen = prefix.slice(Math.max(0, lastOpen - 40), lastOpen);
-    return /\b(by|without|on|ignoring)\s*$/i.test(beforeOpen);
-  }
-
-  function isInsidePromString(query, offset) {
-    let quote = '';
-    let escaped = false;
-
-    for (let i = 0; i < offset; i += 1) {
-      const ch = query[i];
-
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (ch === '\\') {
-        escaped = true;
-        continue;
-      }
-
-      if (quote) {
-        if (ch === quote) quote = '';
-        continue;
-      }
-
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-      }
-    }
-
-    return Boolean(quote);
-  }
-
-  function isInsidePromSelectorBraces(query, offset) {
-    const lastOpen = query.lastIndexOf('{', offset);
-    const lastClose = query.lastIndexOf('}', offset);
-    return lastOpen > lastClose;
-  }
-
-  function addTagsToBarePromSelectors(query, tags) {
-    return query.replace(/\b([a-zA-Z_:][a-zA-Z0-9_:]*)\b(\s*(?:\[[^\]]+\])?)/g, (full, metricName, suffix, offset, whole) => {
-      if (isPromKeywordOrFunction(metricName)) return full;
-      if (isInsidePromLabelList(whole, offset)) return full;
-      if (isInsidePromString(whole, offset)) return full;
-      if (isInsidePromSelectorBraces(whole, offset)) return full;
-
-      const prev = whole.slice(Math.max(0, offset - 2), offset);
-      const nextChar = whole.slice(offset + metricName.length).trimStart()[0] || '';
-      if (prev.includes('"') || prev.includes("'")) return full;
-      if (nextChar === '(' || nextChar === '{' || nextChar === '=' || nextChar === '"' || nextChar === "'") return full;
-      if (whole[offset - 1] === '.' || whole[offset + metricName.length] === '.') return full;
-
-      const additions = getAlertTagMatchersForSelector(tags, whole, offset);
-      if (!additions.length) return full;
-
-      return `${metricName}{${additions.join(', ')}}${suffix || ''}`;
-    });
+    return promqlApi?.extractPromrasQuery?.(expr) || '';
   }
 
   function applyAlertTagsToPromQuery(query, rawTags, alertKey = '') {
-    if (promqlApi?.applyAlertTagsToPromQuery) {
-      return promqlApi.applyAlertTagsToPromQuery(query, rawTags, alertKey);
-    }
-    const tags = parseAlertTags(rawTags, alertKey);
-    if (!query || !tags.length) return query;
-
-    const withExistingSelectors = query.replace(/([a-zA-Z_:][a-zA-Z0-9_:]*)\s*\{([^{}]*)\}/g, (full, metricName, matchers, offset) => {
-      if (!metricName || /^(by|without|on|ignoring|group_left|group_right)$/.test(metricName)) {
-        return full;
-      }
-
-      const overridden = applyAlertTagMatcherOverrides(matchers, tags, query, offset);
-      const additions = getAlertTagMatchersForSelector(
-        tags.filter((tag) => !overridden.replacedLabels.has(tag.name)),
-        query,
-        offset,
-        overridden.matchers
-      );
-
-      if (!additions.length && overridden.matchers === matchers) return full;
-
-      const trimmedMatchers = overridden.matchers.trim();
-      const nextMatchers = [
-        trimmedMatchers,
-        additions.join(', ')
-      ].filter(Boolean).join(', ');
-
-      return `${metricName}{${nextMatchers}}`;
-    });
-
-    return addTagsToBarePromSelectors(withExistingSelectors, tags);
+    return promqlApi?.applyAlertTagsToPromQuery?.(query, rawTags, alertKey) || query;
   }
 
   function getGrafanaQueryForPanel(panel) {
@@ -1365,6 +677,10 @@
       popup = window.open('about:blank', '_blank');
       if (popup) popup.opener = null;
     } catch (_) {}
+    if (!popup) {
+      flashButtonState(button, 'allow popups', false);
+      return;
+    }
 
     const requestId = createGrafanaRequestId();
     const saved = await saveGrafanaPendingQuery(requestId, query);
@@ -1382,11 +698,14 @@
       flashButtonState(button, 'config error', false);
       return;
     }
-    if (popup) {
+    try {
       popup.location.replace(targetUrl);
-      return;
+    } catch (err) {
+      clearGrafanaPendingQuery(requestId);
+      popup.close?.();
+      reportDiagnostics('grafana-window-navigation-failed', err?.message || 'unknown-error');
+      flashButtonState(button, 'open error', false);
     }
-    window.open(targetUrl, '_blank', 'noopener');
   }
 
   function ensureGrafanaQueryButton(panel) {
@@ -2038,24 +1357,6 @@
 
   function reportDiagnostics(eventName, details = '') {
     diagnosticsApi?.report?.(eventName, details);
-  }
-
-  function parseNeedAckStatusToBucket(raw) {
-    return needAckSeverityApi?.parseNeedAckStatusToBucket?.(raw) ?? 'unknown';
-  }
-
-  /** В шаблоне Bosun у группы есть CurrentStatus; у ребёнка — State.* и Events[].Status */
-  function getNeedAckSeverityBucket(child, group) {
-    return needAckSeverityApi?.getNeedAckSeverityBucket?.(child, group) ?? 'unknown';
-  }
-
-  function getNeedAckSeverityFromGroupOnly(group) {
-    return needAckSeverityApi?.getNeedAckSeverityFromGroupOnly?.(group) ?? 'unknown';
-  }
-
-  /** Стабильный ключ: Id -> AlertKey+Tags -> group+child+ago -> fallback */
-  function needAckStableKey(child, group) {
-    return needAckSeverityApi?.needAckStableKey?.(child, group) ?? null;
   }
 
   function loadState(callback) {
@@ -3038,7 +2339,9 @@
       if (!warnIcon) {
         const icon = document.createElement('span');
         icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS} ${NO_SELECT_CLASS}`;
-        icon.title = `Older than ${OLD_NO_NOTE_MINUTES} minutes and has no Note`;
+        icon.title = OLD_NO_NOTE_MINUTES > 0
+          ? `Старше ${OLD_NO_NOTE_MINUTES} мин. и без Note`
+          : 'Нет активного Note';
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -3049,7 +2352,7 @@
       if (!noteIcon) {
         const icon = document.createElement('span');
         icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} ${NO_SELECT_CLASS}`;
-        icon.title = 'Contains Note';
+        icon.title = 'Есть активный Note';
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -3096,7 +2399,9 @@
       if (!warnIcon) {
         const icon = document.createElement('span');
         icon.className = `fa fa-exclamation-triangle ${OLD_NO_NOTE_ICON_CLASS} bosun-parent-marker ${NO_SELECT_CLASS}`;
-        icon.title = `Contains alerts older than ${OLD_NO_NOTE_MINUTES} minutes without Note`;
+        icon.title = OLD_NO_NOTE_MINUTES > 0
+          ? `Есть алерты старше ${OLD_NO_NOTE_MINUTES} мин. без Note`
+          : 'Есть алерты без активного Note';
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -3107,7 +2412,7 @@
       if (!noteIcon) {
         const icon = document.createElement('span');
         icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} bosun-parent-marker ${NO_SELECT_CLASS}`;
-        icon.title = 'Contains alerts with Note';
+        icon.title = 'Есть алерты с активным Note';
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -3432,11 +2737,6 @@
   }
 
   function init() {
-    if (isGrafanaPanelPage()) {
-      applyPendingGrafanaQuery();
-      return;
-    }
-
     if (!isConfiguredBosunHost()) return;
 
     restoreDiagnosticsLogFromStorage();
