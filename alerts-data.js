@@ -14,15 +14,84 @@
       return (Date.now() - ts) >= oldNoNoteMinutes * 60 * 1000;
     }
 
+    function isServiceUser(user) {
+      if (typeof user !== 'string') return false;
+      const normalized = user.trim().toLowerCase();
+      return normalized === 'system' ||
+        normalized === 'bosun' ||
+        normalized === 'scheduler' ||
+        normalized === 'service' ||
+        normalized === 'auto' ||
+        normalized === 'automation';
+    }
+
+    function normalizeAction(action) {
+      if (!action || typeof action !== 'object') return null;
+      const type = typeof action.Type === 'string' ? action.Type : action.type;
+      const message = typeof action.Message === 'string' ? action.Message : action.message;
+      const user = typeof action.User === 'string' ? action.User : action.user;
+      const cancelled = action.Cancelled === true || action.cancelled === true;
+
+      return {
+        type: String(type || '').trim().toLowerCase(),
+        message: typeof message === 'string' ? message.trim() : '',
+        user: typeof user === 'string' ? user.trim() : '',
+        cancelled
+      };
+    }
+
+    function isActiveNote(action) {
+      const normalized = normalizeAction(action);
+      return normalized?.type === 'note' &&
+        Boolean(normalized.message) &&
+        !normalized.cancelled;
+    }
+
+    function isActiveUserNote(action) {
+      const normalized = normalizeAction(action);
+      return normalized?.type === 'note' &&
+        Boolean(normalized.message) &&
+        Boolean(normalized.user) &&
+        !normalized.cancelled &&
+        !isServiceUser(normalized.user);
+    }
+
     function hasNoteFromActions(actions) {
       if (!Array.isArray(actions)) return false;
-      return actions.some((action) => {
-        return action &&
-          action.Type === 'Note' &&
-          typeof action.Message === 'string' &&
-          action.Message.trim().length > 0 &&
-          action.Cancelled !== true;
-      });
+      return actions.some(isActiveNote);
+    }
+
+    function hasUserNoteFromActions(actions) {
+      if (!Array.isArray(actions)) return false;
+      return actions.some(isActiveUserNote);
+    }
+
+    function parseLastActionText(value) {
+      if (typeof value !== 'string') return null;
+      const text = value.replace(/\s+/g, ' ').trim();
+      const match = text.match(/\bNote\s+by\s+(\S+)\s+at\s+.+?\)\s*:\s*(.+)$/i) ||
+        text.match(/\bNote\s+by\s+(\S+)\b.*?:\s*(.+)$/i);
+      if (!match) return null;
+      return {
+        Type: 'Note',
+        User: match[1],
+        Message: match[2]
+      };
+    }
+
+    function hasUserComment(alert) {
+      const state = alert?.State || alert?.state || {};
+      const actions = [
+        ...(Array.isArray(state.Actions) ? state.Actions : []),
+        ...(Array.isArray(state.actions) ? state.actions : []),
+        ...(Array.isArray(alert?.Actions) ? alert.Actions : []),
+        ...(Array.isArray(alert?.actions) ? alert.actions : [])
+      ];
+      if (hasUserNoteFromActions(actions)) return true;
+
+      const rawAction = state.LastAction || state.lastAction || alert?.LastAction || alert?.lastAction;
+      const action = typeof rawAction === 'string' ? parseLastActionText(rawAction) : rawAction;
+      return isActiveUserNote(action);
     }
 
     function rebuildAlertDataIndex(payload, helpers) {
@@ -37,10 +106,14 @@
         childOldNoNoteByKey: new Map(),
         childHasNoteById: new Map(),
         childHasNoteByKey: new Map(),
+        childHasUserCommentById: new Map(),
+        childHasUserCommentByKey: new Map(),
         groupHasOldNoNoteByKey: new Map(),
         groupHasAnyNoteByKey: new Map(),
+        groupHasAnyUserCommentByKey: new Map(),
         groupHasOldNoNoteBySubject: new Map(),
-        groupHasAnyNoteBySubject: new Map()
+        groupHasAnyNoteBySubject: new Map(),
+        groupHasAnyUserCommentBySubject: new Map()
       };
 
       const groups = payload?.Groups?.NeedAck;
@@ -49,6 +122,7 @@
       for (const group of groups) {
         let groupHasOldNoNote = false;
         let groupHasAnyNote = false;
+        let groupHasAnyUserComment = false;
 
         const children = typeof normalizeNeedAckChildren === 'function'
           ? normalizeNeedAckChildren(group?.Children)
@@ -58,36 +132,50 @@
           const childKey = buildChildMarkerKeyFromData(child, group);
 
           const oldEnough = isOlderThanThreshold(child?.Ago);
-          const hasNote = hasNoteFromActions(child?.State?.Actions);
+          const allActions = [
+            ...(Array.isArray(child?.State?.Actions) ? child.State.Actions : []),
+            ...(Array.isArray(child?.State?.actions) ? child.State.actions : []),
+            ...(Array.isArray(child?.Actions) ? child.Actions : []),
+            ...(Array.isArray(child?.actions) ? child.actions : [])
+          ];
+          const hasNote = hasNoteFromActions(allActions);
+          const hasLastActionUserComment = hasUserComment(child);
           const oldNoNote = oldEnough && !hasNote;
 
           if (childId) {
             nextIndex.childOldNoNoteById.set(childId, oldNoNote);
             nextIndex.childHasNoteById.set(childId, hasNote);
+            nextIndex.childHasUserCommentById.set(childId, hasLastActionUserComment);
           }
           if (childKey) {
             nextIndex.childOldNoNoteByKey.set(childKey, oldNoNote);
             nextIndex.childHasNoteByKey.set(childKey, hasNote);
+            nextIndex.childHasUserCommentByKey.set(childKey, hasLastActionUserComment);
           }
 
           if (oldNoNote) groupHasOldNoNote = true;
           if (hasNote) groupHasAnyNote = true;
+          if (hasLastActionUserComment) groupHasAnyUserComment = true;
         }
 
         const groupKey = buildGroupMarkerKeyFromData(group);
         if (groupKey) {
           const prevOld = nextIndex.groupHasOldNoNoteByKey.get(groupKey) === true;
           const prevNote = nextIndex.groupHasAnyNoteByKey.get(groupKey) === true;
+          const prevUserComment = nextIndex.groupHasAnyUserCommentByKey.get(groupKey) === true;
           nextIndex.groupHasOldNoNoteByKey.set(groupKey, prevOld || groupHasOldNoNote);
           nextIndex.groupHasAnyNoteByKey.set(groupKey, prevNote || groupHasAnyNote);
+          nextIndex.groupHasAnyUserCommentByKey.set(groupKey, prevUserComment || groupHasAnyUserComment);
         }
 
         const groupSubject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
         if (groupSubject) {
           const prevOldBySubject = nextIndex.groupHasOldNoNoteBySubject.get(groupSubject) === true;
           const prevNoteBySubject = nextIndex.groupHasAnyNoteBySubject.get(groupSubject) === true;
+          const prevUserCommentBySubject = nextIndex.groupHasAnyUserCommentBySubject.get(groupSubject) === true;
           nextIndex.groupHasOldNoNoteBySubject.set(groupSubject, prevOldBySubject || groupHasOldNoNote);
           nextIndex.groupHasAnyNoteBySubject.set(groupSubject, prevNoteBySubject || groupHasAnyNote);
+          nextIndex.groupHasAnyUserCommentBySubject.set(groupSubject, prevUserCommentBySubject || groupHasAnyUserComment);
         }
       }
 
@@ -206,6 +294,9 @@
     }
 
     return {
+      hasNoteFromActions,
+      hasUserNoteFromActions,
+      hasUserComment,
       rebuildAlertDataIndex,
       fetchAlertsDataViaFetch,
       fetchAlertsDataViaXHR,

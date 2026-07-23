@@ -88,6 +88,7 @@ for (const file of [
   'alerts-data.js',
   'needack-baseline.js',
   'needack-severity.js',
+  'promql.js',
   'page-utils.js',
   'styles.js',
   'activity.js',
@@ -104,6 +105,7 @@ const checks = [
   ['alerts-data', !!context.BosunSilenceHiderAlertsData],
   ['needack-baseline', !!context.BosunSilenceHiderNeedAckBaseline],
   ['needack-severity', !!context.BosunSilenceHiderNeedAckSeverity],
+  ['promql', !!context.BosunHelperPromQL],
   ['page-utils', !!context.BosunSilenceHiderPageUtils],
   ['styles', !!context.BosunSilenceHiderStyles],
   ['activity', !!context.BosunSilenceHiderActivity],
@@ -114,6 +116,95 @@ if (failed.length) {
   console.error('FAILED', failed);
   process.exit(1);
 }
+
+const alertsDataApi = context.BosunSilenceHiderAlertsData.createAlertsData({
+  oldNoNoteMinutes: 0
+});
+
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: { Type: 'Ack', Message: 'ack text', User: 'operator' } } }),
+  false
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: { Type: 'Note', Message: '   ', User: 'operator' } } }),
+  false
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: { Type: 'Note', Message: 'user text', User: 'operator', Cancelled: true } } }),
+  false
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: { Type: 'Note', Message: 'user text', User: 'system' } } }),
+  false
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: { Type: 'Note', Message: 'user text', User: 'operator' } } }),
+  true
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({ State: { LastAction: 'Note by akharyunina at 2026/06/08-20:50:36 MSK (1h19m51s ago) : migration note' } }),
+  true
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({
+    State: {
+      LastAction: { Type: 'Ack', Message: 'ack', User: 'operator' },
+      Actions: [{ Type: 'note', Message: 'earlier user note', User: 'operator' }]
+    }
+  }),
+  true
+);
+assert.strictEqual(
+  alertsDataApi.hasUserComment({
+    State: {
+      Actions: [{ Type: 'Note', Message: 'automated note', User: 'system' }]
+    }
+  }),
+  false
+);
+assert.strictEqual(
+  alertsDataApi.hasNoteFromActions([
+    { type: 'note', message: 'active', user: 'system' }
+  ]),
+  true
+);
+assert.strictEqual(
+  alertsDataApi.hasNoteFromActions([
+    { type: 'note', message: 'cancelled', user: 'operator', cancelled: true }
+  ]),
+  false
+);
+
+const commentIndex = alertsDataApi.rebuildAlertDataIndex({
+  Groups: {
+    NeedAck: [
+      {
+        Subject: 'commented group',
+        Children: [
+          { Subject: 'without comment', State: { Id: 101, LastAction: { Type: 'Ack', Message: 'ack', User: 'operator' }, Actions: [] } },
+          { Subject: 'with comment', State: { Id: 102, LastAction: { Type: 'Note', Message: 'looking', User: 'operator' }, Actions: [{ Type: 'Note', Message: 'looking' }] } }
+        ]
+      }
+    ]
+  }
+}, {
+  buildChildMarkerKeyFromData(child, group) {
+    return `g:${group.Subject}|c:${child.Subject}`;
+  },
+  buildGroupMarkerKeyFromData(group) {
+    return `group:${group.Subject}`;
+  },
+  normalizeNeedAckChildren(raw) {
+    if (raw == null) return [];
+    return Array.isArray(raw) ? raw : [raw];
+  }
+});
+
+assert.strictEqual(commentIndex.childHasUserCommentById.get('101'), false);
+assert.strictEqual(commentIndex.childHasUserCommentById.get('102'), true);
+assert.strictEqual(commentIndex.childHasUserCommentByKey.get('g:commented group|c:without comment'), false);
+assert.strictEqual(commentIndex.childHasUserCommentByKey.get('g:commented group|c:with comment'), true);
+assert.strictEqual(commentIndex.groupHasAnyUserCommentByKey.get('group:commented group'), true);
 
 const severityApi = context.BosunSilenceHiderNeedAckSeverity.createNeedAckSeverity({
   normalizeNeedAckChildren(raw) {
@@ -143,5 +234,74 @@ assert.strictEqual(
   ),
   'g:group alert|c:child alert|ago:2026-04-23T00:00:00Z'
 );
+
+const promqlApi = context.BosunHelperPromQL;
+assert.strictEqual(
+  promqlApi.extractPromrasQuery("promras('''metric{label=\"a  b\"}\n  + other''')"),
+  'metric{label="a  b"}\n  + other'
+);
+assert.deepStrictEqual(
+  Array.from(promqlApi.parseAlertTags('host="db,primary",env="prod"'), (tag) => ({ ...tag })),
+  [
+    { name: 'host', value: 'db,primary' },
+    { name: 'env', value: 'prod' }
+  ]
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('sum($metric)', { host: 'db' }),
+  'sum($metric)'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('metric{host!="db"}', { host: 'web', env: 'prod' }),
+  'metric{host!="db", env="prod"}'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('sum by (host) (rate(cpu_total[5m]))', { host: 'db' }),
+  'sum by (host) (rate(cpu_total{host="db"}[5m]))'
+);
+
+function createBaselineHarness() {
+  const events = [];
+  const api = context.BosunSilenceHiderNeedAckBaseline.createNeedAckBaseline({
+    sessionKey: 'test-baseline',
+    isSoundEnabled: () => true,
+    reportDiagnostics(event, details) {
+      events.push({ event, details });
+    },
+    playNeedAckChime(kind) {
+      events.push({ event: 'chime', details: kind });
+    },
+    collectCurrentIdsAndSeverity(payload) {
+      const ids = Array.isArray(payload.ids) ? payload.ids : [];
+      return {
+        currentIds: new Set(ids),
+        idToSeverity: new Map(ids.map((id) => [id, payload.severity || 'critical']))
+      };
+    }
+  });
+  return { api, events };
+}
+
+{
+  const { api, events } = createBaselineHarness();
+  api.process({ Groups: { NeedAck: [] }, ids: ['a', 'b', 'c', 'd', 'e'] });
+  events.length = 0;
+  api.process({
+    Groups: { NeedAck: [] },
+    ids: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k']
+  });
+  assert.ok(events.some((entry) => entry.event === 'chime' && entry.details === 'alert'));
+  assert.ok(events.some((entry) => entry.event === 'new-alerts'));
+}
+
+{
+  const { api, events } = createBaselineHarness();
+  api.process({ Groups: { NeedAck: [] }, ids: ['a', 'b'], severity: 'warning' });
+  events.length = 0;
+  api.process({ Groups: { NeedAck: [] }, ids: [], severity: 'warning' });
+  api.process({ Groups: { NeedAck: [] }, ids: ['a', 'b'], severity: 'warning' });
+  assert.ok(events.some((entry) => entry.event === 'empty-snapshot-pending'));
+  assert.ok(!events.some((entry) => entry.event === 'chime'));
+}
 
 console.log('Smoke test passed');

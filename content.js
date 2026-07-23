@@ -4,7 +4,11 @@
   const STORAGE_KEY = 'bosunShowSilenced';
   const AUTO_REFRESH_ENABLED_KEY = 'bosunAutoRefreshEnabled';
   const AUTO_REFRESH_IDLE_SECONDS_KEY = 'bosunAutoRefreshIdleSeconds';
+  const USER_COMMENT_FILTER_ENABLED_KEY = 'bosunNoUserCommentFilterEnabled';
+  const ACKNOWLEDGED_COLLAPSE_ENABLED_KEY = 'bosunAcknowledgedCollapseEnabled';
   const HIDDEN_CLASS = 'bosun-silence-hidden';
+  const USER_COMMENT_FILTER_HIDDEN_CLASS = 'bosun-user-comment-hidden';
+  const ACKNOWLEDGED_COLLAPSED_CLASS = 'bosun-acknowledged-collapsed';
   const TOP_BAR_ID = 'bosun-top-controls-bar';
   const TOP_BAR_STATUS_ID = 'bosun-top-controls-status';
   const TOGGLE_ID = 'bosun-silence-toggle';
@@ -12,6 +16,8 @@
   const AUTO_REFRESH_TOGGLE_ID = 'bosun-auto-refresh-toggle';
   const AUTO_REFRESH_INPUT_ID = 'bosun-auto-refresh-idle-seconds';
   const AUTO_REFRESH_COUNTDOWN_ID = 'bosun-auto-refresh-countdown';
+  const USER_COMMENT_FILTER_TOGGLE_ID = 'bosun-user-comment-filter-toggle';
+  const ACKNOWLEDGED_COLLAPSE_TOGGLE_ID = 'bosun-acknowledged-collapse-toggle';
   const SOUND_ALERTS_ENABLED_KEY = 'bosunSoundAlertsEnabled';
   const SOUND_ALERTS_TOGGLE_ID = 'bosun-sound-alerts-toggle';
   const DIAGNOSTICS_ENABLED_KEY = 'bosunDiagnosticsEnabled';
@@ -94,6 +100,8 @@
   let lastUserActivityTs = Date.now();
   let lastKnownUrl = window.location.href;
   let topBarMountObserver = null;
+  let userCommentFilterEnabled = false;
+  let acknowledgedCollapseEnabled = false;
   let soundAlertsEnabled = true;
   let diagnosticsEnabled = false;
   let toolbarStatusSource = '';
@@ -101,6 +109,7 @@
   let toolbarStatusMessage = '';
   let toolbarStatusTitle = '';
   let toolbarStatusTimer = null;
+  let alertDataIndexReady = false;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -108,16 +117,21 @@
   const childOldNoNoteByKey = new Map();
   const childHasNoteById = new Map();
   const childHasNoteByKey = new Map();
+  const childHasUserCommentById = new Map();
+  const childHasUserCommentByKey = new Map();
 
   // group maps
   const groupHasOldNoNoteByKey = new Map();
   const groupHasAnyNoteByKey = new Map();
+  const groupHasAnyUserCommentByKey = new Map();
   const groupHasOldNoNoteBySubject = new Map();
   const groupHasAnyNoteBySubject = new Map();
+  const groupHasAnyUserCommentBySubject = new Map();
   const lastResolvedParentStateByKey = new Map();
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
+  const promqlApi = globalThis.BosunHelperPromQL || null;
   const diagnosticsApi = globalThis.BosunSilenceHiderDiagnostics?.createDiagnostics?.({
     modalId: DIAGNOSTICS_MODAL_ID,
     logListId: DIAGNOSTICS_LOG_LIST_ID,
@@ -764,6 +778,8 @@
 
     stylesApi.injectStyles({
       hiddenClass: HIDDEN_CLASS,
+      userCommentFilterHiddenClass: USER_COMMENT_FILTER_HIDDEN_CLASS,
+      acknowledgedCollapsedClass: ACKNOWLEDGED_COLLAPSED_CLASS,
       copyButtonClass: COPY_BUTTON_CLASS,
       copyAllButtonClass: COPY_ALL_BUTTON_CLASS,
       grafanaQueryButtonClass: GRAFANA_QUERY_BUTTON_CLASS,
@@ -933,6 +949,9 @@
   }
 
   function extractPromrasQuery(expr) {
+    if (promqlApi?.extractPromrasQuery) {
+      return promqlApi.extractPromrasQuery(expr);
+    }
     if (typeof expr !== 'string' || !expr.trim()) return '';
 
     const querySectionMatch = expr.match(/(?:^|\n)\s*Query:\s*([\s\S]*?)(?=\n\s*[A-Z][A-Za-z0-9 _-]*:\s|$)/i);
@@ -954,6 +973,9 @@
   }
 
   function parseAlertTags(rawTags, alertKey = '') {
+    if (promqlApi?.parseAlertTags) {
+      return promqlApi.parseAlertTags(rawTags, alertKey);
+    }
     if (rawTags && typeof rawTags === 'object' && !Array.isArray(rawTags)) {
       return Object.keys(rawTags)
         .filter((name) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name))
@@ -977,6 +999,9 @@
   }
 
   function escapePromLabelValue(value) {
+    if (promqlApi?.escapePromLabelValue) {
+      return promqlApi.escapePromLabelValue(value);
+    }
     return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
   }
 
@@ -1120,6 +1145,9 @@
   }
 
   function applyAlertTagsToPromQuery(query, rawTags, alertKey = '') {
+    if (promqlApi?.applyAlertTagsToPromQuery) {
+      return promqlApi.applyAlertTagsToPromQuery(query, rawTags, alertKey);
+    }
     const tags = parseAlertTags(rawTags, alertKey);
     if (!query || !tags.length) return query;
 
@@ -1503,6 +1531,22 @@
     return document.querySelector('[ts-ack-group="schedule.Groups.Acknowledged"]');
   }
 
+  function getAcknowledgedHeading() {
+    const root = getAcknowledgedRoot();
+    let node = root?.previousElementSibling || null;
+    let guard = 0;
+
+    while (node && guard < 8) {
+      const text = node.textContent?.replace(/\s+/g, ' ').trim() || '';
+      if (/^Acknowledged\b/i.test(text)) return node;
+      if (/^Needs Acknowledgement\b/i.test(text)) return null;
+      node = node.previousElementSibling;
+      guard += 1;
+    }
+
+    return null;
+  }
+
   function getAcknowledgedPanels() {
     const root = getAcknowledgedRoot();
     if (!root) return [];
@@ -1519,6 +1563,8 @@
 
     ensureToggleExists();
     applyVisibility();
+    applyAcknowledgedCollapse();
+    applyUserCommentFilter();
     ensureCopyButtons();
     markNoSelectElements();
     refreshSilencedBadges();
@@ -1572,6 +1618,86 @@
 
     hiddenCount = nextTotalSilencedCount;
     updateToggleText();
+  }
+
+  function applyAcknowledgedCollapse() {
+    const root = getAcknowledgedRoot();
+    const heading = getAcknowledgedHeading();
+    root?.classList.toggle(ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
+    heading?.classList.toggle(ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
+  }
+
+  function resolveChildHasUserComment(panel, parentGroupPanel = null) {
+    const heading = getChildHeading(panel);
+    if (!heading) return true;
+
+    const panelId = getPanelIdFromHeading(heading);
+    const groupPanel = parentGroupPanel || findParentGroupPanelForChild(panel);
+    const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
+    let hasLastActionUserComment = false;
+
+    if (panelId && childHasUserCommentById.has(panelId)) {
+      hasLastActionUserComment = childHasUserCommentById.get(panelId) === true;
+    }
+
+    if (!hasLastActionUserComment && childKey && childHasUserCommentByKey.has(childKey)) {
+      hasLastActionUserComment = childHasUserCommentByKey.get(childKey) === true;
+    }
+
+    return hasLastActionUserComment ||
+      resolveChildState(panel, groupPanel) === 'note' ||
+      !!panel.querySelector(`.${HAS_NOTE_ICON_CLASS}:not(.bosun-parent-marker)`);
+  }
+
+  function resolveGroupHasUserComment(groupPanel) {
+    const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
+    const groupSubject = getGroupSubjectFromPanel(groupPanel);
+    let hasLastActionUserComment = false;
+
+    if (groupKey && groupHasAnyUserCommentByKey.has(groupKey)) {
+      hasLastActionUserComment = groupHasAnyUserCommentByKey.get(groupKey) === true;
+    }
+
+    if (!hasLastActionUserComment && groupSubject && groupHasAnyUserCommentBySubject.has(groupSubject)) {
+      hasLastActionUserComment = groupHasAnyUserCommentBySubject.get(groupSubject) === true;
+    }
+
+    return hasLastActionUserComment ||
+      resolveGroupState(groupPanel) === 'note' ||
+      !!groupPanel.querySelector(`.${HAS_NOTE_ICON_CLASS}`);
+  }
+
+  function shouldShowAlertByUserCommentFilter(panel, parentGroupPanel = null) {
+    if (!userCommentFilterEnabled || !alertDataIndexReady) return true;
+    return !resolveChildHasUserComment(panel, parentGroupPanel);
+  }
+
+  function applyUserCommentFilter() {
+    const needsAckRoot = getNeedsAckRoot();
+    if (!needsAckRoot) return;
+
+    if (!userCommentFilterEnabled || !alertDataIndexReady) {
+      needsAckRoot.querySelectorAll(`.${USER_COMMENT_FILTER_HIDDEN_CLASS}`).forEach((panel) => {
+        panel.classList.remove(USER_COMMENT_FILTER_HIDDEN_CLASS);
+      });
+      return;
+    }
+
+    const groupPanels = getGroupPanels();
+    for (const groupPanel of groupPanels) {
+      const childPanels = getGroupChildPanels(groupPanel);
+
+      for (const childPanel of childPanels) {
+        const shouldShow = shouldShowAlertByUserCommentFilter(childPanel, groupPanel);
+        childPanel.classList.toggle(USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShow);
+      }
+
+      const hasVisibleChild = childPanels.some((childPanel) => {
+        return !childPanel.classList.contains(USER_COMMENT_FILTER_HIDDEN_CLASS);
+      });
+      const shouldShowGroup = childPanels.length ? hasVisibleChild : !resolveGroupHasUserComment(groupPanel);
+      groupPanel.classList.toggle(USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShowGroup);
+    }
   }
 
   function scheduleRefresh() {
@@ -1727,6 +1853,14 @@
     }, 'auto-refresh');
   }
 
+  function saveUserCommentFilterState() {
+    saveToLocalStorage({ [USER_COMMENT_FILTER_ENABLED_KEY]: userCommentFilterEnabled }, USER_COMMENT_FILTER_ENABLED_KEY);
+  }
+
+  function saveAcknowledgedCollapseState() {
+    saveToLocalStorage({ [ACKNOWLEDGED_COLLAPSE_ENABLED_KEY]: acknowledgedCollapseEnabled }, ACKNOWLEDGED_COLLAPSE_ENABLED_KEY);
+  }
+
   function saveSoundAlertsState() {
     saveToLocalStorage({ [SOUND_ALERTS_ENABLED_KEY]: soundAlertsEnabled }, SOUND_ALERTS_ENABLED_KEY);
   }
@@ -1789,7 +1923,15 @@
 
     try {
       storage.get(
-        [STORAGE_KEY, AUTO_REFRESH_ENABLED_KEY, AUTO_REFRESH_IDLE_SECONDS_KEY, SOUND_ALERTS_ENABLED_KEY, DIAGNOSTICS_ENABLED_KEY],
+        [
+          STORAGE_KEY,
+          AUTO_REFRESH_ENABLED_KEY,
+          AUTO_REFRESH_IDLE_SECONDS_KEY,
+          USER_COMMENT_FILTER_ENABLED_KEY,
+          ACKNOWLEDGED_COLLAPSE_ENABLED_KEY,
+          SOUND_ALERTS_ENABLED_KEY,
+          DIAGNOSTICS_ENABLED_KEY
+        ],
         (result) => {
           const err = getChromeStorageLastError();
           if (err) {
@@ -1806,6 +1948,12 @@
             ? result[AUTO_REFRESH_ENABLED_KEY]
             : true;
           autoRefreshIdleSeconds = normalizeAutoRefreshIdleSeconds(result[AUTO_REFRESH_IDLE_SECONDS_KEY]);
+          userCommentFilterEnabled = typeof result[USER_COMMENT_FILTER_ENABLED_KEY] === 'boolean'
+            ? result[USER_COMMENT_FILTER_ENABLED_KEY]
+            : false;
+          acknowledgedCollapseEnabled = typeof result[ACKNOWLEDGED_COLLAPSE_ENABLED_KEY] === 'boolean'
+            ? result[ACKNOWLEDGED_COLLAPSE_ENABLED_KEY]
+            : false;
           soundAlertsEnabled = typeof result[SOUND_ALERTS_ENABLED_KEY] === 'boolean'
             ? result[SOUND_ALERTS_ENABLED_KEY]
             : true;
@@ -2042,6 +2190,36 @@
 
 
 
+  function updateUserCommentFilterControl() {
+    const button = document.getElementById(USER_COMMENT_FILTER_TOGGLE_ID);
+    setToolbarToggleButtonState(button, userCommentFilterEnabled, {
+      onIcon: '!',
+      offIcon: '!',
+      label: 'No notes',
+      offUsesNeutral: true
+    });
+    if (button) {
+      button.title = userCommentFilterEnabled
+        ? 'Showing only alerts without user comments'
+        : 'Showing all Needs Ack alerts';
+    }
+  }
+
+  function updateAcknowledgedCollapseControl() {
+    const button = document.getElementById(ACKNOWLEDGED_COLLAPSE_TOGGLE_ID);
+    setToolbarToggleButtonState(button, acknowledgedCollapseEnabled, {
+      onIcon: '-',
+      offIcon: '+',
+      label: 'Ack',
+      offUsesNeutral: true
+    });
+    if (button) {
+      button.title = acknowledgedCollapseEnabled
+        ? 'Acknowledged section is hidden'
+        : 'Acknowledged section is visible';
+    }
+  }
+
   function updateDiagnosticsControl() {
     const cb = document.getElementById(DIAGNOSTICS_TOGGLE_ID);
     if (cb) cb.checked = diagnosticsEnabled;
@@ -2064,6 +2242,30 @@
     updateSoundAlertsControl();
   }
 
+
+  function handleUserCommentFilterToggle(e) {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    userCommentFilterEnabled = !userCommentFilterEnabled;
+    markUserActivity();
+    saveUserCommentFilterState();
+    applyUserCommentFilter();
+    updateUserCommentFilterControl();
+  }
+
+  function handleAcknowledgedCollapseToggle(e) {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    acknowledgedCollapseEnabled = !acknowledgedCollapseEnabled;
+    markUserActivity();
+    saveAcknowledgedCollapseState();
+    applyAcknowledgedCollapse();
+    updateAcknowledgedCollapseControl();
+  }
 
   function handleDiagnosticsToggle(e) {
     diagnosticsEnabled = Boolean(e.target.checked);
@@ -2107,6 +2309,50 @@
   }
 
 
+
+  function ensureUserCommentFilterControls(actions) {
+    let wrap = actions.querySelector('.bosun-user-comment-filter-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.className = 'bosun-toolbar-group bosun-user-comment-filter-wrap';
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.id = USER_COMMENT_FILTER_TOGGLE_ID;
+      button.className = 'bosun-toolbar-btn';
+      button.innerHTML = `
+        <span class="bosun-toolbar-btn-icon">!</span>
+        <span class="bosun-toolbar-btn-label">No notes</span>
+      `;
+      button.addEventListener('click', handleUserCommentFilterToggle);
+      wrap.appendChild(button);
+      actions.appendChild(wrap);
+    }
+
+    updateUserCommentFilterControl();
+  }
+
+  function ensureAcknowledgedCollapseControls(actions) {
+    let wrap = actions.querySelector('.bosun-acknowledged-collapse-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.className = 'bosun-toolbar-group bosun-acknowledged-collapse-wrap';
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.id = ACKNOWLEDGED_COLLAPSE_TOGGLE_ID;
+      button.className = 'bosun-toolbar-btn';
+      button.innerHTML = `
+        <span class="bosun-toolbar-btn-icon">+</span>
+        <span class="bosun-toolbar-btn-label">Ack</span>
+      `;
+      button.addEventListener('click', handleAcknowledgedCollapseToggle);
+      wrap.appendChild(button);
+      actions.appendChild(wrap);
+    }
+
+    updateAcknowledgedCollapseControl();
+  }
 
   function ensureDiagnosticsControls(actions) {
     if (!DIAGNOSTICS_TOOLBAR_UI_ENABLED) {
@@ -2331,6 +2577,8 @@
     const actions = getTopBarActionsContainer();
     if (!actions) return;
     ensureSoundAlertsControls(actions);
+    ensureUserCommentFilterControls(actions);
+    ensureAcknowledgedCollapseControls(actions);
     ensureAutoRefreshControls(actions);
     ensureToolbarStatusIndicator(actions);
 
@@ -2575,27 +2823,40 @@
       childOldNoNoteByKey: new Map(),
       childHasNoteById: new Map(),
       childHasNoteByKey: new Map(),
+      childHasUserCommentById: new Map(),
+      childHasUserCommentByKey: new Map(),
       groupHasOldNoNoteByKey: new Map(),
       groupHasAnyNoteByKey: new Map(),
+      groupHasAnyUserCommentByKey: new Map(),
       groupHasOldNoNoteBySubject: new Map(),
-      groupHasAnyNoteBySubject: new Map()
+      groupHasAnyNoteBySubject: new Map(),
+      groupHasAnyUserCommentBySubject: new Map()
     };
     childOldNoNoteById.clear();
     childOldNoNoteByKey.clear();
     childHasNoteById.clear();
     childHasNoteByKey.clear();
+    childHasUserCommentById.clear();
+    childHasUserCommentByKey.clear();
     groupHasOldNoNoteByKey.clear();
     groupHasAnyNoteByKey.clear();
+    groupHasAnyUserCommentByKey.clear();
     groupHasOldNoNoteBySubject.clear();
     groupHasAnyNoteBySubject.clear();
+    groupHasAnyUserCommentBySubject.clear();
     for (const [key, value] of nextIndex.childOldNoNoteById) childOldNoNoteById.set(key, value);
     for (const [key, value] of nextIndex.childOldNoNoteByKey) childOldNoNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.childHasNoteById) childHasNoteById.set(key, value);
     for (const [key, value] of nextIndex.childHasNoteByKey) childHasNoteByKey.set(key, value);
+    for (const [key, value] of nextIndex.childHasUserCommentById || []) childHasUserCommentById.set(key, value);
+    for (const [key, value] of nextIndex.childHasUserCommentByKey || []) childHasUserCommentByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasOldNoNoteByKey) groupHasOldNoNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteByKey) groupHasAnyNoteByKey.set(key, value);
+    for (const [key, value] of nextIndex.groupHasAnyUserCommentByKey || []) groupHasAnyUserCommentByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasOldNoNoteBySubject) groupHasOldNoNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteBySubject) groupHasAnyNoteBySubject.set(key, value);
+    for (const [key, value] of nextIndex.groupHasAnyUserCommentBySubject || []) groupHasAnyUserCommentBySubject.set(key, value);
+    alertDataIndexReady = true;
     rebuildGrafanaQueryIndex(payload);
   }
 
@@ -2851,6 +3112,7 @@
       rebuildAlertDataIndex(payload);
       needAckBaselineApi?.process?.(payload);
       applyNeedsAckMarkersFromData();
+      applyUserCommentFilter();
       ensureCopyButtons();
       markNoSelectElements();
       refreshSilencedBadges();

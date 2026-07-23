@@ -33,6 +33,7 @@
         "alerts-data.js",
         "needack-baseline.js",
         "needack-severity.js",
+        "promql.js",
         "page-utils.js",
         "styles.js",
         "activity.js",
