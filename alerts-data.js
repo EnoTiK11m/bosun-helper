@@ -113,7 +113,8 @@
         groupHasAnyUserCommentByKey: new Map(),
         groupHasOldNoNoteBySubject: new Map(),
         groupHasAnyNoteBySubject: new Map(),
-        groupHasAnyUserCommentBySubject: new Map()
+        groupHasAnyUserCommentBySubject: new Map(),
+        groupCountBySubject: new Map()
       };
 
       const groups = payload?.Groups?.NeedAck;
@@ -170,6 +171,10 @@
 
         const groupSubject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
         if (groupSubject) {
+          nextIndex.groupCountBySubject.set(
+            groupSubject,
+            (nextIndex.groupCountBySubject.get(groupSubject) || 0) + 1
+          );
           const prevOldBySubject = nextIndex.groupHasOldNoNoteBySubject.get(groupSubject) === true;
           const prevNoteBySubject = nextIndex.groupHasAnyNoteBySubject.get(groupSubject) === true;
           const prevUserCommentBySubject = nextIndex.groupHasAnyUserCommentBySubject.get(groupSubject) === true;

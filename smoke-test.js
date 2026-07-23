@@ -205,6 +205,7 @@ assert.strictEqual(commentIndex.childHasUserCommentById.get('102'), true);
 assert.strictEqual(commentIndex.childHasUserCommentByKey.get('g:commented group|c:without comment'), false);
 assert.strictEqual(commentIndex.childHasUserCommentByKey.get('g:commented group|c:with comment'), true);
 assert.strictEqual(commentIndex.groupHasAnyUserCommentByKey.get('group:commented group'), true);
+assert.strictEqual(commentIndex.groupCountBySubject.get('commented group'), 1);
 
 const severityApi = context.BosunSilenceHiderNeedAckSeverity.createNeedAckSeverity({
   normalizeNeedAckChildren(raw) {
@@ -226,6 +227,13 @@ assert.strictEqual(
     {}
   ),
   'ak:cpu.high|tags:host=db01'
+);
+assert.strictEqual(
+  severityApi.needAckStableKey(
+    { State: { AlertKey: 'cpu.high', Tags: { zone: 'a', host: 'db01' } } },
+    {}
+  ),
+  'ak:cpu.high|tags:host=db01,zone=a'
 );
 assert.strictEqual(
   severityApi.needAckStableKey(

@@ -6,7 +6,8 @@
       alertFile,
       softFile,
       getEnabled,
-      reportDiagnostics
+      reportDiagnostics,
+      crossTabStorageKey = 'bosunNeedAckSoundClaimV1'
     } = options;
 
     let lastNeedAckChimeAt = 0;
@@ -15,6 +16,7 @@
     let pendingNeedAckRetryAttached = false;
     let alertChimeAudio = null;
     let softChimeAudio = null;
+    const crossTabDedupMs = 2000;
 
     function ensureAudioObjects() {
       if (!chrome?.runtime?.getURL) return;
@@ -50,15 +52,20 @@
                 audio.pause();
                 audio.currentTime = 0;
                 audio.muted = false;
+                return true;
               })
-              .catch(() => {});
+              .catch(() => false);
           }
+          audio.pause();
+          audio.currentTime = 0;
+          audio.muted = false;
+          return Promise.resolve(true);
         } catch (_) {}
-        return Promise.resolve();
+        return Promise.resolve(false);
       });
 
-      Promise.allSettled(unlockPromises).finally(() => {
-        audioUnlocked = true;
+      Promise.all(unlockPromises).then((results) => {
+        audioUnlocked = results.some(Boolean);
       });
     }
 
@@ -116,7 +123,26 @@
       reportDiagnostics('sound-retry-armed', `kind=${kind}`);
     }
 
-    function playNeedAckChime(kind) {
+    function claimCrossTabPlayback(kind) {
+      if (!window?.localStorage) return true;
+      try {
+        const now = Date.now();
+        const current = JSON.parse(window.localStorage.getItem(crossTabStorageKey) || 'null');
+        if (current && now - Number(current.at || 0) < crossTabDedupMs) {
+          reportDiagnostics('sound-cross-tab-suppressed', `kind=${kind}`);
+          return false;
+        }
+
+        const token = `${now}-${Math.random().toString(16).slice(2)}`;
+        window.localStorage.setItem(crossTabStorageKey, JSON.stringify({ at: now, kind, token }));
+        const saved = JSON.parse(window.localStorage.getItem(crossTabStorageKey) || 'null');
+        return saved?.token === token;
+      } catch (_) {
+        return true;
+      }
+    }
+
+    function playNeedAckChimeUnlocked(kind) {
       if (!getEnabled()) return;
 
       const now = Date.now();
@@ -138,9 +164,10 @@
 
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.then === 'function') {
-          playPromise
+          return playPromise
             .then(() => {
               reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
+              return true;
             })
             .catch((err) => {
               const reason = err?.name || err?.message || 'play-error';
@@ -150,8 +177,11 @@
               lastNeedAckChimeAt = 0;
               scheduleNeedAckChimeRetry(kind, reason);
               reportDiagnostics('sound-blocked', `kind=${kind}, reason=${reason}`);
+              return false;
             });
         }
+        reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
+        return Promise.resolve(true);
       } catch (err) {
         const reason = err?.name || err?.message || 'play-error';
         if (!isAutoplayBlockReason(reason)) {
@@ -160,7 +190,34 @@
         lastNeedAckChimeAt = 0;
         scheduleNeedAckChimeRetry(kind, reason);
         reportDiagnostics('sound-blocked', `kind=${kind}, reason=${reason}`);
+        return Promise.resolve(false);
       }
+    }
+
+    function playNeedAckChime(kind) {
+      if (!getEnabled()) return;
+
+      const lockManager = globalThis.navigator?.locks;
+      if (lockManager?.request) {
+        lockManager.request(
+          'bosun-helper-needack-sound',
+          { ifAvailable: true, mode: 'exclusive' },
+          (lock) => {
+            if (!lock) {
+              reportDiagnostics('sound-cross-tab-suppressed', `kind=${kind}, via=lock`);
+              return false;
+            }
+            if (!claimCrossTabPlayback(kind)) return false;
+            return playNeedAckChimeUnlocked(kind);
+          }
+        ).catch((err) => {
+          reportDiagnostics('sound-lock-failed', err?.message || 'unknown-error');
+          if (claimCrossTabPlayback(kind)) playNeedAckChimeUnlocked(kind);
+        });
+        return;
+      }
+
+      if (claimCrossTabPlayback(kind)) playNeedAckChimeUnlocked(kind);
     }
 
     return {
@@ -170,6 +227,8 @@
       formatPlayError,
       isAutoplayBlockReason,
       scheduleNeedAckChimeRetry,
+      claimCrossTabPlayback,
+      playNeedAckChimeUnlocked,
       playNeedAckChime
     };
   }
