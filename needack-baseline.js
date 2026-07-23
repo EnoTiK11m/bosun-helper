@@ -15,6 +15,7 @@
     let previousSnapshotSize = 0;
     let refreshAttempts = 0;
     let missingCount = 0;
+    let emptySnapshotCount = 0;
 
     function persistToSession() {
       if (!window?.sessionStorage) return;
@@ -65,6 +66,7 @@
       previousSnapshotSize = 0;
       refreshAttempts = 0;
       missingCount = 0;
+      emptySnapshotCount = 0;
       clearSession();
     }
 
@@ -103,23 +105,31 @@
         previousSnapshotSize = currentIds.size;
         ready = true;
         missingCount = 0;
+        emptySnapshotCount = 0;
         persistToSession();
         reportDiagnostics('baseline-init', `ids=${currentIds.size}`);
         return;
       }
 
       const currentSize = currentIds.size;
-      if (
-        previousSnapshotSize > 0 &&
-        currentSize > 0 &&
-        Math.abs(currentSize - previousSnapshotSize) >
-          Math.max(5, previousSnapshotSize * 0.7)
-      ) {
-        const prevSize = previousSnapshotSize;
+      if (currentSize === 0 && previousSnapshotSize > 0) {
+        emptySnapshotCount += 1;
+        if (emptySnapshotCount < 2) {
+          reportDiagnostics(
+            'empty-snapshot-pending',
+            `previous=${previousSnapshotSize}, confirmation=${emptySnapshotCount}/2`
+          );
+          return;
+        }
+      } else {
+        emptySnapshotCount = 0;
+      }
+
+      if (currentSize === 0) {
         previousIds = currentIds;
-        previousSnapshotSize = currentSize;
+        previousSnapshotSize = 0;
         persistToSession();
-        reportDiagnostics('baseline-reset', `prev=${prevSize}, current=${currentSize}`);
+        reportDiagnostics('empty-snapshot-confirmed', 'ids=0');
         return;
       }
 
