@@ -27,13 +27,17 @@
 
     function normalizeAction(action) {
       if (!action || typeof action !== 'object') return null;
-      const type = typeof action.Type === 'string' ? action.Type : action.type;
-      const message = typeof action.Message === 'string' ? action.Message : action.message;
+      const rawType = action.Type ?? action.type ?? action.ActionType ?? action.actionType;
+      const rawTypeText = String(rawType ?? '').trim().toLowerCase();
+      const type = rawTypeText === '6' || /^(?:note|comment|commented\s+on)$/.test(rawTypeText)
+        ? 'note'
+        : rawTypeText;
+      const message = action.Message ?? action.message ?? action.Text ?? action.text ?? action.Comment ?? action.comment;
       const user = typeof action.User === 'string' ? action.User : action.user;
       const cancelled = action.Cancelled === true || action.cancelled === true;
 
       return {
-        type: String(type || '').trim().toLowerCase(),
+        type,
         message: typeof message === 'string' ? message.trim() : '',
         user: typeof user === 'string' ? user.trim() : '',
         cancelled
@@ -43,7 +47,6 @@
     function isActiveNote(action) {
       const normalized = normalizeAction(action);
       return normalized?.type === 'note' &&
-        Boolean(normalized.message) &&
         !normalized.cancelled;
     }
 
@@ -58,7 +61,10 @@
 
     function hasNoteFromActions(actions) {
       if (!Array.isArray(actions)) return false;
-      return actions.some(isActiveNote);
+      return actions.some((action) => (
+        isActiveNote(action) ||
+        (typeof action === 'string' && Boolean(parseLastActionText(action)))
+      ));
     }
 
     function hasUserNoteFromActions(actions) {
@@ -69,13 +75,14 @@
     function parseLastActionText(value) {
       if (typeof value !== 'string') return null;
       const text = value.replace(/\s+/g, ' ').trim();
-      const match = text.match(/\bNote\s+by\s+(\S+)\s+at\s+.+?\)\s*:\s*(.+)$/i) ||
-        text.match(/\bNote\s+by\s+(\S+)\b.*?:\s*(.+)$/i);
+      const match = text.match(/\bNote\s+by\s+(\S+)\s+at\s+.+?\)\s*:\s*(.*)$/i) ||
+        text.match(/\b(?:Note|Commented\s+On)\s+by\s+(\S+)\b.*?:\s*(.*)$/i) ||
+        text.match(/^\s*(?:Note|Commented\s+On)\b\s*:\s*(.*)$/i);
       if (!match) return null;
       return {
         Type: 'Note',
-        User: match[1],
-        Message: match[2]
+        User: match.length >= 3 ? match[1] : '',
+        Message: match.length >= 3 ? match[2] : match[1]
       };
     }
 
@@ -139,6 +146,14 @@
             ...(Array.isArray(child?.Actions) ? child.Actions : []),
             ...(Array.isArray(child?.actions) ? child.actions : [])
           ];
+          const rawLastAction = child?.State?.LastAction ??
+            child?.State?.lastAction ??
+            child?.LastAction ??
+            child?.lastAction;
+          const lastAction = typeof rawLastAction === 'string'
+            ? parseLastActionText(rawLastAction)
+            : rawLastAction;
+          if (lastAction) allActions.push(lastAction);
           const hasNote = hasNoteFromActions(allActions);
           const hasLastActionUserComment = hasUserComment(child);
           const oldNoNote = oldEnough && !hasNote;

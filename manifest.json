@@ -40,6 +40,10 @@
         "page-utils.js",
         "styles.js",
         "activity.js",
+        "action-templates.js",
+        "grafana-handoff.js",
+        "new-alert-tracker.js",
+        "refresh-coordinator.js",
         "content.js"
       ],
       "run_at": "document_end"

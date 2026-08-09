@@ -29,12 +29,12 @@
   }
 
   function isConfiguredPanelPage() {
-    if (window.location.hostname !== config.grafanaHost) return false;
+    if (window.location.host.toLowerCase() !== String(config.grafanaHost || '').toLowerCase()) return false;
     if (!window.location.search.includes('editPanel=')) return false;
     try {
       const configuredUrl = new URL(config.grafanaPanelUrl);
       return configuredUrl.protocol === 'https:' &&
-        configuredUrl.hostname === window.location.hostname &&
+        configuredUrl.host.toLowerCase() === window.location.host.toLowerCase() &&
         configuredUrl.pathname === window.location.pathname;
     } catch (_) {
       return false;
@@ -72,11 +72,45 @@
     });
   }
 
+  function normalizeText(value) {
+    return String(value || '').replace(/\r\n/g, '\n').trim();
+  }
+
+  function isQueryVisible(query) {
+    const expected = normalizeText(query);
+    if (!expected) return false;
+
+    const selectors = [
+      '.cm-editor .cm-content[contenteditable="true"]',
+      '.monaco-editor .view-lines',
+      'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
+    ];
+    for (const selector of selectors) {
+      for (const node of document.querySelectorAll(selector)) {
+        const text = 'value' in node
+          ? node.value
+          : node.innerText || node.textContent || '';
+        if (normalizeText(text) === expected) return true;
+      }
+    }
+    return false;
+  }
+
+  async function waitForVisibleQuery(query, deadlineAt) {
+    while (Date.now() < deadlineAt) {
+      if (isQueryVisible(query)) return true;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return isQueryVisible(query);
+  }
+
   function ensureBridge() {
     const existing = document.getElementById(BRIDGE_MARKER_ID);
     if (existing) {
-      bridgeToken ||= existing.dataset.channelToken || '';
-      return Boolean(bridgeToken);
+      // A marker that predates this isolated-world instance is not ours. Do not
+      // adopt its page-visible token; replace it with a fresh bridge instance.
+      if (bridgeToken) return true;
+      existing.remove();
     }
 
     bridgeToken = globalThis.crypto?.randomUUID?.() ||
@@ -93,7 +127,7 @@
     return true;
   }
 
-  function applyViaBridge(query) {
+  function applyViaBridge(query, run, operationId) {
     return new Promise((resolve) => {
       if (!ensureBridge()) {
         resolve(false);
@@ -112,7 +146,8 @@
           event.origin !== window.location.origin ||
           event.data?.type !== RESULT_MESSAGE ||
           event.data?.channelToken !== bridgeToken ||
-          event.data?.requestId !== requestId
+          event.data?.requestId !== requestId ||
+          event.data?.operationId !== operationId
         ) {
           return;
         }
@@ -127,14 +162,23 @@
         type: APPLY_MESSAGE,
         channelToken: bridgeToken,
         requestId,
-        query
+        operationId,
+        query,
+        run
       }, window.location.origin);
     });
   }
 
-  async function applyWithDeadline(query, deadlineAt) {
+  async function applyWithDeadline(query, run, deadlineAt, operationId) {
     while (Date.now() < deadlineAt) {
-      if (await applyViaBridge(query)) return true;
+      const pageReportedSuccess = await applyViaBridge(query, run, operationId);
+      // Same-page scripts can observe and forge postMessage traffic, including
+      // the channel token. Treat the page-world result as advisory and verify
+      // the rendered editor value independently before deleting storage.
+      if (
+        pageReportedSuccess &&
+        await waitForVisibleQuery(query, Math.min(deadlineAt, Date.now() + 2000))
+      ) return true;
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     return false;
@@ -147,6 +191,7 @@
     if (!requestId) return;
     const payload = await loadPendingQuery(requestId);
     const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
+    const run = payload?.run === true;
     const createdAt = Number(payload?.createdAt || 0);
     const now = Date.now();
 
@@ -160,8 +205,18 @@
       return;
     }
 
-    const applied = await applyWithDeadline(query, now + APPLY_DEADLINE_MS);
+    const expiresIn = Math.max(0, createdAt + PENDING_TTL_MS - now);
+    const expiryTimer = setTimeout(() => clearPendingQuery(requestId), expiresIn);
+    const operationId = globalThis.crypto?.randomUUID?.() ||
+      `${now}-${Math.random().toString(16).slice(2)}`;
+    const applied = await applyWithDeadline(
+      query,
+      run,
+      now + APPLY_DEADLINE_MS,
+      operationId
+    );
     if (applied) {
+      clearTimeout(expiryTimer);
       clearPendingQuery(requestId);
     } else {
       console.warn('[Bosun Helper] Grafana query editor was not ready before timeout.');

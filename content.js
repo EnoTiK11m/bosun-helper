@@ -11,6 +11,8 @@
   const ACKNOWLEDGED_COLLAPSED_CLASS = 'bosun-acknowledged-collapsed';
   const TOP_BAR_ID = 'bosun-top-controls-bar';
   const TOP_BAR_STATUS_ID = 'bosun-top-controls-status';
+  const NEW_ALERT_NOTICE_ID = 'bosun-new-alerts-notice';
+  const NEW_ALERT_TRACKER_STORAGE_KEY = 'bosunNewAlertsAwaitingNoteV1';
   const TOGGLE_ID = 'bosun-silence-toggle';
   const TOGGLE_COUNTER_ID = 'bosun-silence-toggle-counter';
   const AUTO_REFRESH_TOGGLE_ID = 'bosun-auto-refresh-toggle';
@@ -26,18 +28,11 @@
   const DIAGNOSTICS_MODAL_ID = 'bosun-diagnostics-modal';
   const DIAGNOSTICS_LOG_LIST_ID = 'bosun-diagnostics-log-list';
 
-  const ACTION_TEMPLATE_WRAP_CLASS = 'bosun-action-templates';
-  const ACTION_TEMPLATE_TITLE_CLASS = 'bosun-action-templates-title';
-  const ACTION_TEMPLATE_BUTTONS_CLASS = 'bosun-action-templates-buttons';
-  const ACTION_TEMPLATE_BUTTON_CLASS = 'bosun-action-template-btn';
-
-  const ACTION_MESSAGE_TEMPLATES = {
-    note: ['пройдет', 'пройдет через час', 'смотрю', 'в работе', 'норма', 'моргнуло', 'сдано в '],
-    ack: ['пройдет', 'пройдет через час', 'норма', 'моргнуло', 'сдано в '],
-    close: []
-  };
   const DIAGNOSTICS_LOG_STORAGE_KEY = 'bosunDiagnosticsLogV1';
   const NEED_ACK_SOUND_BASELINE_SESSION_KEY = 'bosunNeedAckSoundBaselineV1';
+  const ALERT_MARKER_CACHE_SESSION_KEY = 'bosunAlertMarkerCacheV1';
+  const ALERT_MARKER_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+  const ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP = 2000;
   const SOUND_FILE_ALERT = 'bosun_notification_alert_chime.wav';
   const SOUND_FILE_SOFT = 'bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
@@ -45,10 +40,6 @@
   const GRAFANA_QUERY_BUTTON_CLASS = 'bosun-grafana-query-btn';
   const NO_SELECT_CLASS = 'bosun-no-select';
   const SILENCED_BADGE_CLASS = 'bosun-silenced-badge';
-  const GRAFANA_QUERY_STORAGE_PREFIX = 'bosunGrafanaPendingQueryV2:';
-  const LEGACY_GRAFANA_QUERY_STORAGE_KEY = 'bosunGrafanaPendingQueryV1';
-  const GRAFANA_REQUEST_PARAM = 'bosunHelperRequest';
-  const GRAFANA_PENDING_QUERY_TTL_MS = 2 * 60 * 1000;
   const DEFAULT_EXTENSION_CONFIG = {
     bosunHosts: ['bosun.example.com', 'bosun-test.example.com'],
     grafanaHost: 'grafana.example.com',
@@ -104,8 +95,8 @@
   const OLD_NO_NOTE_ICON_CLASS = 'bosun-old-no-note-icon';
   const HAS_NOTE_ICON_CLASS = 'bosun-has-note-icon';
 
-  const DATA_REFRESH_MS = 6000;
-  const DATA_REFRESH_HIDDEN_MS = 30000;
+  const DATA_REFRESH_MS = 4000;
+  const DATA_REFRESH_HIDDEN_MS = 10000;
   const DATA_REFRESH_DEBOUNCE_MS = 250;
   const STATUS_MESSAGE_TTL_MS = 8000;
   const OLD_NO_NOTE_MINUTES = 0;
@@ -139,6 +130,8 @@
   let toolbarStatusTitle = '';
   let toolbarStatusTimer = null;
   let alertDataIndexReady = false;
+  let newAlertNoticeCounts = { warning: 0, critical: 0, unknown: 0 };
+  let newAlertTrackerMutationAllowed = true;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -188,21 +181,64 @@
       return [raw];
     }
   }) || null;
+  const newAlertTrackerApi = globalThis.BosunHelperNewAlertTracker?.createNewAlertTracker?.({
+    storageKey: `${NEW_ALERT_TRACKER_STORAGE_KEY}:${window.location.origin}`,
+    getStorage: () => getChromeLocalStorage(),
+    getLastError: () => getChromeStorageLastError(),
+    collectCurrentIdsAndSeverity: (payload) =>
+      needAckSeverityApi?.collectCurrentIdsAndSeverity?.(payload) ?? {
+        currentIds: new Set(),
+        idToSeverity: new Map()
+      },
+    normalizeChildren: (raw) => {
+      if (sharedUtils?.normalizeNeedAckChildren) return sharedUtils.normalizeNeedAckChildren(raw);
+      if (raw == null) return [];
+      return Array.isArray(raw) ? raw : [raw];
+    },
+    getChildStableKey: (child, group) => needAckSeverityApi?.needAckStableKey?.(child, group) || null,
+    getGroupStableKey: (group) => needAckSeverityApi?.needAckGroupStableKey?.(group) || null,
+    hasNoteFromActions: (actions) => alertsDataApi?.hasNoteFromActions?.(actions) === true,
+    onChange: ({ counts }) => {
+      newAlertNoticeCounts = counts;
+      updateNewAlertNotice();
+    },
+    reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details)
+  }) || null;
   const needAckBaselineApi = globalThis.BosunSilenceHiderNeedAckBaseline?.createNeedAckBaseline?.({
     sessionKey: NEED_ACK_SOUND_BASELINE_SESSION_KEY,
     isSoundEnabled: () => soundAlertsEnabled,
     reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
     playNeedAckChime: (kind) => soundApi?.playNeedAckChime?.(kind),
+    onNewAlerts: ({ newIds, idToSeverity }) => {
+      if (newAlertTrackerMutationAllowed) newAlertTrackerApi?.add?.(newIds, idToSeverity);
+    },
     collectCurrentIdsAndSeverity: (payload) =>
       needAckSeverityApi?.collectCurrentIdsAndSeverity?.(payload) ?? {
         currentIds: new Set(),
         idToSeverity: new Map()
       }
   }) || null;
+  const refreshCoordinatorApi = globalThis.BosunHelperRefreshCoordinator?.createRefreshCoordinator?.({
+    fetchSnapshot: () => fetchAlertsPayload(),
+    applySnapshot: (payload, metadata) => applyAlertsPayload(payload, metadata),
+    isVisible: () => document.visibilityState !== 'hidden',
+    shouldRun: () => isDashboardEnhancementsPage(),
+    reportDiagnostics: (eventName, details = '') => {
+      reportDiagnostics(eventName, details);
+      if (eventName === 'refresh-coordinator-fetch-failed') {
+        setToolbarStatus('refresh', 'Не удалось синхронизировать алерты', 'error', {
+          title: details,
+          ttlMs: 12000
+        });
+      }
+    },
+    visiblePollMs: DATA_REFRESH_MS,
+    hiddenPollMs: DATA_REFRESH_HIDDEN_MS
+  }) || null;
 
   if (
     isConfiguredBosunHost() &&
-    (!soundApi || !needAckBaselineApi || !needAckSeverityApi || !alertsDataApi)
+    (!soundApi || !needAckBaselineApi || !needAckSeverityApi || !alertsDataApi || !newAlertTrackerApi)
   ) {
     console.warn(
       '[Bosun plugin] One or more extension modules failed to load; sound, NeedAck baseline, severity, or alerts index may be disabled.',
@@ -210,13 +246,24 @@
         soundApi: Boolean(soundApi),
         needAckBaselineApi: Boolean(needAckBaselineApi),
         needAckSeverityApi: Boolean(needAckSeverityApi),
-        alertsDataApi: Boolean(alertsDataApi)
+        alertsDataApi: Boolean(alertsDataApi),
+        newAlertTrackerApi: Boolean(newAlertTrackerApi)
       }
     );
   }
 
   const pageUtils = globalThis.BosunSilenceHiderPageUtils?.createPageUtils?.() || null;
   const stylesApi = globalThis.BosunSilenceHiderStyles || null;
+  const actionTemplatesApi = globalThis.BosunHelperActionTemplates?.createActionTemplates?.({
+    isActionPage: () => isActionPage()
+  }) || null;
+  const grafanaHandoffApi = globalThis.BosunHelperGrafanaHandoff?.createGrafanaHandoff?.({
+    config: extensionConfig,
+    getStorage: () => getChromeLocalStorage(),
+    getLastError: () => getChromeStorageLastError(),
+    reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
+    showFeedback: (button, message, ok) => flashButtonState(button, message, ok)
+  }) || null;
   const activityApi = globalThis.BosunSilenceHiderActivity?.createActivityTracker?.({
     pageUtils: pageUtils || {
       isDashboardHome: () => window.location.pathname === '/',
@@ -246,7 +293,7 @@
 
   function isConfiguredBosunHost() {
     return Array.isArray(extensionConfig.bosunHosts) &&
-      extensionConfig.bosunHosts.includes(window.location.hostname);
+      extensionConfig.bosunHosts.includes(window.location.host);
   }
 
   function isDashboardHome() {
@@ -258,150 +305,6 @@
       pageUtils.applyActionPageTweaks();
       return;
     }
-  }
-
-  function getActionType() {
-    try {
-      return new URLSearchParams(window.location.search).get('type') || '';
-    } catch (_) {
-      return '';
-    }
-  }
-
-  function getActionTemplatesForType(type) {
-    return ACTION_MESSAGE_TEMPLATES[type] || [];
-  }
-
-  function findActionMessageTextarea() {
-    const areas = Array.from(document.querySelectorAll('textarea'));
-    if (!areas.length) return null;
-    return areas.find((el) => el.offsetParent !== null) || areas[0] || null;
-  }
-
-  function setNativeTextareaValue(textarea, value) {
-    if (!textarea) return;
-
-    const proto = Object.getPrototypeOf(textarea);
-    const descriptor = proto ? Object.getOwnPropertyDescriptor(proto, 'value') : null;
-    const setter = descriptor && typeof descriptor.set === 'function' ? descriptor.set : null;
-
-    if (setter) {
-      setter.call(textarea, value);
-      return;
-    }
-
-    textarea.value = value;
-  }
-
-  function moveTextareaCursorToEnd(textarea) {
-    if (!textarea) return;
-    const pos = (textarea.value || '').length;
-    try {
-      textarea.setSelectionRange(pos, pos);
-    } catch (_) {}
-  }
-
-  function insertTemplateIntoTextarea(textarea, value) {
-    if (!textarea) return;
-
-    const current = textarea.value || '';
-    const next = current.trim() ? `${current.replace(/\s+$/, '')}\n${value}` : value;
-
-    setNativeTextareaValue(textarea, next);
-    textarea.focus();
-    moveTextareaCursorToEnd(textarea);
-    textarea.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
-    textarea.dispatchEvent(new Event('change', { bubbles: true }));
-    textarea.dispatchEvent(new Event('blur', { bubbles: true }));
-    textarea.focus();
-    moveTextareaCursorToEnd(textarea);
-  }
-
-  function getGrafanaQueryStorageKey(requestId) {
-    return requestId ? `${GRAFANA_QUERY_STORAGE_PREFIX}${requestId}` : '';
-  }
-
-  function clearGrafanaPendingQuery(requestId) {
-    const storageKey = getGrafanaQueryStorageKey(requestId);
-    if (!storageKey) return;
-
-    try {
-      if (chrome?.storage?.local?.remove) {
-        chrome.storage.local.remove([storageKey], () => {
-          const err = getChromeStorageLastError();
-          if (err) {
-            reportDiagnostics('grafana-query-clear-failed', err.message || 'unknown-error');
-          }
-        });
-      }
-    } catch (_) {}
-  }
-
-  function ensureActionTemplates() {
-    const existing = document.querySelector(`.${ACTION_TEMPLATE_WRAP_CLASS}`);
-    if (!isActionPage()) {
-      existing?.remove();
-      return;
-    }
-
-    const type = getActionType();
-    const templates = getActionTemplatesForType(type);
-    if (!templates.length) {
-      existing?.remove();
-      return;
-    }
-
-    const textarea = findActionMessageTextarea();
-    if (!textarea || !textarea.parentElement) return;
-
-    let wrap = existing;
-    const signature = `${type}::${templates.join('|')}`;
-    const alreadyBuilt = wrap
-      && wrap.dataset.templateSignature === signature
-      && wrap.dataset.textareaBound === '1'
-      && wrap.parentElement === textarea.parentElement
-      && wrap.nextElementSibling === textarea;
-
-    if (alreadyBuilt) {
-      return;
-    }
-
-    if (!wrap) {
-      wrap = document.createElement('div');
-      wrap.className = ACTION_TEMPLATE_WRAP_CLASS;
-    }
-
-    if (wrap.parentElement !== textarea.parentElement || wrap.nextElementSibling !== textarea) {
-      textarea.parentElement.insertBefore(wrap, textarea);
-    }
-
-    wrap.textContent = '';
-    wrap.dataset.templateSignature = signature;
-    wrap.dataset.textareaBound = '1';
-
-    const title = document.createElement('div');
-    title.className = ACTION_TEMPLATE_TITLE_CLASS;
-    title.textContent = 'Частые комментарии';
-    wrap.appendChild(title);
-
-    const buttons = document.createElement('div');
-    buttons.className = ACTION_TEMPLATE_BUTTONS_CLASS;
-    templates.forEach((template) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = ACTION_TEMPLATE_BUTTON_CLASS;
-      btn.textContent = template;
-      btn.addEventListener('mousedown', (event) => {
-        event.preventDefault();
-      });
-      btn.addEventListener('click', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        insertTemplateIntoTextarea(textarea, template);
-      });
-      buttons.appendChild(btn);
-    });
-    wrap.appendChild(buttons);
   }
 
   function injectStyles() {
@@ -543,18 +446,25 @@
     }
   }
 
-  function flashCopyButtonState(button, ok, errorText = 'error') {
+  function flashCopyButtonState(button, ok, errorText = 'Не удалось скопировать') {
     if (!button) return;
     if (button.dataset.flashTimer) {
       clearTimeout(Number(button.dataset.flashTimer));
     }
-    const originalText = button.dataset.originalText || button.textContent;
+    const originalTitle = button.dataset.originalTitle || button.title || '';
+    const originalText = button.dataset.originalText || button.textContent || '';
+    button.dataset.originalTitle = originalTitle;
     button.dataset.originalText = originalText;
-    button.textContent = ok ? 'copied' : errorText;
+    const message = ok ? 'Скопировано' : errorText;
+    button.title = message;
+    button.textContent = ok ? 'Скопировано' : 'Не скопировано';
     button.dataset.copied = ok ? 'true' : 'false';
+    clearToolbarStatus('action-feedback');
     const timerId = setTimeout(() => {
+      button.title = originalTitle;
       button.textContent = originalText;
       delete button.dataset.copied;
+      delete button.dataset.originalTitle;
       delete button.dataset.originalText;
       delete button.dataset.flashTimer;
     }, ok ? 1200 : 2500);
@@ -566,14 +476,17 @@
     if (button.dataset.flashTimer) {
       clearTimeout(Number(button.dataset.flashTimer));
     }
-    const originalText = button.dataset.originalText || button.textContent;
-    button.dataset.originalText = originalText;
-    button.textContent = text;
+    const originalTitle = button.dataset.originalTitle || button.title || '';
+    button.dataset.originalTitle = originalTitle;
+    button.title = text;
     button.dataset.copied = ok ? 'true' : 'false';
+    setToolbarStatus('action-feedback', text, ok ? 'info' : 'error', {
+      ttlMs: ok ? 1500 : 5000
+    });
     const timerId = setTimeout(() => {
-      button.textContent = originalText;
+      button.title = originalTitle;
       delete button.dataset.copied;
-      delete button.dataset.originalText;
+      delete button.dataset.originalTitle;
       delete button.dataset.flashTimer;
     }, ok ? 1200 : 2500);
     button.dataset.flashTimer = String(timerId);
@@ -601,114 +514,8 @@
     return childKey ? (grafanaQueryByKey.get(childKey) || '') : '';
   }
 
-  function createGrafanaRequestId() {
-    return globalThis.crypto?.randomUUID?.() ||
-      `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  }
-
-  function buildGrafanaPanelUrl(requestId) {
-    try {
-      const url = new URL(extensionConfig.grafanaPanelUrl);
-      if (url.protocol !== 'https:' || url.hostname !== extensionConfig.grafanaHost) return '';
-      url.searchParams.set(GRAFANA_REQUEST_PARAM, requestId);
-      return url.toString();
-    } catch (_) {
-      return '';
-    }
-  }
-
-  function cleanupExpiredGrafanaQueries() {
-    const storage = getChromeLocalStorage();
-    if (!storage?.get || !storage?.remove) return;
-
-    storage.get(null, (items) => {
-      if (getChromeStorageLastError() || !items || typeof items !== 'object') return;
-      const now = Date.now();
-      const expiredKeys = Object.entries(items)
-        .filter(([key, value]) => {
-          if (key === LEGACY_GRAFANA_QUERY_STORAGE_KEY) return true;
-          if (!key.startsWith(GRAFANA_QUERY_STORAGE_PREFIX)) return false;
-          const createdAt = Number(value?.createdAt || 0);
-          return !Number.isFinite(createdAt) ||
-            createdAt > now + 5000 ||
-            now - createdAt > GRAFANA_PENDING_QUERY_TTL_MS;
-        })
-        .map(([key]) => key);
-      if (expiredKeys.length) storage.remove(expiredKeys);
-    });
-  }
-
-  function saveGrafanaPendingQuery(requestId, query) {
-    const storageKey = getGrafanaQueryStorageKey(requestId);
-    const payload = {
-      query,
-      createdAt: Date.now()
-    };
-
-    return new Promise((resolve) => {
-      try {
-        if (storageKey && chrome?.storage?.local?.set) {
-          chrome.storage.local.set({ [storageKey]: payload }, () => {
-            const err = getChromeStorageLastError();
-            if (!err) {
-              resolve(true);
-              return;
-            }
-
-            console.warn('[Bosun Helper] Failed to save Grafana pending query:', err.message || err);
-            reportDiagnostics('grafana-query-save-failed', err.message || 'unknown-error');
-            resolve(false);
-          });
-          return;
-        }
-      } catch (_) {}
-      resolve(false);
-    });
-  }
-
-  async function openGrafanaPanelWithQuery(query, button) {
-    if (!query) {
-      flashButtonState(button, 'no query', false);
-      return;
-    }
-
-    let popup = null;
-    try {
-      popup = window.open('about:blank', '_blank');
-      if (popup) popup.opener = null;
-    } catch (_) {}
-    if (!popup) {
-      flashButtonState(button, 'allow popups', false);
-      return;
-    }
-
-    const requestId = createGrafanaRequestId();
-    const saved = await saveGrafanaPendingQuery(requestId, query);
-    if (!saved) {
-      popup?.close?.();
-      flashButtonState(button, 'storage error', false);
-      return;
-    }
-
-    cleanupExpiredGrafanaQueries();
-    const targetUrl = buildGrafanaPanelUrl(requestId);
-    if (!targetUrl) {
-      clearGrafanaPendingQuery(requestId);
-      popup?.close?.();
-      flashButtonState(button, 'config error', false);
-      return;
-    }
-    try {
-      popup.location.replace(targetUrl);
-    } catch (err) {
-      clearGrafanaPendingQuery(requestId);
-      popup.close?.();
-      reportDiagnostics('grafana-window-navigation-failed', err?.message || 'unknown-error');
-      flashButtonState(button, 'open error', false);
-    }
-  }
-
   function ensureGrafanaQueryButton(panel) {
+    if (!grafanaHandoffApi?.openQuery) return;
     if (!getChildSubjectNode(panel)) return;
 
     const subjectNode = getChildSubjectNode(panel);
@@ -721,14 +528,14 @@
     btn.type = 'button';
     btn.className = GRAFANA_QUERY_BUTTON_CLASS;
     btn.textContent = 'Grafana';
-    btn.title = 'Open Grafana panel with this alert query';
+    btn.title = 'Показать запрос и открыть панель Grafana';
     btn.setAttribute('unselectable', 'on');
 
     btn.addEventListener('click', async (event) => {
       event.preventDefault();
       event.stopPropagation();
       const currentQuery = getGrafanaQueryForPanel(panel);
-      await openGrafanaPanelWithQuery(currentQuery, btn);
+      await grafanaHandoffApi.openQuery(currentQuery, btn);
     });
 
     const copyButton = subjectNode.parentElement?.querySelector(`.${COPY_BUTTON_CLASS}`);
@@ -748,7 +555,7 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = COPY_BUTTON_CLASS;
-    btn.textContent = 'Copy';
+    btn.textContent = 'Копировать';
     btn.title = 'Скопировать текст алерта';
     btn.setAttribute('unselectable', 'on');
 
@@ -785,7 +592,7 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = COPY_ALL_BUTTON_CLASS;
-    btn.textContent = 'Copy all';
+    btn.textContent = 'Копировать все';
     btn.title = 'Скопировать все вложенные алерты';
     btn.setAttribute('unselectable', 'on');
 
@@ -1025,6 +832,14 @@
     return isDashboardHome();
   }
 
+  function clearAlertDerivedState() {
+    rebuildAlertDataIndex({ Groups: {} });
+    alertDataIndexReady = false;
+    document.querySelectorAll(
+      `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}`
+    ).forEach((element) => element.remove());
+  }
+
   function runDomRefreshPass(options = {}) {
     const preserveExistingOnNone = options.preserveExistingOnNone === true;
 
@@ -1036,7 +851,7 @@
     markNoSelectElements();
     refreshSilencedBadges();
     applyActionPageTweaks();
-    ensureActionTemplates();
+    actionTemplatesApi?.refresh?.();
 
     if (preserveExistingOnNone) {
       repaintNeedsAckMarkersFast();
@@ -1045,15 +860,19 @@
 
   function handleRouteChange() {
     if (isDashboardEnhancementsPage()) {
+      if (!alertDataIndexReady) restoreAlertMarkerCacheFromSession();
       scheduleTopBarMount();
+      refreshCoordinatorApi?.start?.();
+      refreshCoordinatorApi?.requestRefresh?.('route-change');
     } else {
       disconnectTopBarMountObserver();
+      refreshCoordinatorApi?.stop?.();
       document.getElementById(TOP_BAR_ID)?.remove();
-      alertDataIndexReady = false;
+      clearAlertDerivedState();
     }
 
     if (!isActionPage()) {
-      document.querySelector(`.${ACTION_TEMPLATE_WRAP_CLASS}`)?.remove();
+      actionTemplatesApi?.destroy?.();
     }
 
     runDomRefreshPass({ preserveExistingOnNone: true });
@@ -1177,11 +996,18 @@
 
       // Быстрый локальный repaint по текущим index maps,
       // но без удаления значков, если DOM ещё не устаканился.
+      if (isDashboardEnhancementsPage() && !alertDataIndexReady) {
+        restoreAlertMarkerCacheFromSession();
+      }
       runDomRefreshPass({ preserveExistingOnNone: true });
     }, 120);
   }
 
   function scheduleAlertsDataRefresh() {
+    if (refreshCoordinatorApi?.requestRefresh) {
+      refreshCoordinatorApi.requestRefresh('dom-mutation');
+      return;
+    }
     if (dataRefreshDebounceTimer) clearTimeout(dataRefreshDebounceTimer);
 
     dataRefreshDebounceTimer = setTimeout(() => {
@@ -1205,9 +1031,19 @@
     if (!status) return;
 
     const isVisible = Boolean(toolbarStatusMessage);
+    const accessibleText = toolbarStatusTitle && toolbarStatusTitle !== toolbarStatusMessage
+      ? `${toolbarStatusMessage}. Подробности: ${toolbarStatusTitle}`
+      : toolbarStatusMessage;
     status.textContent = isVisible ? toolbarStatusMessage : '';
     status.title = isVisible ? (toolbarStatusTitle || toolbarStatusMessage) : '';
     status.hidden = !isVisible;
+    if (isVisible) {
+      status.setAttribute('aria-label', accessibleText);
+      status.tabIndex = toolbarStatusTitle !== toolbarStatusMessage ? 0 : -1;
+    } else {
+      status.removeAttribute('aria-label');
+      status.removeAttribute('tabindex');
+    }
     status.classList.toggle('is-info', toolbarStatusLevel === 'info');
     status.classList.toggle('is-warn', toolbarStatusLevel === 'warn');
     status.classList.toggle('is-error', toolbarStatusLevel === 'error');
@@ -1243,6 +1079,46 @@
     toolbarStatusTimer = setTimeout(() => {
       clearToolbarStatus(source);
     }, Math.max(1000, Number(ttlMs) || STATUS_MESSAGE_TTL_MS));
+  }
+
+  function updateNewAlertNotice() {
+    const notice = document.getElementById(NEW_ALERT_NOTICE_ID);
+    if (!notice) return;
+    const warning = Math.max(0, Number(newAlertNoticeCounts.warning) || 0);
+    const critical = Math.max(0, Number(newAlertNoticeCounts.critical) || 0);
+    const unknown = Math.max(0, Number(newAlertNoticeCounts.unknown) || 0);
+    const total = warning + critical + unknown;
+    const visibleCounts = [];
+    if (warning > 0) visibleCounts.push(`Warn: ${warning}`);
+    if (critical > 0) visibleCounts.push(`Crit: ${critical}`);
+    if (unknown > 0) visibleCounts.push(`Unk: ${unknown}`);
+    const nextText = total ? `Новые алерты: ${visibleCounts.join(', ')}` : '';
+    if (notice.textContent !== nextText) notice.textContent = nextText;
+    notice.hidden = total === 0;
+    const severityClass = critical > 0
+      ? 'is-critical'
+      : (warning > 0 ? 'is-warning' : (unknown > 0 ? 'is-unknown' : ''));
+    for (const className of ['is-critical', 'is-warning', 'is-unknown']) {
+      notice.classList.toggle(className, className === severityClass);
+    }
+  }
+
+  function ensureNewAlertNotice() {
+    const bar = ensureTopBarExists();
+    if (!bar) return null;
+    let notice = bar.querySelector(`#${NEW_ALERT_NOTICE_ID}`);
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = NEW_ALERT_NOTICE_ID;
+      notice.className = 'bosun-new-alerts-notice';
+      notice.setAttribute('role', 'status');
+      notice.setAttribute('aria-live', 'polite');
+      notice.setAttribute('aria-atomic', 'true');
+      notice.hidden = true;
+      bar.appendChild(notice);
+    }
+    updateNewAlertNotice();
+    return notice;
   }
 
   function getChromeLocalStorage() {
@@ -1345,6 +1221,90 @@
 
   function restoreNeedAckSoundBaselineFromSession() {
     needAckBaselineApi?.restoreFromSession?.();
+  }
+
+  function getAlertMarkerCacheMaps() {
+    return {
+      childOldNoNoteById,
+      childOldNoNoteByKey,
+      childHasNoteById,
+      childHasNoteByKey,
+      childHasUserCommentById,
+      childHasUserCommentByKey,
+      groupHasOldNoNoteByKey,
+      groupHasAnyNoteByKey,
+      groupHasAnyUserCommentByKey,
+      groupHasOldNoNoteBySubject,
+      groupHasAnyNoteBySubject,
+      groupHasAnyUserCommentBySubject,
+      groupCountBySubject
+    };
+  }
+
+  function serializeAlertMarkerMap(map) {
+    return Array.from(map.entries())
+      .filter(([key, value]) => (
+        (typeof key === 'string' || typeof key === 'number') &&
+        (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
+      ))
+      .slice(0, ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP);
+  }
+
+  function persistAlertMarkerCacheToSession() {
+    try {
+      const maps = {};
+      for (const [name, map] of Object.entries(getAlertMarkerCacheMaps())) {
+        maps[name] = serializeAlertMarkerMap(map);
+      }
+      window.sessionStorage.setItem(ALERT_MARKER_CACHE_SESSION_KEY, JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        maps
+      }));
+    } catch (err) {
+      reportDiagnostics('alert-marker-cache-save-failed', err?.message || 'unknown-error');
+    }
+  }
+
+  function restoreAlertMarkerCacheFromSession() {
+    try {
+      const raw = window.sessionStorage.getItem(ALERT_MARKER_CACHE_SESSION_KEY);
+      if (!raw) return false;
+      const cached = JSON.parse(raw);
+      const ageMs = Date.now() - Number(cached?.savedAt);
+      if (
+        cached?.version !== 1 ||
+        !cached.maps ||
+        typeof cached.maps !== 'object' ||
+        !Number.isFinite(ageMs) ||
+        ageMs < 0 ||
+        ageMs > ALERT_MARKER_CACHE_MAX_AGE_MS
+      ) {
+        window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+        return false;
+      }
+
+      for (const [name, map] of Object.entries(getAlertMarkerCacheMaps())) {
+        const entries = cached.maps[name];
+        if (!Array.isArray(entries)) continue;
+        map.clear();
+        for (const entry of entries.slice(0, ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP)) {
+          if (!Array.isArray(entry) || entry.length !== 2) continue;
+          const [key, value] = entry;
+          const validKey = typeof key === 'string' || typeof key === 'number';
+          const validValue = typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value));
+          if (validKey && validValue) map.set(key, value);
+        }
+      }
+      alertDataIndexReady = true;
+      return true;
+    } catch (err) {
+      try {
+        window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+      } catch (_) {}
+      reportDiagnostics('alert-marker-cache-restore-failed', err?.message || 'unknown-error');
+      return false;
+    }
   }
 
   function restoreDiagnosticsLogFromStorage() {
@@ -1564,19 +1524,29 @@
     }
 
     if (!autoRefreshEnabled) {
-      countdown.textContent = 'off';
-      countdown.title = 'Включить автообновление';
+      countdown.textContent = 'выкл';
+      countdown.title = 'Автообновление выключено';
+      countdown.removeAttribute('aria-pressed');
+      countdown.setAttribute('aria-label', 'Автообновление выключено');
       return;
     }
 
     if (!isDashboardHome()) {
       countdown.textContent = '—';
       countdown.title = 'Автообновление страницы только на главной /';
+      countdown.removeAttribute('aria-pressed');
+      countdown.setAttribute('aria-label', 'Автообновление включено и работает только на главной странице');
       return;
     }
 
-    countdown.title = 'Отключить автообновление';
-    countdown.textContent = `${getAutoRefreshRemainingSeconds()}s`;
+    const remaining = getAutoRefreshRemainingSeconds();
+    countdown.title = `До автообновления: ${remaining} секунд`;
+    countdown.textContent = `${remaining}s`;
+    countdown.removeAttribute('aria-pressed');
+    countdown.setAttribute(
+      'aria-label',
+      `Автообновление включено, осталось ${remaining} секунд`
+    );
   }
 
   function updateAutoRefreshControls() {
@@ -1898,20 +1868,26 @@
       input.max = String(AUTO_REFRESH_MAX_IDLE_SECONDS);
       input.step = '1';
       input.inputMode = 'numeric';
+      input.setAttribute('aria-label', 'Интервал автообновления в секундах');
       input.addEventListener('input', handleAutoRefreshIdleInput);
       input.addEventListener('change', handleAutoRefreshIdleChange);
       input.addEventListener('keydown', handleAutoRefreshIdleKeydown);
 
-      const countdown = document.createElement('button');
-      countdown.type = 'button';
+      const inputHint = document.createElement('span');
+      inputHint.id = `${AUTO_REFRESH_INPUT_ID}-hint`;
+      inputHint.className = 'bosun-sr-only';
+      inputHint.textContent = `Допустимый диапазон: от ${AUTO_REFRESH_MIN_IDLE_SECONDS} до ${AUTO_REFRESH_MAX_IDLE_SECONDS} секунд`;
+      input.setAttribute('aria-describedby', inputHint.id);
+
+      const countdown = document.createElement('output');
       countdown.id = AUTO_REFRESH_COUNTDOWN_ID;
       countdown.className = 'bosun-toolbar-countdown';
-      countdown.title = 'Отключить автообновление';
-      countdown.setAttribute('aria-label', 'Переключить автообновление страницы');
-      countdown.addEventListener('click', handleAutoRefreshCountdownClick);
+      countdown.setAttribute('role', 'timer');
+      countdown.setAttribute('aria-label', 'Состояние автообновления');
 
       group.appendChild(toggle);
       group.appendChild(input);
+      group.appendChild(inputHint);
       group.appendChild(countdown);
       actions.appendChild(group);
     }
@@ -1967,6 +1943,11 @@
   }
 
   function scheduleTopBarMount() {
+    if (!isDashboardHome()) {
+      disconnectTopBarMountObserver();
+      return;
+    }
+
     const tryMount = () => {
       ensureToggleExists();
       return !!document.getElementById(TOP_BAR_ID);
@@ -2036,6 +2017,7 @@
     ensureAcknowledgedCollapseControls(actions);
     ensureAutoRefreshControls(actions);
     ensureToolbarStatusIndicator(actions);
+    ensureNewAlertNotice();
 
     let btn = document.getElementById(TOGGLE_ID);
     let counter = document.getElementById(TOGGLE_COUNTER_ID);
@@ -2342,6 +2324,8 @@
         icon.title = OLD_NO_NOTE_MINUTES > 0
           ? `Старше ${OLD_NO_NOTE_MINUTES} мин. и без Note`
           : 'Нет активного Note';
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', icon.title);
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -2353,6 +2337,8 @@
         const icon = document.createElement('span');
         icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} ${NO_SELECT_CLASS}`;
         icon.title = 'Есть активный Note';
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', icon.title);
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -2402,6 +2388,8 @@
         icon.title = OLD_NO_NOTE_MINUTES > 0
           ? `Есть алерты старше ${OLD_NO_NOTE_MINUTES} мин. без Note`
           : 'Есть алерты без активного Note';
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', icon.title);
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -2413,6 +2401,8 @@
         const icon = document.createElement('span');
         icon.className = `fa fa-comment ${HAS_NOTE_ICON_CLASS} bosun-parent-marker ${NO_SELECT_CLASS}`;
         icon.title = 'Есть алерты с активным Note';
+        icon.setAttribute('role', 'img');
+        icon.setAttribute('aria-label', icon.title);
         title.insertBefore(icon, title.firstChild);
       }
       return;
@@ -2535,68 +2525,84 @@
     applyNeedsAckMarkersFromData({ preserveExistingOnNone: true });
   }
 
+  async function fetchAlertsPayload() {
+    if (!alertsDataApi?.fetchAlertsDataWithRetry && (!alertsDataApi?.fetchAlertsDataViaFetch || !alertsDataApi?.fetchAlertsDataViaXHR)) {
+      throw new Error('alerts-data module unavailable');
+    }
+    try {
+      if (alertsDataApi?.fetchAlertsDataWithRetry) {
+        return await alertsDataApi.fetchAlertsDataWithRetry();
+      }
+      try {
+        return await alertsDataApi.fetchAlertsDataViaFetch();
+      } catch (_) {
+        return await alertsDataApi.fetchAlertsDataViaXHR();
+      }
+    } catch (err) {
+      console.warn('[Bosun plugin] Failed to refresh alerts data:', err);
+      reportDiagnostics('refresh-failed', err?.message || 'unknown-error');
+      setToolbarStatus('refresh', 'Не удалось синхронизировать алерты', 'error', {
+        title: err?.message || 'unknown-error',
+        ttlMs: 12000
+      });
+      throw err;
+    }
+  }
+
+  function applyAlertsPayload(payload, metadata = {}) {
+    if (!isDashboardEnhancementsPage()) return;
+    rebuildAlertDataIndex(payload);
+    persistAlertMarkerCacheToSession();
+    const trackerOwner = metadata?.source !== 'follower';
+    const previousTrackerPermission = newAlertTrackerMutationAllowed;
+    newAlertTrackerMutationAllowed = trackerOwner;
+    try {
+      needAckBaselineApi?.process?.(payload);
+    } finally {
+      newAlertTrackerMutationAllowed = previousTrackerPermission;
+    }
+    if (trackerOwner) newAlertTrackerApi?.reconcile?.(payload);
+    applyNeedsAckMarkersFromData();
+    applyUserCommentFilter();
+    ensureCopyButtons();
+    markNoSelectElements();
+    refreshSilencedBadges();
+    reportDiagnostics('refresh-ok', 'alerts payload received');
+    clearToolbarStatus('refresh');
+  }
+
   async function refreshAlertsData() {
     if (!isDashboardEnhancementsPage()) {
       dataRefreshQueued = false;
       return;
     }
-
+    if (refreshCoordinatorApi?.requestRefresh) {
+      refreshCoordinatorApi.requestRefresh('direct');
+      return;
+    }
     if (dataRefreshInFlight) {
       dataRefreshQueued = true;
       return;
     }
-
-    if (dataRefreshDebounceTimer) {
-      clearTimeout(dataRefreshDebounceTimer);
-      dataRefreshDebounceTimer = null;
-    }
-
     dataRefreshInFlight = true;
-
     try {
-      let payload;
-      if (!alertsDataApi?.fetchAlertsDataWithRetry && (!alertsDataApi?.fetchAlertsDataViaFetch || !alertsDataApi?.fetchAlertsDataViaXHR)) {
-        throw new Error('alerts-data module unavailable');
-      }
-      if (alertsDataApi?.fetchAlertsDataWithRetry) {
-        payload = await alertsDataApi.fetchAlertsDataWithRetry();
-      } else {
-        try {
-          payload = await alertsDataApi.fetchAlertsDataViaFetch();
-        } catch (_) {
-          payload = await alertsDataApi.fetchAlertsDataViaXHR();
-        }
-      }
-
-      rebuildAlertDataIndex(payload);
-      needAckBaselineApi?.process?.(payload);
-      applyNeedsAckMarkersFromData();
-      applyUserCommentFilter();
-      ensureCopyButtons();
-      markNoSelectElements();
-      refreshSilencedBadges();
-      reportDiagnostics('refresh-ok', 'alerts payload received');
-      clearToolbarStatus('refresh');
-    } catch (err) {
-      console.warn('[Bosun plugin] Failed to refresh alerts data:', err);
-      reportDiagnostics('refresh-failed', err?.message || 'unknown-error');
-      setToolbarStatus('refresh', 'Alerts sync failed', 'error', {
-        title: err?.message || 'unknown-error',
-        ttlMs: 12000
-      });
+      applyAlertsPayload(await fetchAlertsPayload());
+    } catch (_) {
+      // fetchAlertsPayload already reported a user-visible error.
     } finally {
       dataRefreshInFlight = false;
-
       if (dataRefreshQueued) {
         dataRefreshQueued = false;
-        setTimeout(() => {
-          refreshAlertsData();
-        }, 50);
+        setTimeout(() => refreshAlertsData(), 50);
       }
     }
   }
 
   function startDataRefreshLoop() {
+    if (refreshCoordinatorApi?.start) {
+      if (isDashboardEnhancementsPage()) refreshCoordinatorApi.start();
+      return;
+    }
     if (dataRefreshTimer) return;
 
     const scheduleNext = () => {
@@ -2688,6 +2694,14 @@
     }
 
     const observer = new MutationObserver((mutations) => {
+      const currentUrl = window.location.href;
+      if (currentUrl !== lastKnownUrl) {
+        lastKnownUrl = currentUrl;
+        markUserActivity();
+        resetNeedAckSoundBaseline();
+        handleRouteChange();
+      }
+
       let shouldRefreshUi = false;
       let shouldRefreshData = false;
       const needsAckRoot = getNeedsAckRoot();
@@ -2739,6 +2753,8 @@
   function init() {
     if (!isConfiguredBosunHost()) return;
 
+    grafanaHandoffApi?.cleanupExpired?.();
+    newAlertTrackerApi?.start?.();
     restoreDiagnosticsLogFromStorage();
     injectStyles();
     installSelectionGuard();
@@ -2749,13 +2765,14 @@
     soundApi?.ensureAudioObjects?.();
     scheduleTopBarMount();
     restoreNeedAckSoundBaselineFromSession();
+    restoreAlertMarkerCacheFromSession();
 
     loadState(() => {
       markUserActivity();
-      runDomRefreshPass();
+      runDomRefreshPass({ preserveExistingOnNone: true });
       startObserver();
-      refreshAlertsData();
       startDataRefreshLoop();
+      if (!refreshCoordinatorApi) refreshAlertsData();
       startAutoRefreshLoop();
 
       setTimeout(() => {

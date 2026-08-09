@@ -5,6 +5,14 @@
   const RESULT_MESSAGE = 'BOSUN_HELPER_GRAFANA_QUERY_RESULT';
   const CHANNEL_TOKEN = document.currentScript?.dataset?.channelToken || '';
   const INSTALL_FLAG = '__bosunHelperGrafanaBridgeInstalledV2';
+  const MAX_TRAVERSAL_OBJECTS = 250;
+  const MAX_TRAVERSAL_DEPTH = 6;
+  const MAX_TRAVERSAL_MS = 12;
+  const MAX_OPERATION_CACHE = 20;
+  const OPERATION_CACHE_TTL_MS = 30000;
+  const MAX_QUERY_LENGTH = 100000;
+  const operations = new Map();
+  let operationQueue = Promise.resolve();
   document.currentScript?.removeAttribute?.('data-channel-token');
 
   if (!CHANNEL_TOKEN || window[INSTALL_FLAG]) return;
@@ -57,7 +65,7 @@
     return normalizeText(getVisibleEditorText()) === normalizeText(query);
   }
 
-  function getCodeMirrorViewFromObject(value) {
+  function getCodeMirrorViewFromObject(value, budget) {
     if (!value || typeof value !== 'object') return null;
 
     if (value.state?.doc && typeof value.dispatch === 'function') {
@@ -74,14 +82,20 @@
       value.cmView?.view,
       value.cmView?.rootView,
       value.cmView?.rootView?.view
-    ].filter(Boolean);
+    ].filter(Boolean).map((item) => ({ item, depth: 0 }));
 
-    while (queue.length) {
-      const item = queue.shift();
+    while (
+      queue.length &&
+      budget.visited < MAX_TRAVERSAL_OBJECTS &&
+      Date.now() <= budget.deadline
+    ) {
+      const { item, depth } = queue.shift();
       if (!item || typeof item !== 'object' || seen.has(item)) continue;
       seen.add(item);
+      budget.visited += 1;
 
       if (item.state?.doc && typeof item.dispatch === 'function') return item;
+      if (depth >= MAX_TRAVERSAL_DEPTH) continue;
 
       const keys = [];
       try {
@@ -91,11 +105,13 @@
         keys.push(...Object.getOwnPropertyNames(item));
       } catch (_) {}
 
-      for (const key of keys.slice(0, 80)) {
+      for (const key of Array.from(new Set(keys)).slice(0, 80)) {
         if (/parent|dom|contentDOM/i.test(key)) continue;
         try {
           const next = item[key];
-          if (next && typeof next === 'object' && !seen.has(next)) queue.push(next);
+          if (next && typeof next === 'object' && !seen.has(next)) {
+            queue.push({ item: next, depth: depth + 1 });
+          }
         } catch (_) {}
       }
     }
@@ -110,7 +126,13 @@
       ? [editorRoot, ...Array.from(editorRoot.querySelectorAll('.cm-content, .cm-scroller'))]
       : [];
 
-    for (const node of nodes) {
+    const budget = {
+      visited: 0,
+      deadline: Date.now() + MAX_TRAVERSAL_MS
+    };
+
+    for (const node of nodes.slice(0, 20)) {
+      if (budget.visited >= MAX_TRAVERSAL_OBJECTS || Date.now() > budget.deadline) break;
       const keys = [];
       try {
         keys.push(...Object.keys(node));
@@ -119,11 +141,19 @@
         keys.push(...Object.getOwnPropertyNames(node));
       } catch (_) {}
 
-      const direct = getCodeMirrorViewFromObject(node) || getCodeMirrorViewFromObject(node.cmView);
+      const direct = getCodeMirrorViewFromObject(node, budget) ||
+        getCodeMirrorViewFromObject(node.cmView, budget);
       if (direct) return direct;
 
-      for (const key of keys) {
-        const view = getCodeMirrorViewFromObject(node[key]);
+      for (const key of Array.from(new Set(keys)).slice(0, 80)) {
+        if (budget.visited >= MAX_TRAVERSAL_OBJECTS || Date.now() > budget.deadline) break;
+        let value;
+        try {
+          value = node[key];
+        } catch (_) {
+          continue;
+        }
+        const view = getCodeMirrorViewFromObject(value, budget);
         if (view) return view;
       }
     }
@@ -187,88 +217,246 @@
     return true;
   }
 
-  async function applyQueryViaMonaco(query) {
+  function rollbackMonacoIfUnchanged(model, oldText, writtenText, writtenVersion) {
+    let currentText;
+    let currentVersion;
+    try {
+      currentText = model.getValue();
+      currentVersion = model.getVersionId?.();
+    } catch (_) {
+      return false;
+    }
+
+    if (currentText !== writtenText) return false;
+    if (
+      Number.isFinite(writtenVersion) &&
+      Number.isFinite(currentVersion) &&
+      currentVersion !== writtenVersion
+    ) return false;
+
+    try {
+      model.setValue(oldText);
+      commitMonacoTextarea();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function rollbackMonacoIfOwnedVersion(model, oldText, writtenVersion) {
+    if (!Number.isFinite(writtenVersion)) return false;
+    try {
+      if (model.getVersionId?.() !== writtenVersion) return false;
+      model.setValue(oldText);
+      commitMonacoTextarea();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function applyQueryViaMonaco(query, run) {
     const model = findPrometheusMonacoModel();
     if (!model?.setValue || !model?.getValue) {
       return { ok: false, reason: 'monaco-model-not-found' };
     }
 
     const oldText = model.getValue();
-    model.setValue(query);
-    commitMonacoTextarea();
-    await wait(500);
+    let writtenVersion;
+    try {
+      model.setValue(query);
+      writtenVersion = model.getVersionId?.();
+      commitMonacoTextarea();
+      await wait(500);
+      const nextText = model.getValue();
+      if (normalizeText(nextText) !== normalizeText(query)) {
+        const rolledBack = rollbackMonacoIfOwnedVersion(model, oldText, writtenVersion);
+        return {
+          ok: false,
+          reason: 'monaco-setvalue-not-applied',
+          rolledBack,
+          terminal: !rolledBack,
+          oldLength: oldText.length,
+          nextLength: nextText.length
+        };
+      }
 
-    const nextText = model.getValue();
-    if (normalizeText(nextText) !== normalizeText(query)) {
+      if (!run) {
+        return {
+          ok: true,
+          via: 'monaco-model',
+          oldLength: oldText.length,
+          nextLength: nextText.length
+        };
+      }
+      commitMonacoTextarea();
+      await wait(500);
+      const beforeRunText = model.getValue();
+      const beforeRunVersion = model.getVersionId?.();
+      if (
+        normalizeText(beforeRunText) !== normalizeText(query) ||
+        (Number.isFinite(writtenVersion) && Number.isFinite(beforeRunVersion) && beforeRunVersion !== writtenVersion)
+      ) {
+        return { ok: false, reason: 'monaco-concurrent-change-before-run', terminal: true };
+      }
+      findButtonByText('Run queries')?.click();
+
       return {
-        ok: false,
-        reason: 'monaco-setvalue-not-applied',
+        ok: true,
+        via: 'monaco-model',
         oldLength: oldText.length,
         nextLength: nextText.length
       };
+    } catch (err) {
+      let currentText = oldText;
+      try {
+        currentText = model.getValue();
+      } catch (_) {}
+      const rolledBack = rollbackMonacoIfUnchanged(
+        model,
+        oldText,
+        query,
+        writtenVersion
+      );
+      return {
+        ok: false,
+        reason: 'monaco-transaction-error',
+        rolledBack,
+        terminal: currentText !== oldText && !rolledBack,
+        message: err?.message || String(err)
+      };
     }
-
-    commitMonacoTextarea();
-    await wait(500);
-    findButtonByText('Run queries')?.click();
-
-    return {
-      ok: true,
-      via: 'monaco-model',
-      oldLength: oldText.length,
-      nextLength: nextText.length
-    };
   }
 
-  async function applyQueryViaFocusedEditor(query) {
-    const editor = findQueryEditorContent();
-    if (!editor) return { ok: false, reason: 'query-editor-not-found' };
-    const originalText = getVisibleEditorText();
+  function getEditorText(editor) {
+    if (!editor) return '';
+    if (typeof editor.innerText === 'string') return editor.innerText;
+    return editor.textContent || '';
+  }
 
-    editor.focus();
-    editor.click();
-    await wait(50);
-
+  function selectEditorContents(editor) {
     const selection = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(editor);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
 
-    document.execCommand('delete', false, null);
-    await wait(100);
+  function replaceEditorTextIfUnchanged(editor, expectedText, replacementText) {
+    if (getEditorText(editor) !== expectedText) return false;
 
-    if (normalizeText(getVisibleEditorText())) {
+    try {
+      selectEditorContents(editor);
+      document.execCommand('delete', false, null);
+      if (normalizeText(getEditorText(editor))) return false;
+      if (replacementText) {
+        document.execCommand('insertText', false, replacementText);
+      }
+      return normalizeText(getEditorText(editor)) === normalizeText(replacementText);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function applyQueryViaFocusedEditor(query, run) {
+    const editor = findQueryEditorContent();
+    if (!editor) return { ok: false, reason: 'query-editor-not-found' };
+    const originalText = getEditorText(editor);
+
+    editor.focus();
+    editor.click();
+    await wait(50);
+
+    try {
+      selectEditorContents(editor);
+      document.execCommand('delete', false, null);
+    } catch (err) {
+      const currentText = getEditorText(editor);
+      const rolledBack = currentText === originalText || (
+        currentText === '' &&
+        replaceEditorTextIfUnchanged(editor, currentText, originalText)
+      );
+      return {
+        ok: false,
+        reason: 'query-editor-delete-error',
+        rolledBack,
+        message: err?.message || String(err)
+      };
+    }
+    const immediateTextAfterDelete = getEditorText(editor);
+    if (normalizeText(immediateTextAfterDelete)) {
+      const rolledBack = immediateTextAfterDelete === originalText;
       return {
         ok: false,
         reason: 'query-editor-delete-failed',
-        visibleText: normalizeText(getVisibleEditorText()).slice(0, 120)
+        rolledBack,
+        visibleText: normalizeText(getEditorText(editor)).slice(0, 120)
+      };
+    }
+    await wait(100);
+
+    const textAfterDelete = getEditorText(editor);
+    if (normalizeText(textAfterDelete)) {
+      return {
+        ok: false,
+        reason: 'query-editor-changed-after-delete',
+        rolledBack: false,
+        visibleText: normalizeText(textAfterDelete).slice(0, 120)
       };
     }
 
-    document.execCommand('insertText', false, query);
+    try {
+      document.execCommand('insertText', false, query);
+    } catch (err) {
+      const currentText = getEditorText(editor);
+      const rolledBack = currentText === originalText || (
+        (currentText === '' || currentText === query) &&
+        replaceEditorTextIfUnchanged(editor, currentText, originalText)
+      );
+      return {
+        ok: false,
+        reason: 'query-editor-insert-error',
+        rolledBack,
+        message: err?.message || String(err)
+      };
+    }
     await wait(150);
 
-    if (!isQueryVisible(query)) {
-      const rollbackSelection = window.getSelection();
-      const rollbackRange = document.createRange();
-      rollbackRange.selectNodeContents(editor);
-      rollbackSelection.removeAllRanges();
-      rollbackSelection.addRange(rollbackRange);
-      document.execCommand('delete', false, null);
-      document.execCommand('insertText', false, originalText);
+    const textAfterInsert = getEditorText(editor);
+    if (normalizeText(textAfterInsert) !== normalizeText(query)) {
+      const rolledBack = textAfterInsert === originalText || (
+        textAfterInsert === '' &&
+        replaceEditorTextIfUnchanged(editor, textAfterInsert, originalText)
+      );
       return {
         ok: false,
         reason: 'query-editor-insert-failed',
-        visibleText: normalizeText(getVisibleEditorText()).slice(0, 120)
+        rolledBack,
+        visibleText: normalizeText(getEditorText(editor)).slice(0, 120)
       };
     }
 
-    findButtonByText('Run queries')?.click();
-    return { ok: true, via: 'focused-query-editor' };
+    if (!run) return { ok: true, via: 'focused-query-editor' };
+
+    try {
+      findButtonByText('Run queries')?.click();
+      return { ok: true, via: 'focused-query-editor' };
+    } catch (err) {
+      const currentText = getEditorText(editor);
+      const rolledBack = currentText === originalText || (
+        currentText === query &&
+        replaceEditorTextIfUnchanged(editor, currentText, originalText)
+      );
+      return {
+        ok: false,
+        reason: 'query-editor-run-error',
+        rolledBack,
+        message: err?.message || String(err)
+      };
+    }
   }
 
-  async function applyQuery(query) {
+  async function applyQuery(query, run) {
     const view = findCodeMirrorView();
     if (view) {
       const oldText = view.state.doc.toString();
@@ -280,9 +468,13 @@
 
       const nextText = view.state.doc.toString();
       if (normalizeText(nextText) === normalizeText(query)) {
-        setTimeout(() => {
+        if (run) {
+          await wait(150);
+          if (normalizeText(view.state.doc.toString()) !== normalizeText(query)) {
+            return { ok: false, reason: 'codemirror-concurrent-change-before-run', terminal: true };
+          }
           findButtonByText('Run queries')?.click();
-        }, 150);
+        }
         return {
           ok: true,
           via: 'codemirror-view',
@@ -297,10 +489,11 @@
       });
     }
 
-    const monacoResult = await applyQueryViaMonaco(query);
+    const monacoResult = await applyQueryViaMonaco(query, run);
     if (monacoResult.ok) return monacoResult;
+    if (monacoResult.terminal) return monacoResult;
 
-    const editorResult = await applyQueryViaFocusedEditor(query);
+    const editorResult = await applyQueryViaFocusedEditor(query, run);
     if (editorResult.ok) return editorResult;
 
     return {
@@ -312,6 +505,53 @@
     };
   }
 
+  function pruneOperations() {
+    const now = Date.now();
+    for (const [operationId, operation] of operations) {
+      if (operation.finishedAt && now - operation.finishedAt > OPERATION_CACHE_TTL_MS) {
+        operations.delete(operationId);
+      }
+    }
+    while (operations.size > MAX_OPERATION_CACHE) {
+      const oldestCompleted = Array.from(operations.entries()).find(([, operation]) => {
+        return Boolean(operation.finishedAt);
+      });
+      if (!oldestCompleted) break;
+      operations.delete(oldestCompleted[0]);
+    }
+  }
+
+  function getOperation(operationId, query, run) {
+    pruneOperations();
+    const existing = operations.get(operationId);
+    if (existing) {
+      if (existing.query !== query || existing.run !== run) {
+        return Promise.resolve({ ok: false, reason: 'operation-id-collision' });
+      }
+      return existing.promise;
+    }
+    if (operations.size >= MAX_OPERATION_CACHE) {
+      return Promise.resolve({ ok: false, reason: 'bridge-busy' });
+    }
+
+    const operation = { query, run, promise: null, finishedAt: 0 };
+    operation.promise = operationQueue
+      .catch(() => undefined)
+      .then(() => applyQuery(query, run))
+      .catch((err) => ({
+        ok: false,
+        reason: 'unexpected-apply-error',
+        message: err?.message || String(err)
+      }))
+      .finally(() => {
+        operation.finishedAt = Date.now();
+        pruneOperations();
+      });
+    operationQueue = operation.promise.then(() => undefined, () => undefined);
+    operations.set(operationId, operation);
+    return operation.promise;
+  }
+
   window.addEventListener('message', async (event) => {
     if (
       event.source !== window ||
@@ -321,11 +561,19 @@
     ) return;
 
     const query = typeof event.data.query === 'string' ? event.data.query : '';
+    const operationId = typeof event.data.operationId === 'string'
+      ? event.data.operationId
+      : '';
+    const run = event.data.run === true;
     let result;
     try {
-      result = query
-        ? await applyQuery(query)
-        : { ok: false, reason: 'empty-query' };
+      result = !query
+        ? { ok: false, reason: 'empty-query' }
+        : query.length > MAX_QUERY_LENGTH
+          ? { ok: false, reason: 'query-too-large' }
+        : !operationId || operationId.length > 200
+          ? { ok: false, reason: 'invalid-operation-id' }
+          : await getOperation(operationId, query, run);
     } catch (err) {
       result = {
         ok: false,
@@ -338,6 +586,7 @@
       type: RESULT_MESSAGE,
       channelToken: CHANNEL_TOKEN,
       requestId: event.data.requestId,
+      operationId,
       result
     }, window.location.origin);
   });
