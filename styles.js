@@ -30,6 +30,63 @@
     const style = document.createElement("style");
     style.id = "bosun-silence-hider-styles";
     style.textContent = `
+      .bosun-sr-only {
+        position: absolute !important;
+        width: 1px !important;
+        height: 1px !important;
+        padding: 0 !important;
+        margin: -1px !important;
+        overflow: hidden !important;
+        clip: rect(0, 0, 0, 0) !important;
+        white-space: nowrap !important;
+        border: 0 !important;
+      }
+
+      .bosun-grafana-preview-dialog {
+        width: min(760px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        padding: 20px;
+        border: 1px solid #b7b7b7;
+        border-radius: 10px;
+        color: #222;
+        background: #fff;
+        box-shadow: 0 16px 50px rgba(0, 0, 0, .35);
+      }
+      .bosun-grafana-preview-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+      .bosun-grafana-preview-dialog h2 { margin: 0 0 8px; font-size: 20px; }
+      .bosun-grafana-preview-dialog p { margin: 0 0 12px; }
+      .bosun-grafana-preview-query {
+        max-height: min(55vh, 520px);
+        overflow: auto;
+        padding: 12px;
+        border: 1px solid #d4d4d4;
+        border-radius: 6px;
+        color: #111;
+        background: #f6f7f8;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+      .bosun-grafana-preview-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+      .bosun-grafana-preview-actions button {
+        min-height: 34px;
+        padding: 6px 12px;
+        border: 1px solid #aaa;
+        border-radius: 6px;
+        background: #fff;
+        color: #222;
+        cursor: pointer;
+      }
+      .bosun-grafana-preview-actions button.is-primary {
+        border-color: #a95c12;
+        background: #d97818;
+        color: #fff;
+      }
+
       .${hiddenClass}, .${userCommentFilterHiddenClass}, .${acknowledgedCollapsedClass} { display: none !important; }
 
       .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} {
@@ -45,6 +102,7 @@
         vertical-align: middle;
         box-shadow: 0 0 0 1px rgba(155, 143, 143, 0.6) inset;
         user-select: none;
+        transition: background-color .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .05s ease;
       }
       .${copyAllButtonClass} { margin-right: 8px; float: right; }
       .${grafanaQueryButtonClass} {
@@ -52,7 +110,26 @@
         color: #d96c0b;
       }
       .${copyButtonClass}:hover, .${copyAllButtonClass}:hover, .${grafanaQueryButtonClass}:hover { background: rgba(255,255,255,0.16); }
-      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"], .${grafanaQueryButtonClass}[data-copied="true"] { opacity: 0.85; }
+      .${copyButtonClass}:active, .${copyAllButtonClass}:active {
+        background: rgba(90, 90, 90, 0.16);
+        border-color: rgba(125, 125, 125, 0.72);
+        box-shadow: 0 0 0 1px rgba(90, 90, 90, 0.18) inset;
+        transform: translateY(1px);
+      }
+      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"] {
+        background: rgba(100, 100, 100, 0.09);
+        border-color: rgba(145, 145, 145, 0.72);
+        color: inherit;
+        box-shadow: 0 0 0 1px rgba(100, 100, 100, 0.12) inset;
+        opacity: 1;
+      }
+      .${copyButtonClass}[data-copied="false"], .${copyAllButtonClass}[data-copied="false"] {
+        background: #8a3d3d;
+        border-color: #672c2c;
+        color: #fff !important;
+        opacity: 1;
+      }
+      .${grafanaQueryButtonClass}[data-copied="true"] { opacity: 0.85; }
 
       .${noSelectClass} { user-select: none; }
       .${noSelectClass}::selection, .${copyButtonClass}::selection, .${copyAllButtonClass}::selection, .${grafanaQueryButtonClass}::selection { background: transparent; }
@@ -115,6 +192,40 @@
         gap: 8px;
         flex-wrap: wrap;
       }
+
+      #${topBarId} .bosun-new-alerts-notice {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        min-height: 32px;
+        margin-top: 6px;
+        padding: 6px 10px;
+        box-sizing: border-box;
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        background: #f5f5f5;
+        color: #444;
+        font-family: Arial, sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.4;
+      }
+      #${topBarId} .bosun-new-alerts-notice.is-critical {
+        border-color: #8d3836;
+        background: #a94442;
+        color: #fff;
+      }
+      #${topBarId} .bosun-new-alerts-notice.is-warning {
+        border-color: #71592f;
+        background: #8a6d3b;
+        color: #fff;
+      }
+      #${topBarId} .bosun-new-alerts-notice.is-unknown {
+        border-color: #285d78;
+        background: #31708f;
+        color: #fff;
+      }
+      #${topBarId} .bosun-new-alerts-notice[hidden] { display: none !important; }
 
       #${topBarId} .bosun-toolbar-group {
         display: inline-flex;
@@ -184,7 +295,12 @@
       #${topBarId} .bosun-toolbar-btn:active { transform: translateY(1px); }
       #${topBarId} .bosun-toolbar-btn:focus-visible,
       #${topBarId} .bosun-toolbar-input:focus-visible,
-      #${autoRefreshCountdownId}:focus-visible {
+      .${copyButtonClass}:focus-visible,
+      .${copyAllButtonClass}:focus-visible,
+      .${grafanaQueryButtonClass}:focus-visible,
+      .bosun-action-template-btn:focus-visible,
+      .bosun-grafana-preview-dialog button:focus-visible,
+      #${diagnosticsModalId} button:focus-visible {
         outline: 2px solid #2f6fad;
         outline-offset: 2px;
         border-color: #2f6fad;
@@ -264,7 +380,7 @@
         font-weight: 700;
         line-height: 1;
         white-space: nowrap;
-        cursor: pointer;
+        cursor: default;
         font-family: inherit;
       }
 
@@ -379,6 +495,13 @@
           max-width: none;
           margin-left: 0;
         }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #${topBarId} .bosun-toolbar-btn { transition: none; }
+        #${topBarId} .bosun-toolbar-btn:active { transform: none; }
+        .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} { transition: none; }
+        .${copyButtonClass}:active, .${copyAllButtonClass}:active { transform: none; }
       }
     `;
 

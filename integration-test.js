@@ -418,10 +418,332 @@ async function testGrafanaBridgeAuthenticationAndSingleton() {
   assert.strictEqual(response.message.requestId, 'request-1');
 }
 
+function createActionPageHarness() {
+  let currentTextarea = null;
+  let templateWrap = null;
+  let observerCallback = null;
+  const scheduled = [];
+
+  function element(tag = 'div') {
+    const listeners = new Map();
+    const node = {
+      nodeType: 1,
+      tagName: String(tag).toUpperCase(),
+      id: '',
+      dataset: {},
+      style: {},
+      className: '',
+      value: '',
+      checked: false,
+      offsetParent: {},
+      parentElement: null,
+      parentNode: null,
+      nextElementSibling: null,
+      children: [],
+      classList: {
+        add() {}, remove() {}, toggle() {}, contains() { return false; }
+      },
+      appendChild(child) {
+        child.parentElement = this;
+        child.parentNode = this;
+        this.children.push(child);
+        relink(this);
+        return child;
+      },
+      insertBefore(child, reference) {
+        const previousParent = child.parentElement;
+        if (previousParent) {
+          previousParent.children = previousParent.children.filter((item) => item !== child);
+          relink(previousParent);
+        }
+        const index = this.children.indexOf(reference);
+        child.parentElement = this;
+        child.parentNode = this;
+        this.children.splice(index < 0 ? this.children.length : index, 0, child);
+        if (child.className === 'bosun-action-templates') templateWrap = child;
+        relink(this);
+        return child;
+      },
+      remove() {
+        if (this.parentElement) {
+          this.parentElement.children = this.parentElement.children.filter((item) => item !== this);
+          relink(this.parentElement);
+        }
+        this.parentElement = null;
+        this.parentNode = null;
+      },
+      addEventListener(name, listener) {
+        const list = listeners.get(name) || [];
+        list.push(listener);
+        listeners.set(name, list);
+      },
+      dispatchEvent(event) {
+        event.target ||= this;
+        event.preventDefault ||= () => {};
+        event.stopPropagation ||= () => {};
+        for (const listener of listeners.get(event.type) || []) listener.call(this, event);
+        return true;
+      },
+      click() { this.dispatchEvent({ type: 'click' }); },
+      focus() { document.activeElement = this; },
+      setSelectionRange() {},
+      setAttribute() {},
+      getAttribute() { return null; },
+      removeAttribute() {},
+      matches() { return false; },
+      closest() { return null; },
+      contains(candidate) {
+        return this.children.includes(candidate) || this.children.some((child) => child.contains?.(candidate));
+      },
+      querySelector(selector) {
+        return findDescendant(this, (candidate) => matchesSelector(candidate, selector));
+      },
+      querySelectorAll(selector) {
+        return findAllDescendants(this, (candidate) => matchesSelector(candidate, selector));
+      }
+    };
+    Object.defineProperty(node, 'textContent', {
+      get() { return this._textContent || ''; },
+      set(value) {
+        this._textContent = String(value);
+        if (value === '') {
+          for (const child of this.children) {
+            child.parentElement = null;
+            child.parentNode = null;
+          }
+          this.children = [];
+          relink(this);
+        }
+      }
+    });
+    return node;
+  }
+
+  function relink(parent) {
+    parent.children.forEach((child, index) => {
+      child.nextElementSibling = parent.children[index + 1] || null;
+    });
+  }
+
+  function matchesSelector(node, selector) {
+    if (selector === '.bosun-action-templates') return node.className === 'bosun-action-templates';
+    if (selector === '.bosun-action-template-btn') return node.className === 'bosun-action-template-btn';
+    return false;
+  }
+
+  function findDescendant(root, predicate) {
+    for (const child of root.children) {
+      if (predicate(child)) return child;
+      const nested = findDescendant(child, predicate);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  function findAllDescendants(root, predicate) {
+    const result = [];
+    for (const child of root.children) {
+      if (predicate(child)) result.push(child);
+      result.push(...findAllDescendants(child, predicate));
+    }
+    return result;
+  }
+
+  const body = element('body');
+  const documentElement = element('html');
+  const textareaParent = element('div');
+  currentTextarea = element('textarea');
+  textareaParent.appendChild(currentTextarea);
+  body.appendChild(textareaParent);
+
+  const document = {
+    readyState: 'complete',
+    visibilityState: 'visible',
+    activeElement: null,
+    body,
+    documentElement,
+    head: element('head'),
+    createElement(tag) {
+      const created = element(tag);
+      if (String(tag).toLowerCase() === 'div') {
+        const originalAppend = created.appendChild;
+        created.appendChild = function appendAndTrack(child) {
+          const result = originalAppend.call(this, child);
+          if (this.className === 'bosun-action-templates') templateWrap = this;
+          return result;
+        };
+      }
+      return created;
+    },
+    createTextNode(text) { return { nodeType: 3, textContent: String(text) }; },
+    getElementById() { return null; },
+    querySelector(selector) {
+      if (selector === '.bosun-action-templates') return templateWrap?.parentElement ? templateWrap : null;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === 'textarea') return currentTextarea ? [currentTextarea] : [];
+      return [];
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    execCommand() { return true; }
+  };
+
+  const location = {
+    href: 'https://bosun.example.test/action?type=note',
+    host: 'bosun.example.test',
+    hostname: 'bosun.example.test',
+    origin: 'https://bosun.example.test',
+    pathname: '/action',
+    search: '?type=note',
+    reload() {}
+  };
+  const window = {
+    document,
+    location,
+    addEventListener() {},
+    removeEventListener() {},
+    getSelection() { return { toString() { return ''; } }; },
+    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    open() { return null; }
+  };
+  window.window = window;
+
+  const chrome = {
+    runtime: { lastError: null, getURL: (value) => value },
+    storage: {
+      local: {
+        get(keys, callback) { callback(keys === null ? {} : {}); },
+        set(_values, callback) { callback?.(); },
+        remove(_keys, callback) { callback?.(); }
+      },
+      onChanged: { addListener() {} }
+    }
+  };
+  function MutationObserver(callback) {
+    observerCallback = callback;
+    this.observe = () => {};
+    this.disconnect = () => {};
+  }
+
+  const context = {
+    console: { ...console, warn() {} },
+    globalThis: null,
+    window,
+    document,
+    location,
+    chrome,
+    navigator: { clipboard: { writeText: async () => {} } },
+    URL,
+    URLSearchParams,
+    Map,
+    Set,
+    WeakMap,
+    Date,
+    JSON,
+    Math,
+    Number,
+    String,
+    Boolean,
+    RegExp,
+    Array,
+    Object,
+    Promise,
+    Error,
+    MutationObserver,
+    Event: function Event(type, init) { this.type = type; Object.assign(this, init || {}); },
+    InputEvent: function InputEvent(type, init) { this.type = type; Object.assign(this, init || {}); },
+    requestAnimationFrame(callback) { callback?.(); return 1; },
+    setTimeout(callback, delay) { scheduled.push({ callback, delay }); return scheduled.length; },
+    clearTimeout() {},
+    setInterval() { return 1; },
+    clearInterval() {},
+    fetch: async () => ({ ok: true, json: async () => ({ Groups: { NeedAck: [] } }) }),
+    XMLHttpRequest: function XMLHttpRequest() {},
+    AbortController
+  };
+  context.globalThis = context;
+  context.BosunHelperLocalConfig = {
+    bosunHosts: ['bosun.example.test'],
+    grafanaHost: 'grafana.example.test',
+    grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+  };
+  context.BosunSilenceHiderPageUtils = {
+    createPageUtils() {
+      return {
+        isActionPage: () => true,
+        isDashboardHome: () => false,
+        applyActionPageTweaks() {}
+      };
+    }
+  };
+  context.BosunHelperRefreshCoordinator = {
+    createRefreshCoordinator() {
+      return { start() {}, stop() {}, requestRefresh() {} };
+    }
+  };
+  window.chrome = chrome;
+  window.navigator = context.navigator;
+  window.MutationObserver = MutationObserver;
+  window.Event = context.Event;
+  window.InputEvent = context.InputEvent;
+  window.requestAnimationFrame = context.requestAnimationFrame;
+
+  return {
+    context,
+    body,
+    textareaParent,
+    scheduled,
+    get textarea() { return currentTextarea; },
+    get wrap() { return templateWrap; },
+    replaceTextarea() {
+      const old = currentTextarea;
+      old.remove();
+      currentTextarea = element('textarea');
+      textareaParent.appendChild(currentTextarea);
+      observerCallback?.([{
+        type: 'childList',
+        target: body,
+        addedNodes: [currentTextarea],
+        removedNodes: [old]
+      }]);
+      return { old, replacement: currentTextarea };
+    }
+  };
+}
+
+async function testActionTemplatesFollowTextareaRemount() {
+  const harness = createActionPageHarness();
+  runFiles(harness, ['action-templates.js', 'content.js']);
+  await flushMicrotasks();
+
+  const initialWrap = harness.wrap;
+  assert.ok(initialWrap, 'Action templates were not mounted');
+  assert.strictEqual(initialWrap.nextElementSibling, harness.textarea);
+
+  const { old, replacement } = harness.replaceTextarea();
+  const refresh = harness.scheduled.find((entry) => entry.delay === 120);
+  assert.ok(refresh, 'Textarea replacement did not schedule a DOM refresh');
+  refresh.callback();
+
+  assert.strictEqual(harness.wrap, initialWrap, 'Template wrapper should be reused');
+  assert.strictEqual(harness.wrap.nextElementSibling, replacement);
+  const buttons = harness.wrap.querySelectorAll('.bosun-action-template-btn');
+  assert.ok(buttons.length > 0, 'Template buttons were not rebuilt');
+  buttons[0].click();
+
+  assert.strictEqual(old.value, '', 'Detached textarea was modified');
+  assert.strictEqual(replacement.value, buttons[0].textContent, 'Replacement textarea did not receive the template');
+  assert.strictEqual(harness.context.document.activeElement, replacement);
+}
+
 (async () => {
   await testBosunInitialization();
   await testGrafanaContentIsolation();
   await testGrafanaBridgeAuthenticationAndSingleton();
+  await testActionTemplatesFollowTextareaRemount();
   console.log('Integration test passed');
 })().catch((error) => {
   console.error(error);

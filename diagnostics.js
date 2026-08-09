@@ -27,6 +27,7 @@
     let logEntries = [];
     let saveTimer = null;
     let previouslyFocusedElement = null;
+    let inertedSiblings = [];
 
     function saveLogToStorage() {
       if (saveTimer) {
@@ -97,9 +98,15 @@
       modal.classList.toggle('is-open', isOpen);
       if (isOpen) {
         previouslyFocusedElement = document.activeElement;
+        inertedSiblings = Array.from(document.body?.children || [])
+          .filter((element) => element !== modal)
+          .map((element) => ({ element, wasInert: Boolean(element.inert) }));
+        inertedSiblings.forEach(({ element }) => { element.inert = true; });
         renderLogList();
         modal.querySelector('[data-role="close"]')?.focus?.();
       } else {
+        inertedSiblings.forEach(({ element, wasInert }) => { element.inert = wasInert; });
+        inertedSiblings = [];
         previouslyFocusedElement?.focus?.();
         previouslyFocusedElement = null;
       }
@@ -137,12 +144,12 @@
       modal = document.createElement('div');
       modal.id = modalId;
       modal.innerHTML = `
-      <div class="bosun-diagnostics-modal-card" role="dialog" aria-modal="true" aria-label="Diagnostics log">
+      <div class="bosun-diagnostics-modal-card" role="dialog" aria-modal="true" aria-label="Журнал диагностики">
         <div class="bosun-diagnostics-modal-head">
-          <strong>Bosun Diagnostics Log</strong>
+          <strong>Журнал диагностики Bosun</strong>
           <div class="bosun-diagnostics-modal-actions">
-            <button type="button" data-role="clear">Clear</button>
-            <button type="button" data-role="close">Close</button>
+            <button type="button" data-role="clear">Очистить</button>
+            <button type="button" data-role="close">Закрыть</button>
           </div>
         </div>
         <div class="bosun-diagnostics-modal-body">
@@ -168,6 +175,25 @@
           event.preventDefault();
           setModalOpen(false);
           if (typeof onVisibilityMaybeChanged === 'function') onVisibilityMaybeChanged();
+          return;
+        }
+        if (event.key === 'Tab') {
+          const focusable = Array.from(modal.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+          ));
+          if (!focusable.length) {
+            event.preventDefault();
+            return;
+          }
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
         }
       });
 

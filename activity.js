@@ -40,19 +40,29 @@
       if (!countdownElement) return;
 
       if (!getAutoRefreshEnabled()) {
-        countdownElement.textContent = 'off';
-        countdownElement.title = 'Включить автообновление';
+        countdownElement.textContent = 'выкл';
+        countdownElement.title = 'Автообновление выключено';
+        countdownElement.removeAttribute('aria-pressed');
+        countdownElement.setAttribute('aria-label', 'Автообновление выключено');
         return;
       }
 
       if (!pageUtils.isDashboardHome()) {
         countdownElement.textContent = '—';
         countdownElement.title = 'Автообновление страницы только на главной /';
+        countdownElement.removeAttribute('aria-pressed');
+        countdownElement.setAttribute('aria-label', 'Автообновление включено и работает только на главной странице');
         return;
       }
 
-      countdownElement.title = 'Отключить автообновление';
-      countdownElement.textContent = `${getAutoRefreshRemainingSeconds()}s`;
+      const remaining = getAutoRefreshRemainingSeconds();
+      countdownElement.title = `До автообновления: ${remaining} секунд`;
+      countdownElement.textContent = `${remaining}s`;
+      countdownElement.removeAttribute('aria-pressed');
+      countdownElement.setAttribute(
+        'aria-label',
+        `Автообновление включено, осталось ${remaining} секунд`
+      );
     }
 
     function maybeAutoRefreshPage() {

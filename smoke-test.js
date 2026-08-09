@@ -9,6 +9,8 @@ const documentStub = {
   body: { querySelector() { return null; } },
   documentElement: {},
   createElement(tag) {
+    const children = [];
+    const elementListeners = {};
     return {
       tagName: String(tag).toUpperCase(),
       style: {},
@@ -16,9 +18,23 @@ const documentStub = {
       className: '',
       innerHTML: '',
       textContent: '',
-      appendChild() {},
+      value: '',
+      children,
+      parentElement: null,
+      nextElementSibling: null,
+      appendChild(child) {
+        child.parentElement = this;
+        children.push(child);
+        return child;
+      },
       remove() {},
-      addEventListener() {},
+      focus() {},
+      setSelectionRange() {},
+      dispatchEvent() {},
+      addEventListener(name, fn) {
+        (elementListeners[name] ||= []).push(fn);
+      },
+      __listeners: elementListeners,
       setAttribute() {},
       querySelector() { return null; },
       querySelectorAll() { return []; }
@@ -36,6 +52,7 @@ const context = {
   clearTimeout,
   setInterval,
   clearInterval,
+  URL,
   URLSearchParams,
   Map,
   Set,
@@ -92,6 +109,10 @@ for (const file of [
   'page-utils.js',
   'styles.js',
   'activity.js',
+  'action-templates.js',
+  'grafana-handoff.js',
+  'new-alert-tracker.js',
+  'refresh-coordinator.js',
   'content.js'
 ]) {
   const code = fs.readFileSync(file, 'utf8');
@@ -109,12 +130,88 @@ const checks = [
   ['page-utils', !!context.BosunSilenceHiderPageUtils],
   ['styles', !!context.BosunSilenceHiderStyles],
   ['activity', !!context.BosunSilenceHiderActivity],
+  ['action-templates', !!context.BosunHelperActionTemplates],
+  ['grafana-handoff', !!context.BosunHelperGrafanaHandoff],
+  ['new-alert-tracker', !!context.BosunHelperNewAlertTracker],
+  ['refresh-coordinator', !!context.BosunHelperRefreshCoordinator],
 ];
 
 const failed = checks.filter(([, ok]) => !ok);
 if (failed.length) {
   console.error('FAILED', failed);
   process.exit(1);
+}
+
+{
+  const originalSearch = context.window.location.search;
+  const originalQuerySelector = documentStub.querySelector;
+  const originalQuerySelectorAll = documentStub.querySelectorAll;
+  let currentTextarea = documentStub.createElement('textarea');
+  let templateWrap = null;
+  const textareaParent = {
+    insertBefore(node, textarea) {
+      templateWrap = node;
+      node.parentElement = this;
+      node.nextElementSibling = textarea;
+    }
+  };
+  currentTextarea.parentElement = textareaParent;
+  currentTextarea.offsetParent = {};
+  context.window.location.search = '?type=note';
+  documentStub.querySelector = (selector) => selector === '.bosun-action-templates' ? templateWrap : null;
+  documentStub.querySelectorAll = (selector) => selector === 'textarea' ? [currentTextarea] : [];
+
+  const templates = context.BosunHelperActionTemplates.createActionTemplates({
+    isActionPage: () => true,
+    templatesByType: { note: ['template'] }
+  });
+  templates.refresh();
+  const button = templateWrap.children[1].children[0];
+  const detachedTextarea = currentTextarea;
+  currentTextarea = documentStub.createElement('textarea');
+  currentTextarea.parentElement = textareaParent;
+  currentTextarea.offsetParent = {};
+  templateWrap.nextElementSibling = currentTextarea;
+  button.__listeners.click[0]({ preventDefault() {}, stopPropagation() {} });
+
+  assert.strictEqual(detachedTextarea.value, '', 'Detached action textarea must not be updated');
+  assert.strictEqual(currentTextarea.value, 'template', 'Template must target the current action textarea');
+
+  context.window.location.search = originalSearch;
+  documentStub.querySelector = originalQuerySelector;
+  documentStub.querySelectorAll = originalQuerySelectorAll;
+}
+
+{
+  let removedKeys = [];
+  const now = Date.now();
+  const storageItems = {
+    bosunGrafanaPendingQueryV1: { query: 'legacy' },
+    'bosunGrafanaPendingQueryV2:expired': { query: 'old', createdAt: now - 121000 },
+    'bosunGrafanaPendingQueryV2:active': { query: 'current', createdAt: now },
+    unrelated: { createdAt: 0 }
+  };
+  const handoff = context.BosunHelperGrafanaHandoff.createGrafanaHandoff({
+    config: {
+      grafanaHost: 'grafana.example.com:8443',
+      grafanaPanelUrl: 'https://grafana.example.com:8443/d/test?editPanel=1'
+    },
+    getStorage: () => ({
+      get(_keys, callback) { callback(storageItems); },
+      remove(keys) { removedKeys = keys; }
+    })
+  });
+
+  const panelUrl = new URL(handoff.buildPanelUrl('request-id'));
+  assert.strictEqual(panelUrl.host, 'grafana.example.com:8443');
+  assert.strictEqual(panelUrl.searchParams.get('bosunHelperRequest'), 'request-id');
+  handoff.cleanupExpired();
+  assert.deepStrictEqual(
+    removedKeys.slice().sort(),
+    ['bosunGrafanaPendingQueryV1', 'bosunGrafanaPendingQueryV2:expired'].sort(),
+    'Grafana cleanup must remove only legacy and expired handoff records'
+  );
+  handoff.destroy();
 }
 
 const alertsDataApi = context.BosunSilenceHiderAlertsData.createAlertsData({
@@ -170,6 +267,27 @@ assert.strictEqual(
 );
 assert.strictEqual(
   alertsDataApi.hasNoteFromActions([
+    { Type: 'Note', Message: '', User: 'operator' }
+  ]),
+  true,
+  'Bosun Note action must count even when Notify is disabled and Message is empty'
+);
+assert.strictEqual(
+  alertsDataApi.hasNoteFromActions([
+    { ActionType: 6, Text: 'legacy Bosun note', User: 'operator' }
+  ]),
+  true,
+  'Numeric ActionNote from older/custom Bosun responses was not recognized'
+);
+assert.strictEqual(
+  alertsDataApi.hasNoteFromActions([
+    'Commented On by operator at (2026-01-01): checked'
+  ]),
+  true,
+  'Human-readable Commented On action was not recognized'
+);
+assert.strictEqual(
+  alertsDataApi.hasNoteFromActions([
     { type: 'note', message: 'cancelled', user: 'operator', cancelled: true }
   ]),
   false
@@ -178,6 +296,50 @@ assert.strictEqual(alertsDataApi.isRetryableError({ status: 503 }), true);
 assert.strictEqual(alertsDataApi.isRetryableError({ status: 429 }), true);
 assert.strictEqual(alertsDataApi.isRetryableError({ status: 404 }), false);
 assert.strictEqual(alertsDataApi.isRetryableError({ code: 'ETIMEDOUT' }), true);
+
+const lastActionNoteIndex = alertsDataApi.rebuildAlertDataIndex({
+  Groups: {
+    NeedAck: [{
+      Subject: 'last-action-note',
+      Children: [{
+        Ago: '2020-01-01T00:00:00Z',
+        State: {
+          Id: 777,
+          Actions: [],
+          LastAction: 'Note by operator at (2026-01-01): checked after reload'
+        }
+      }]
+    }]
+  }
+}, {
+  buildChildMarkerKeyFromData: (child) => `id:${child.State.Id}`,
+  buildGroupMarkerKeyFromData: (group) => group.Subject,
+  normalizeNeedAckChildren: (children) => children || []
+});
+assert.strictEqual(lastActionNoteIndex.childHasNoteById.get('777'), true);
+assert.strictEqual(lastActionNoteIndex.childOldNoNoteById.get('777'), false);
+
+const emptyLastActionNoteIndex = alertsDataApi.rebuildAlertDataIndex({
+  Groups: {
+    NeedAck: [{
+      Subject: 'empty-last-action-note',
+      Children: [{
+        Ago: '2020-01-01T00:00:00Z',
+        State: {
+          Id: 778,
+          Actions: [],
+          LastAction: 'Note by operator at (2026-01-01):'
+        }
+      }]
+    }]
+  }
+}, {
+  buildChildMarkerKeyFromData: (child) => `id:${child.State.Id}`,
+  buildGroupMarkerKeyFromData: (group) => group.Subject,
+  normalizeNeedAckChildren: (children) => children || []
+});
+assert.strictEqual(emptyLastActionNoteIndex.childHasNoteById.get('778'), true);
+assert.strictEqual(emptyLastActionNoteIndex.childOldNoNoteById.get('778'), false);
 
 const commentIndex = alertsDataApi.rebuildAlertDataIndex({
   Groups: {
@@ -299,16 +461,26 @@ assert.strictEqual(
   '(first_metric) or (second_metric)'
 );
 
-function createBaselineHarness() {
+function createBaselineHarness(options = {}) {
   const events = [];
   const api = context.BosunSilenceHiderNeedAckBaseline.createNeedAckBaseline({
     sessionKey: 'test-baseline',
-    isSoundEnabled: () => true,
+    isSoundEnabled: () => options.soundEnabled !== false,
     reportDiagnostics(event, details) {
       events.push({ event, details });
     },
     playNeedAckChime(kind) {
       events.push({ event: 'chime', details: kind });
+    },
+    onNewAlerts(details) {
+      events.push({
+        event: 'visible-new-alerts',
+        details: {
+          newIds: Array.from(details.newIds),
+          total: details.total,
+          source: details.source
+        }
+      });
     },
     collectCurrentIdsAndSeverity(payload) {
       const ids = Array.isArray(payload.ids) ? payload.ids : [];
@@ -319,6 +491,35 @@ function createBaselineHarness() {
     }
   });
   return { api, events };
+}
+
+{
+  const { api, events } = createBaselineHarness({ soundEnabled: false });
+  api.process({ Groups: { NeedAck: [] }, ids: ['existing'], severity: 'critical' });
+  events.length = 0;
+  api.process({
+    Groups: { NeedAck: [] },
+    ids: ['existing', 'new-critical'],
+    severity: 'critical'
+  });
+
+  assert.ok(!events.some((entry) => entry.event === 'chime'));
+  assert.deepStrictEqual(
+    events.find((entry) => entry.event === 'visible-new-alerts')?.details,
+    {
+      newIds: ['new-critical'],
+      total: 2,
+      source: 'refresh'
+    }
+  );
+
+  events.length = 0;
+  api.process({
+    Groups: { NeedAck: [] },
+    ids: ['existing', 'new-critical'],
+    severity: 'critical'
+  });
+  assert.ok(!events.some((entry) => entry.event === 'visible-new-alerts'));
 }
 
 {

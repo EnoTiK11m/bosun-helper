@@ -21,13 +21,13 @@ const config = configContext.BosunHelperLocalConfig;
 assert.ok(config && typeof config === 'object', 'config.js did not define BosunHelperLocalConfig');
 const expectedBosunMatches = Array.from(
   config.bosunHosts,
-  (host) => `https://${host}/*`
+  (host) => `https://${new URL(`https://${host}`).hostname}/*`
 ).sort();
 const actualBosunMatches = manifest.content_scripts[0].matches.slice().sort();
 assert.deepStrictEqual(actualBosunMatches, expectedBosunMatches, 'Bosun config/manifest mismatch');
 assert.deepStrictEqual(
   manifest.content_scripts[1].matches,
-  [`https://${config.grafanaHost}/*`],
+  [`https://${new URL(`https://${config.grafanaHost}`).hostname}/*`],
   'Grafana config/manifest mismatch'
 );
 
@@ -42,11 +42,20 @@ for (const file of referencedFiles) {
   assert.ok(fs.existsSync(path.join(root, file)), `Manifest references missing file: ${file}`);
 }
 
-assert.ok(
-  manifest.content_scripts[0].js.indexOf('promql.js') <
-    manifest.content_scripts[0].js.indexOf('content.js'),
-  'promql.js must load before content.js'
-);
+const bosunScripts = manifest.content_scripts[0].js;
+const contentIndex = bosunScripts.indexOf('content.js');
+assert.ok(contentIndex >= 0, 'Bosun entry must include content.js');
+for (const provider of [
+  'promql.js',
+  'action-templates.js',
+  'grafana-handoff.js',
+  'new-alert-tracker.js',
+  'refresh-coordinator.js'
+]) {
+  const providerIndex = bosunScripts.indexOf(provider);
+  assert.ok(providerIndex >= 0, `Bosun entry must include ${provider}`);
+  assert.ok(providerIndex < contentIndex, `${provider} must load before content.js`);
+}
 assert.deepStrictEqual(
   manifest.content_scripts[1].js,
   ['config.js', 'grafana-content.js'],
@@ -92,5 +101,12 @@ const integration = spawnSync(process.execPath, ['integration-test.js'], {
   stdio: 'inherit'
 });
 assert.strictEqual(integration.status, 0, 'Integration test failed');
+
+const regression = spawnSync(process.execPath, ['regression-test.js'], {
+  cwd: root,
+  encoding: 'utf8',
+  stdio: 'inherit'
+});
+assert.strictEqual(regression.status, 0, 'Regression test failed');
 
 console.log(`Checks passed: ${javascriptFiles.length} JavaScript files and manifest.json`);

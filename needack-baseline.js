@@ -7,7 +7,8 @@
       isSoundEnabled,
       reportDiagnostics,
       playNeedAckChime,
-      collectCurrentIdsAndSeverity
+      collectCurrentIdsAndSeverity,
+      onNewAlerts
     } = options;
 
     let ready = false;
@@ -73,9 +74,9 @@
     function process(payload) {
       refreshAttempts += 1;
 
-      if (!isSoundEnabled()) {
+      const soundEnabled = isSoundEnabled();
+      if (!soundEnabled) {
         reportDiagnostics('sound-disabled', 'toggle=off');
-        return;
       }
 
       const groups = payload?.Groups?.NeedAck;
@@ -96,8 +97,14 @@
             if (bucket === 'critical' || bucket === 'unknown') hasAlertChime = true;
             else hasSoft = true;
           }
-          if (hasAlertChime) playNeedAckChime('alert');
-          else if (hasSoft) playNeedAckChime('soft');
+          if (soundEnabled && hasAlertChime) playNeedAckChime('alert');
+          else if (soundEnabled && hasSoft) playNeedAckChime('soft');
+          onNewAlerts?.({
+            newIds: Array.from(currentIds),
+            idToSeverity,
+            total: currentIds.size,
+            source: 'baseline-recovery'
+          });
           reportDiagnostics('baseline-init-with-chime', `ids=${currentIds.size}, missingBefore=${missingCount}`);
         }
 
@@ -155,8 +162,14 @@
         else hasSoft = true;
       }
 
-      if (hasAlertChime) playNeedAckChime('alert');
-      else if (hasSoft) playNeedAckChime('soft');
+      if (soundEnabled && hasAlertChime) playNeedAckChime('alert');
+      else if (soundEnabled && hasSoft) playNeedAckChime('soft');
+      onNewAlerts?.({
+        newIds: newIds.slice(),
+        idToSeverity,
+        total: currentIds.size,
+        source: 'refresh'
+      });
       reportDiagnostics('new-alerts', `new=${newIds.length}, total=${currentIds.size}`);
     }
 

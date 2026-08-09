@@ -43,8 +43,9 @@ const normalizedConfig = {
   grafanaHost,
   grafanaPanelUrl: grafanaPanelUrl.toString()
 };
-const matchPatterns = bosunHosts.map((host) => `https://${host}/*`);
-const grafanaMatch = `https://${grafanaHost}/*`;
+const toMatchPatternHost = (host) => new URL(`https://${host}`).hostname;
+const matchPatterns = bosunHosts.map((host) => `https://${toMatchPatternHost(host)}/*`);
+const grafanaMatch = `https://${toMatchPatternHost(grafanaHost)}/*`;
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 
 assert.ok(manifest.content_scripts?.[0], 'Bosun content script entry is missing');
