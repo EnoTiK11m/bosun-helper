@@ -197,6 +197,8 @@ function instrumentContentSource(source) {
     ensureStateIcon,
     ensureParentStateIcon,
     ensureAutoRefreshControls,
+    ensureLastActionCopyButtons,
+    getLastActionMessageText,
     applyAlertsPayload,
     flashCopyButtonState,
     handleRouteChange,
@@ -279,6 +281,11 @@ async function runBrowserAssertions(client) {
 
   const accessibilityResult = await evaluate(client, `(() => {
     document.body.innerHTML = '<div id="actions"></div><div id="child-title"></div>' +
+      '<div id="last-action">Note by operator at <span ts-time="state.LastAction.Time">' +
+      '<a href="https://www.timeanddate.com/worldclock/converter.html">now</a></span>: ' +
+      '<span ng-show="state.LastAction.Message">: первая строка<br>' +
+      'https://example.test/runbook.<br>третья строка</span></div>' +
+      '<div><span id="invalid-last-action-url" ng-show="state.LastAction.Message">http://.</span></div>' +
       '<div class="container" style="width: 95%"></div>' +
       '<div id="group" class="panel"><div class="panel-heading"><div class="panel-title"></div></div></div>';
     globalThis.BosunHelperLocalConfig = {
@@ -298,6 +305,46 @@ async function runBrowserAssertions(client) {
     };
     ${contentSource}
     const hooks = globalThis.__BosunHelperBrowserTest;
+    const lastActionMessage = document.querySelector('[ng-show="state.LastAction.Message"]');
+    hooks.ensureLastActionCopyButtons();
+    const lastActionTime = document.querySelector('[ts-time="state.LastAction.Time"]');
+    const lastActionTimeState = {
+      hasLink: Boolean(lastActionTime.querySelector('a')),
+      text: lastActionTime.textContent,
+      replacementClass: lastActionTime.firstElementChild?.className,
+      color: lastActionTime.firstElementChild?.style.color
+    };
+    const invalidUrlMessage = document.querySelector('#invalid-last-action-url');
+    const invalidUrlTextNode = invalidUrlMessage.firstChild;
+    hooks.ensureLastActionCopyButtons();
+    const invalidUrlStayedStable =
+      invalidUrlMessage.firstChild === invalidUrlTextNode &&
+      !invalidUrlMessage.querySelector('a');
+    const lastActionCopyButton = document.querySelector('.bosun-copy-last-action-btn');
+    const lastActionLink = lastActionMessage.querySelector('.bosun-last-action-link');
+    const lastActionCopy = {
+      text: hooks.getLastActionMessageText(lastActionMessage),
+      buttonCount: lastActionMessage.parentElement.querySelectorAll('.bosun-copy-last-action-btn').length,
+      buttonText: lastActionCopyButton?.textContent,
+      buttonTitle: lastActionCopyButton?.title,
+      buttonLabel: lastActionCopyButton?.getAttribute('aria-label'),
+      linkText: lastActionLink?.textContent,
+      linkHref: lastActionLink?.href,
+      linkTarget: lastActionLink?.target,
+      linkRel: lastActionLink?.rel
+    };
+    const replacementMessage = document.createElement('span');
+    replacementMessage.setAttribute('ng-show', 'state.LastAction.Message');
+    replacementMessage.textContent = ': заменённая заметка';
+    lastActionMessage.replaceWith(replacementMessage);
+    hooks.ensureLastActionCopyButtons();
+    const replacementState = {
+      text: hooks.getLastActionMessageText(replacementMessage),
+      buttonCount: replacementMessage.parentElement.querySelectorAll('.bosun-copy-last-action-btn').length
+    };
+    replacementMessage.remove();
+    hooks.ensureLastActionCopyButtons();
+    const orphanButtonRemoved = !lastActionCopyButton.isConnected;
     const childTitle = document.querySelector('#child-title');
     hooks.ensureStateIcon(childTitle, 'note');
     const note = childTitle.querySelector('.bosun-has-note-icon');
@@ -364,6 +411,11 @@ async function runBrowserAssertions(client) {
       inputHintText: hint?.textContent.trim(),
       describedBy: input?.getAttribute('aria-describedby'),
       copyFeedback,
+      lastActionCopy,
+      replacementState,
+      orphanButtonRemoved,
+      invalidUrlStayedStable,
+      lastActionTimeState,
       allSeverityNoticeText,
       allSeverityNoticeClass,
       criticalOnlyNoticeText,
@@ -396,6 +448,29 @@ async function runBrowserAssertions(client) {
     title: 'Скопировано',
     copied: 'true',
     toolbarText: ''
+  });
+  assert.deepStrictEqual(accessibilityResult.lastActionCopy, {
+    text: 'первая строка\nhttps://example.test/runbook.\nтретья строка',
+    buttonCount: 1,
+    buttonText: 'Копировать',
+    buttonTitle: 'Скопировать текст заметки',
+    buttonLabel: 'Скопировать текст заметки',
+    linkText: 'https://example.test/runbook',
+    linkHref: 'https://example.test/runbook',
+    linkTarget: '_blank',
+    linkRel: 'noopener noreferrer'
+  });
+  assert.deepStrictEqual(accessibilityResult.replacementState, {
+    text: 'заменённая заметка',
+    buttonCount: 1
+  });
+  assert.strictEqual(accessibilityResult.orphanButtonRemoved, true);
+  assert.strictEqual(accessibilityResult.invalidUrlStayedStable, true);
+  assert.deepStrictEqual(accessibilityResult.lastActionTimeState, {
+    hasLink: false,
+    text: 'now',
+    replacementClass: 'bosun-last-action-time-text',
+    color: 'rgb(0, 0, 238)'
   });
   assert.strictEqual(accessibilityResult.allSeverityNoticeText, 'Новые алерты: Warn: 3, Crit: 1, Unk: 4');
   assert.strictEqual(accessibilityResult.criticalOnlyNoticeText, 'Новые алерты: Crit: 5');
