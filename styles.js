@@ -8,6 +8,7 @@
       acknowledgedCollapsedClass,
       copyButtonClass,
       copyAllButtonClass,
+      copyLastActionButtonClass,
       grafanaQueryButtonClass,
       noSelectClass,
       silencedBadgeClass,
@@ -89,7 +90,7 @@
 
       .${hiddenClass}, .${userCommentFilterHiddenClass}, .${acknowledgedCollapsedClass} { display: none !important; }
 
-      .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} {
+      .${copyButtonClass}, .${copyAllButtonClass}, .${copyLastActionButtonClass}, .${grafanaQueryButtonClass} {
         margin-left: 8px;
         padding: 1px 6px;
         border: 1px solid rgba(194, 180, 180, 0.85);
@@ -109,21 +110,21 @@
         border-color: rgba(229, 132, 33, 0.85);
         color: #d96c0b;
       }
-      .${copyButtonClass}:hover, .${copyAllButtonClass}:hover, .${grafanaQueryButtonClass}:hover { background: rgba(255,255,255,0.16); }
-      .${copyButtonClass}:active, .${copyAllButtonClass}:active {
+      .${copyButtonClass}:hover, .${copyAllButtonClass}:hover, .${copyLastActionButtonClass}:hover, .${grafanaQueryButtonClass}:hover { background: rgba(255,255,255,0.16); }
+      .${copyButtonClass}:active, .${copyAllButtonClass}:active, .${copyLastActionButtonClass}:active {
         background: rgba(90, 90, 90, 0.16);
         border-color: rgba(125, 125, 125, 0.72);
         box-shadow: 0 0 0 1px rgba(90, 90, 90, 0.18) inset;
         transform: translateY(1px);
       }
-      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"] {
+      .${copyButtonClass}[data-copied="true"], .${copyAllButtonClass}[data-copied="true"], .${copyLastActionButtonClass}[data-copied="true"] {
         background: rgba(100, 100, 100, 0.09);
         border-color: rgba(145, 145, 145, 0.72);
         color: inherit;
         box-shadow: 0 0 0 1px rgba(100, 100, 100, 0.12) inset;
         opacity: 1;
       }
-      .${copyButtonClass}[data-copied="false"], .${copyAllButtonClass}[data-copied="false"] {
+      .${copyButtonClass}[data-copied="false"], .${copyAllButtonClass}[data-copied="false"], .${copyLastActionButtonClass}[data-copied="false"] {
         background: #8a3d3d;
         border-color: #672c2c;
         color: #fff !important;
@@ -131,9 +132,22 @@
       }
       .${grafanaQueryButtonClass}[data-copied="true"] { opacity: 0.85; }
 
+      .bosun-last-action-link {
+        text-decoration: none;
+        overflow-wrap: anywhere;
+      }
+      .bosun-last-action-link:hover,
+      .bosun-last-action-link:focus-visible {
+        text-decoration: underline;
+      }
+      .bosun-last-action-time-text {
+        cursor: text;
+        text-decoration: none;
+      }
+
       .${noSelectClass} { user-select: none; }
-      .${noSelectClass}::selection, .${copyButtonClass}::selection, .${copyAllButtonClass}::selection, .${grafanaQueryButtonClass}::selection { background: transparent; }
-      .${noSelectClass}::-moz-selection, .${copyButtonClass}::-moz-selection, .${copyAllButtonClass}::-moz-selection, .${grafanaQueryButtonClass}::-moz-selection { background: transparent; }
+      .${noSelectClass}::selection, .${copyButtonClass}::selection, .${copyAllButtonClass}::selection, .${copyLastActionButtonClass}::selection, .${grafanaQueryButtonClass}::selection { background: transparent; }
+      .${noSelectClass}::-moz-selection, .${copyButtonClass}::-moz-selection, .${copyAllButtonClass}::-moz-selection, .${copyLastActionButtonClass}::-moz-selection, .${grafanaQueryButtonClass}::-moz-selection { background: transparent; }
 
       .${silencedBadgeClass} {
         display: inline-block;
@@ -297,6 +311,7 @@
       #${topBarId} .bosun-toolbar-input:focus-visible,
       .${copyButtonClass}:focus-visible,
       .${copyAllButtonClass}:focus-visible,
+      .${copyLastActionButtonClass}:focus-visible,
       .${grafanaQueryButtonClass}:focus-visible,
       .bosun-action-template-btn:focus-visible,
       .bosun-grafana-preview-dialog button:focus-visible,
@@ -500,8 +515,8 @@
       @media (prefers-reduced-motion: reduce) {
         #${topBarId} .bosun-toolbar-btn { transition: none; }
         #${topBarId} .bosun-toolbar-btn:active { transform: none; }
-        .${copyButtonClass}, .${copyAllButtonClass}, .${grafanaQueryButtonClass} { transition: none; }
-        .${copyButtonClass}:active, .${copyAllButtonClass}:active { transform: none; }
+        .${copyButtonClass}, .${copyAllButtonClass}, .${copyLastActionButtonClass}, .${grafanaQueryButtonClass} { transition: none; }
+        .${copyButtonClass}:active, .${copyAllButtonClass}:active, .${copyLastActionButtonClass}:active { transform: none; }
       }
     `;
 
