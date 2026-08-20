@@ -202,6 +202,8 @@ function instrumentContentSource(source) {
     applyAlertsPayload,
     flashCopyButtonState,
     handleRouteChange,
+    startObserver,
+    singleAlertAge: singleAlertAgeApi,
     refreshIntervals: { visible: DATA_REFRESH_MS, hidden: DATA_REFRESH_HIDDEN_MS },
     seedMarkerCache(id, state) {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
@@ -238,6 +240,7 @@ ${source.slice(closing)}`;
 
 async function runBrowserAssertions(client) {
   const actionSource = fs.readFileSync(path.join(root, 'action-templates.js'), 'utf8');
+  const singleAlertAgeSource = fs.readFileSync(path.join(root, 'single-alert-age.js'), 'utf8');
   const handoffSource = fs.readFileSync(path.join(root, 'grafana-handoff.js'), 'utf8');
   const contentSource = instrumentContentSource(fs.readFileSync(path.join(root, 'content.js'), 'utf8'));
 
@@ -278,6 +281,415 @@ async function runBrowserAssertions(client) {
     wrapperCount: 1,
     wrapperBeforeReplacement: true
   });
+
+  const templateSettingsResult = await evaluate(client, `(() => {
+    document.body.innerHTML = '<div id="settings-host"><textarea id="settings-message"></textarea></div>';
+    const storageData = {
+      'testTemplates:note': [' custom ', '', 'custom', 'second'],
+      'testTemplates:ack': ['saved ack'],
+      'testTemplates:close': ['saved close']
+    };
+    const storage = {
+      get(keys, callback) {
+        const result = {};
+        for (const key of keys) result[key] = storageData[key];
+        callback(result);
+      },
+      set(values, callback) { Object.assign(storageData, values); callback?.(); },
+      remove(keys, callback) { for (const key of keys) delete storageData[key]; callback?.(); }
+    };
+    const defaults = { note: ['default note'], ack: ['default ack'], close: [] };
+    const api = BosunHelperActionTemplates.createActionTemplates({
+      isActionPage: () => true,
+      templatesByType: defaults,
+      storageKey: 'testTemplates',
+      getStorage: () => storage,
+      getLastError: () => null
+    });
+    api.refresh();
+    const loaded = Array.from(document.querySelectorAll('.bosun-action-template-btn'), (node) => node.textContent);
+    const loadedAck = api.getTemplatesForType('ack');
+    const loadedClose = api.getTemplatesForType('close');
+    document.querySelector('.bosun-action-templates-settings').click();
+    const focusAfterOpen = document.activeElement?.classList.contains('bosun-action-template-input') === true;
+    const expandedAfterOpen = document.querySelector('.bosun-action-templates-settings').getAttribute('aria-expanded');
+    let rows = Array.from(document.querySelectorAll('.bosun-action-template-row'));
+    rows[0].querySelector('input').value = 'edited';
+    rows[0].querySelector('input').dispatchEvent(new Event('input', { bubbles: true }));
+    Array.from(document.querySelectorAll('.bosun-action-template-editor-btn'))
+      .find((node) => node.textContent.includes('Добавить')).click();
+    rows = Array.from(document.querySelectorAll('.bosun-action-template-row'));
+    rows[2].querySelector('input').value = 'new';
+    rows[2].querySelector('input').dispatchEvent(new Event('input', { bubbles: true }));
+    rows[2].querySelector('[aria-label="Переместить шаблон 3 выше"]').click();
+    const focusAfterMove = document.activeElement?.value;
+    rows = Array.from(document.querySelectorAll('.bosun-action-template-row'));
+    rows[2].querySelector('[aria-label="Удалить шаблон 3"]').click();
+    const focusAfterDelete = document.activeElement?.value;
+    Array.from(document.querySelectorAll('.bosun-action-template-editor-btn'))
+      .find((node) => node.textContent === 'Сохранить').click();
+    const afterSave = Array.from(document.querySelectorAll('.bosun-action-template-btn'), (node) => node.textContent);
+    const savedBeforeReset = storageData['testTemplates:note'].slice();
+    const textareaAfterEditing = document.querySelector('#settings-message').value;
+    const focusAfterSave = document.activeElement?.classList.contains('bosun-action-templates-settings') === true;
+
+    document.querySelector('.bosun-action-templates-settings').click();
+    Array.from(document.querySelectorAll('.bosun-action-template-editor-btn'))
+      .find((node) => node.textContent === 'Сбросить').click();
+    const afterReset = Array.from(document.querySelectorAll('.bosun-action-template-btn'), (node) => node.textContent);
+
+    const corruptStorage = {
+      get(keys, callback) {
+        callback({
+          'corrupt:note': 'broken',
+          'corrupt:ack': [null, '', ' ok ', 'ok', 42]
+        });
+      }
+    };
+    const corruptApi = BosunHelperActionTemplates.createActionTemplates({
+      isActionPage: () => true,
+      templatesByType: defaults,
+      storageKey: 'corrupt',
+      getStorage: () => corruptStorage,
+      getLastError: () => null
+    });
+    const corruptNote = corruptApi.getTemplatesForType('note');
+    corruptApi.refresh();
+    const sanitizedAck = corruptApi.getTemplatesForType('ack');
+
+    return {
+      defaults: BosunHelperActionTemplates.DEFAULT_TEMPLATES,
+      loaded,
+      loadedAck,
+      loadedClose,
+      focusAfterOpen,
+      expandedAfterOpen,
+      focusAfterMove,
+      focusAfterDelete,
+      focusAfterSave,
+      saved: savedBeforeReset,
+      afterSave,
+      textareaAfterEditing,
+      afterReset,
+      resetRemoved: !Object.prototype.hasOwnProperty.call(storageData, 'testTemplates:note'),
+      ackUnchanged: storageData['testTemplates:ack'],
+      corruptNote,
+      sanitizedAck
+    };
+  })()`);
+  assert.deepStrictEqual(templateSettingsResult.loaded, ['custom', 'second']);
+  assert.deepStrictEqual(templateSettingsResult.loadedAck, ['saved ack']);
+  assert.deepStrictEqual(templateSettingsResult.loadedClose, ['saved close']);
+  assert.strictEqual(templateSettingsResult.focusAfterOpen, true);
+  assert.strictEqual(templateSettingsResult.expandedAfterOpen, 'true');
+  assert.strictEqual(templateSettingsResult.focusAfterMove, 'new');
+  assert.strictEqual(templateSettingsResult.focusAfterDelete, 'new');
+  assert.strictEqual(templateSettingsResult.focusAfterSave, true);
+  assert.deepStrictEqual(templateSettingsResult.saved, ['edited', 'new']);
+  assert.deepStrictEqual(templateSettingsResult.afterSave, ['edited', 'new']);
+  assert.strictEqual(templateSettingsResult.textareaAfterEditing, '');
+  assert.deepStrictEqual(templateSettingsResult.afterReset, ['default note']);
+  assert.strictEqual(templateSettingsResult.resetRemoved, true);
+  assert.deepStrictEqual(templateSettingsResult.ackUnchanged, ['saved ack']);
+  assert.deepStrictEqual(templateSettingsResult.corruptNote, ['default note']);
+  assert.deepStrictEqual(templateSettingsResult.sanitizedAck, ['ok']);
+  assert.ok(templateSettingsResult.defaults.note.length > 0);
+  assert.ok(Array.isArray(templateSettingsResult.defaults.close));
+
+  const singleAlertAgeResult = await evaluate(client, `(() => {
+    ${singleAlertAgeSource}
+    const fixedNow = Date.parse('2026-08-20T12:00:00Z');
+    document.body.innerHTML =
+      '<div id="need">' +
+        '<div class="panel" data-key="need-single" data-subject="single"><span class="count">1 alerts</span><span class="child-age">43m-ago</span><input type="checkbox" checked></div>' +
+        '<div class="panel" data-key="need-multi" data-subject="multi"><span class="count">2 alerts</span></div>' +
+        '<div class="panel" data-key="need-unknown" data-subject="unknown"><span class="count">1 alerts</span></div>' +
+      '</div>' +
+      '<div id="ack"><div class="panel" data-key="ack-single" data-subject="ack single"><span class="count">1 alerts</span></div></div>';
+    let countClicks = 0;
+    const singleCountNode = document.querySelector('[data-key="need-single"] .count');
+    singleCountNode.addEventListener('click', () => { countClicks += 1; });
+    const api = BosunHelperSingleAlertAge.createSingleAlertAge({
+      now: () => fixedNow,
+      normalizeChildren: (value) => Array.isArray(value) ? value : [],
+      buildGroupKeyFromData: (group) => group.Key,
+      buildGroupKeyFromDom: (panel) => panel.dataset.key,
+      getRoots: () => [
+        { type: 'NeedAck', root: document.querySelector('#need') },
+        { type: 'Acknowledged', root: document.querySelector('#ack') }
+      ],
+      getGroupPanels: (root) => root.querySelectorAll('.panel'),
+      getGroupSubject: (panel) => panel.dataset.subject,
+      getGroupCountNode: (panel) => panel.querySelector('.count'),
+      getRenderedChildAge: (panel) => panel.querySelector('.child-age')?.textContent
+    });
+    api.update({ Groups: {
+      NeedAck: [
+        { Key: 'need-single', Subject: 'single', Children: [{ Ago: '2026-08-20T11:17:00Z' }] },
+        { Key: 'need-multi', Subject: 'multi', Children: [{ Ago: '2026-08-20T11:00:00Z' }, { Ago: '2026-08-20T10:00:00Z' }] },
+        { Key: 'need-unknown', Subject: 'unknown', Children: [{ Ago: 'not-a-time' }] }
+      ],
+      Acknowledged: [
+        { Key: 'ack-single', Subject: 'ack single', Children: [{ Ago: '2026-08-20T10:00:00Z' }] }
+      ]
+    }});
+    api.refresh();
+    const first = {
+      single: singleCountNode.textContent,
+      multi: document.querySelector('[data-key="need-multi"] .count').textContent,
+      unknown: document.querySelector('[data-key="need-unknown"] .count').textContent,
+      acknowledged: document.querySelector('[data-key="ack-single"] .count').textContent
+    };
+    singleCountNode.click();
+    api.update({ Groups: {
+      NeedAck: [{ Key: 'need-single', Subject: 'single', Children: [{ Ago: '2026-08-18T12:00:00Z' }] }],
+      Acknowledged: [{ Key: 'ack-single', Subject: 'ack single', Children: [{ Ago: 'invalid' }] }]
+    }});
+    document.querySelector('[data-key="need-single"] .child-age').remove();
+    api.refresh();
+    return {
+      first,
+      updated: singleCountNode.textContent,
+      acknowledgedFallback: document.querySelector('[data-key="ack-single"] .count').textContent,
+      sameNodeAndHandler: countClicks === 1,
+      checkboxPreserved: document.querySelector('[data-key="need-single"] input').checked
+    };
+  })()`);
+  assert.deepStrictEqual(singleAlertAgeResult.first, {
+    single: '43m-ago',
+    multi: '2 alerts',
+    unknown: '1 alerts',
+    acknowledged: '2h-ago'
+  });
+  assert.strictEqual(singleAlertAgeResult.updated, '2d-ago');
+  assert.strictEqual(singleAlertAgeResult.acknowledgedFallback, '1 alerts');
+  assert.strictEqual(singleAlertAgeResult.sameNodeAndHandler, true);
+  assert.strictEqual(singleAlertAgeResult.checkboxPreserved, true);
+
+  const singleAlertLifecycleResult = await evaluate(client, `(async () => {
+    const ageDebugLogs = [];
+    const originalConsoleDebug = console.debug;
+    console.debug = (prefix, details) => {
+      if (prefix === '[BosunHelper][single-alert-age-problem]') ageDebugLogs.push(details);
+      else originalConsoleDebug.call(console, prefix, details);
+    };
+    history.replaceState({}, '', '/');
+    document.body.innerHTML =
+      '<div id="need-root" ts-ack-group="schedule.Groups.NeedAck"><div class="panel-group"></div></div>' +
+      '<div id="ack-root" ts-ack-group="schedule.Groups.Acknowledged"><div class="panel-group"></div></div>';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunSilenceHiderPageUtils = {
+      createPageUtils() {
+        return {
+          isDashboardHome: () => location.pathname === '/',
+          isActionPage: () => false,
+          applyActionPageTweaks() {}
+        };
+      }
+    };
+    let refreshRequests = 0;
+    globalThis.BosunHelperRefreshCoordinator = {
+      createRefreshCoordinator() {
+        return {
+          start() {}, stop() {},
+          requestRefresh() { refreshRequests += 1; }
+        };
+      }
+    };
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    const ago43m = new Date(Date.now() - 43 * 60 * 1000).toISOString();
+    const ago2h = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const snapshot = { Groups: {
+      NeedAck: [
+        { Subject: 'existing single', Children: [{ Ago: ago43m, State: { Id: 901 } }] },
+        { Subject: 'late single', Children: [{ Ago: ago43m, State: { Id: 902 } }] },
+        { Subject: 'multi', Children: [{ Ago: ago43m, State: { Id: 903 } }, { Ago: ago2h, State: { Id: 904 } }] },
+        { Subject: 'duplicate', Children: [{ Ago: ago43m, State: { Id: 905 } }] },
+        { Subject: 'duplicate', Children: [{ Ago: ago2h, State: { Id: 906 } }] }
+      ],
+      Acknowledged: [
+        { Subject: 'ack single', Children: [{ Ago: ago2h, State: { Id: 907 } }] }
+      ]
+    }};
+
+    hooks.applyAlertsPayload(snapshot, { source: 'follower' });
+    hooks.startObserver();
+
+    function createGroup(subject, count, id) {
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      panel.id = id;
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      const title = document.createElement('div');
+      title.className = 'panel-title';
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'group.Subject');
+      subjectNode.textContent = subject;
+      const countNode = document.createElement('span');
+      countNode.className = 'pull-right ng-binding';
+      countNode.textContent = count + ' alerts';
+      title.append(subjectNode, countNode);
+      heading.appendChild(title);
+      panel.appendChild(heading);
+      return panel;
+    }
+
+    const needGroup = document.querySelector('#need-root .panel-group');
+    const ackGroup = document.querySelector('#ack-root .panel-group');
+    needGroup.append(
+      createGroup('existing single', 1, 'existing-single'),
+      createGroup('multi', 2, 'multi-group'),
+      createGroup('duplicate', 1, 'ambiguous-group')
+    );
+    ackGroup.appendChild(createGroup('ack single', 1, 'ack-single'));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    const firstPass = {
+      single: document.querySelector('#existing-single .pull-right').textContent,
+      multi: document.querySelector('#multi-group .pull-right').textContent,
+      acknowledged: document.querySelector('#ack-single .pull-right').textContent,
+      ambiguous: document.querySelector('#ambiguous-group .pull-right').textContent
+    };
+    const requestsAfterInitialDom = refreshRequests;
+
+    needGroup.appendChild(createGroup('late single', 1, 'late-single'));
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const lateAge = document.querySelector('#late-single .pull-right').textContent;
+    const normalMutationLogCount = ageDebugLogs.length;
+
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [], Acknowledged: [] } }, { source: 'follower' });
+    const preservedAfterMissing = {
+      existing: document.querySelector('#existing-single .pull-right').textContent,
+      late: document.querySelector('#late-single .pull-right').textContent,
+      acknowledged: document.querySelector('#ack-single .pull-right').textContent,
+      multi: document.querySelector('#multi-group .pull-right').textContent,
+      ambiguous: document.querySelector('#ambiguous-group .pull-right').textContent,
+      historyEntries: hooks.singleAlertAge?.getHistoryStats?.().entries ?? null
+    };
+
+    const existingCount = document.querySelector('#existing-single .pull-right');
+    const requestsBeforeReset = refreshRequests;
+    existingCount.textContent = '1 alerts';
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const restoredAfterTextReset = existingCount.textContent;
+    const resetTriggeredFetch = refreshRequests !== requestsBeforeReset;
+    const resetLogCount = ageDebugLogs.length;
+    const resetLog = ageDebugLogs[0] || null;
+
+    const replacement = document.createElement('span');
+    replacement.className = 'pull-right ng-binding';
+    replacement.textContent = '1 alerts';
+    existingCount.replaceWith(replacement);
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const restoredReplacement = replacement.textContent;
+
+    hooks.applyAlertsPayload({ Groups: {
+      NeedAck: [{ Subject: 'existing single', Children: [{ Ago: ago2h, State: { Id: 901 } }] }],
+      Acknowledged: []
+    }}, { source: 'follower' });
+    const updatedFromSnapshot = replacement.textContent;
+
+    for (let index = 0; index < 25; index += 1) {
+      replacement.textContent = '1 alerts';
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const primitiveLogsOnly = ageDebugLogs.every((entry) => (
+      entry &&
+      Object.getPrototypeOf(entry) === Object.prototype &&
+      Object.values(entry).every((value) => (
+        value === null || ['string', 'number', 'boolean'].includes(typeof value)
+      ))
+    ));
+    const forbiddenDiagnosticKeys = ['mutation', 'target', 'addedNodes', 'removedNodes', 'payload', 'snapshot'];
+    const forbiddenKeysAbsent = ageDebugLogs.every((entry) => (
+      forbiddenDiagnosticKeys.every((key) => !Object.prototype.hasOwnProperty.call(entry, key))
+    ));
+    console.debug = originalConsoleDebug;
+    return {
+      firstPass,
+      lateAge,
+      preservedAfterMissing,
+      restoredAfterTextReset,
+      restoredReplacement,
+      updatedFromSnapshot,
+      resetTriggeredFetch,
+      requestsAfterInitialDom,
+      totalRefreshRequests: refreshRequests,
+      normalMutationLogCount,
+      resetLogCount,
+      resetLog,
+      debugLogCount: ageDebugLogs.length,
+      debugMaxProblems: BosunHelperSingleAlertAge.SINGLE_ALERT_AGE_DEBUG_MAX_PROBLEMS,
+      primitiveLogsOnly,
+      forbiddenKeysAbsent
+    };
+  })()`);
+  assert.deepStrictEqual(singleAlertLifecycleResult.firstPass, {
+    single: '43m-ago',
+    multi: '2 alerts',
+    acknowledged: '2h-ago',
+    ambiguous: '1 alerts'
+  });
+  assert.strictEqual(singleAlertLifecycleResult.lateAge, '43m-ago');
+  assert.deepStrictEqual(singleAlertLifecycleResult.preservedAfterMissing, {
+    existing: '43m-ago',
+    late: '43m-ago',
+    acknowledged: '2h-ago',
+    multi: '2 alerts',
+    ambiguous: '1 alerts',
+    historyEntries: 3
+  });
+  assert.strictEqual(singleAlertLifecycleResult.restoredAfterTextReset, '43m-ago');
+  assert.strictEqual(singleAlertLifecycleResult.restoredReplacement, '43m-ago');
+  assert.strictEqual(singleAlertLifecycleResult.updatedFromSnapshot, '2h-ago');
+  assert.strictEqual(singleAlertLifecycleResult.resetTriggeredFetch, false);
+  assert.ok(singleAlertLifecycleResult.requestsAfterInitialDom <= 1);
+  assert.ok(singleAlertLifecycleResult.totalRefreshRequests <= 3, 'MutationObserver entered a refresh loop');
+  assert.strictEqual(singleAlertLifecycleResult.normalMutationLogCount, 0);
+  assert.strictEqual(singleAlertLifecycleResult.resetLogCount, 1);
+  assert.deepStrictEqual({
+    event: singleAlertLifecycleResult.resetLog.event,
+    section: singleAlertLifecycleResult.resetLog.section,
+    previousText: singleAlertLifecycleResult.resetLog.previousText,
+    currentText: singleAlertLifecycleResult.resetLog.currentText,
+    expectedText: singleAlertLifecycleResult.resetLog.expectedText,
+    snapshotMatches: singleAlertLifecycleResult.resetLog.snapshotMatches,
+    matchingResult: singleAlertLifecycleResult.resetLog.matchingResult,
+    matchingReason: singleAlertLifecycleResult.resetLog.matchingReason,
+    decision: singleAlertLifecycleResult.resetLog.decision,
+    consideredOwn: singleAlertLifecycleResult.resetLog.consideredOwn,
+    observerTriggered: singleAlertLifecycleResult.resetLog.observerTriggered,
+    repaintAttempted: singleAlertLifecycleResult.resetLog.repaintAttempted,
+    repaintResult: singleAlertLifecycleResult.resetLog.repaintResult,
+    finalTextAfterRepaint: singleAlertLifecycleResult.resetLog.finalTextAfterRepaint
+  }, {
+    event: 'age-reset-to-counter',
+    section: 'NeedAck',
+    previousText: '43m-ago',
+    currentText: '1 alerts',
+    expectedText: '43m-ago',
+    snapshotMatches: 0,
+    matchingResult: 'no-match',
+    matchingReason: 'missing-candidate',
+    decision: 'preserve-last-valid-match',
+    consideredOwn: false,
+    observerTriggered: true,
+    repaintAttempted: true,
+    repaintResult: 'set-age',
+    finalTextAfterRepaint: '43m-ago'
+  });
+  assert.strictEqual(singleAlertLifecycleResult.debugMaxProblems, 20);
+  assert.strictEqual(singleAlertLifecycleResult.debugLogCount, 20);
+  assert.strictEqual(singleAlertLifecycleResult.primitiveLogsOnly, true);
+  assert.strictEqual(singleAlertLifecycleResult.forbiddenKeysAbsent, true);
 
   const accessibilityResult = await evaluate(client, `(() => {
     document.body.innerHTML = '<div id="actions"></div><div id="child-title"></div>' +

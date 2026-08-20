@@ -103,6 +103,7 @@ for (const file of [
   'diagnostics.js',
   'sound.js',
   'alerts-data.js',
+  'single-alert-age.js',
   'needack-baseline.js',
   'needack-severity.js',
   'promql.js',
@@ -124,6 +125,7 @@ const checks = [
   ['diagnostics', !!context.BosunSilenceHiderDiagnostics],
   ['sound', !!context.BosunSilenceHiderSound],
   ['alerts-data', !!context.BosunSilenceHiderAlertsData],
+  ['single-alert-age', !!context.BosunHelperSingleAlertAge],
   ['needack-baseline', !!context.BosunSilenceHiderNeedAckBaseline],
   ['needack-severity', !!context.BosunSilenceHiderNeedAckSeverity],
   ['promql', !!context.BosunHelperPromQL],
@@ -141,6 +143,160 @@ if (failed.length) {
   console.error('FAILED', failed);
   process.exit(1);
 }
+
+{
+  const fixedNow = Date.parse('2026-08-20T12:00:00Z');
+  const ageApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({ now: () => fixedNow });
+  assert.strictEqual(ageApi.formatAge('2026-08-20T11:17:00Z'), '43m-ago');
+  assert.strictEqual(ageApi.formatAge('2026-08-20T10:00:00Z'), '2h-ago');
+  assert.strictEqual(ageApi.formatAge('2026-08-18T12:00:00Z'), '2d-ago');
+  assert.strictEqual(ageApi.formatAge('invalid'), null);
+  assert.strictEqual(ageApi.formatAge('2026-08-20T11:59:15Z'), '1m-ago');
+  assert.strictEqual(ageApi.formatAge('2026-08-19T14:00:00Z'), '1d-ago');
+
+  let disabledDebugCalls = 0;
+  const quietAgeApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({
+    debug: false,
+    debugLogger() { disabledDebugCalls += 1; }
+  });
+  quietAgeApi.update({ Groups: { NeedAck: [], Acknowledged: [] } });
+  quietAgeApi.refresh();
+  assert.strictEqual(disabledDebugCalls, 0, 'Disabled single-alert-age diagnostics must stay silent');
+
+  const throwingLoggerApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({
+    debug: true,
+    debugLogger() { throw new Error('simulated diagnostics failure'); }
+  });
+  assert.doesNotThrow(() => {
+    throwingLoggerApi.update({ Groups: { NeedAck: [], Acknowledged: [] } });
+    throwingLoggerApi.refresh();
+  }, 'Diagnostics failures must not affect single-alert-age behavior');
+}
+
+{
+  function createAgeHistoryHarness() {
+    let currentNow = Date.parse('2026-08-20T12:00:00Z');
+    const roots = {
+      NeedAck: { panels: [] },
+      Acknowledged: { panels: [] }
+    };
+    const api = context.BosunHelperSingleAlertAge.createSingleAlertAge({
+      now: () => currentNow,
+      debug: false,
+      normalizeChildren: (value) => Array.isArray(value) ? value : [],
+      buildGroupKeyFromData: (group) => group.Key || null,
+      buildGroupKeyFromDom: (panel) => panel.key || null,
+      getRoots: () => [
+        { type: 'NeedAck', root: roots.NeedAck },
+        { type: 'Acknowledged', root: roots.Acknowledged }
+      ],
+      getGroupPanels: (root) => root.panels,
+      getGroupSubject: (panel) => panel.subject,
+      getGroupCountNode: (panel) => panel.countNode,
+      getDomChildCount: (panel) => panel.domChildCount || 0,
+      hasStrongDomIdentity: (panel) => panel.strong === true
+    });
+    return {
+      api,
+      roots,
+      setNow(value) { currentNow = value; },
+      panel(subject, key = null) {
+        return { subject, key, countNode: { textContent: '1 alerts', dataset: {} } };
+      },
+      group(subject, ago, children = 1, key = null) {
+        return {
+          Subject: subject,
+          Key: key,
+          Children: Array.from({ length: children }, (_, index) => ({
+            Ago: index === 0 ? ago : '2026-08-20T10:00:00Z'
+          }))
+        };
+      },
+      apply(needAck = [], acknowledged = []) {
+        api.update({ Groups: { NeedAck: needAck, Acknowledged: acknowledged } });
+        api.refresh();
+      }
+    };
+  }
+
+  const history = createAgeHistoryHarness();
+  const stable = history.panel('stable');
+  history.roots.NeedAck.panels = [stable];
+  history.apply([history.group('stable', '2026-08-20T11:17:00Z')]);
+  assert.strictEqual(stable.countNode.textContent, '43m-ago');
+  assert.strictEqual(history.api.getHistoryStats().entries, 1);
+
+  history.setNow(Date.parse('2026-08-20T12:01:00Z'));
+  history.apply([]);
+  assert.strictEqual(stable.countNode.textContent, '44m-ago', 'Missing candidate must use the cached timestamp');
+  assert.strictEqual(stable.countNode.dataset.bosunSingleAlertAgeDecision, 'preserve-last-valid-match');
+  for (let index = 0; index < 25; index += 1) history.api.refresh();
+  assert.strictEqual(history.api.getHistoryStats().entries, 1, 'Repeated missing snapshots must not grow history');
+
+  history.apply([history.group('stable', '2026-08-20T10:00:00Z')]);
+  assert.strictEqual(stable.countNode.textContent, '2h-ago', 'Recovered snapshot must replace cached age');
+
+  history.roots.NeedAck.panels = [];
+  history.api.refresh();
+  assert.strictEqual(history.api.getHistoryStats().entries, 0, 'Removed panels must clear history');
+  history.roots.NeedAck.panels = [stable];
+  history.apply([]);
+  assert.strictEqual(stable.countNode.textContent, '1 alerts', 'Removed panel history must not be restored');
+
+  const fresh = history.panel('stable');
+  history.roots.NeedAck.panels = [fresh];
+  history.apply([]);
+  assert.strictEqual(fresh.countNode.textContent, '1 alerts', 'History must not transfer to a new panel');
+
+  const multiHistory = createAgeHistoryHarness();
+  const changingCount = multiHistory.panel('changing count');
+  multiHistory.roots.NeedAck.panels = [changingCount];
+  multiHistory.apply([multiHistory.group('changing count', '2026-08-20T11:17:00Z')]);
+  multiHistory.apply([multiHistory.group('changing count', '2026-08-20T11:17:00Z', 2)]);
+  assert.strictEqual(changingCount.countNode.textContent, '2 alerts');
+  assert.strictEqual(multiHistory.api.getHistoryStats().entries, 0, 'Multi-alert groups must clear single history');
+  multiHistory.apply([]);
+  assert.strictEqual(changingCount.countNode.textContent, '2 alerts', 'Cleared single history must not return');
+
+  const ambiguousHistory = createAgeHistoryHarness();
+  const ambiguousPanel = ambiguousHistory.panel('duplicate');
+  ambiguousHistory.roots.Acknowledged.panels = [ambiguousPanel];
+  ambiguousHistory.apply([], [ambiguousHistory.group('duplicate', '2026-08-20T11:17:00Z')]);
+  ambiguousHistory.apply([], [
+    ambiguousHistory.group('duplicate', '2026-08-20T11:17:00Z'),
+    ambiguousHistory.group('duplicate', '2026-08-20T10:00:00Z')
+  ]);
+  assert.strictEqual(ambiguousPanel.countNode.textContent, '1 alerts');
+  assert.strictEqual(ambiguousHistory.api.getHistoryStats().entries, 0, 'Ambiguous match must clear history');
+  ambiguousHistory.apply([], []);
+  assert.strictEqual(ambiguousPanel.countNode.textContent, '1 alerts');
+
+  const identityHistory = createAgeHistoryHarness();
+  const reusedPanel = identityHistory.panel('old identity');
+  identityHistory.roots.NeedAck.panels = [reusedPanel];
+  identityHistory.apply([identityHistory.group('old identity', '2026-08-20T11:17:00Z')]);
+  reusedPanel.subject = 'new identity';
+  identityHistory.apply([]);
+  assert.strictEqual(reusedPanel.countNode.textContent, '1 alerts', 'History must not survive a panel identity change');
+  assert.strictEqual(identityHistory.api.getHistoryStats().entries, 0);
+
+  const strongIdentityHistory = createAgeHistoryHarness();
+  const strongPanel = strongIdentityHistory.panel('same subject', 'key-a');
+  strongPanel.strong = true;
+  strongIdentityHistory.roots.NeedAck.panels = [strongPanel];
+  strongIdentityHistory.apply([
+    strongIdentityHistory.group('same subject', '2026-08-20T11:17:00Z', 1, 'key-a')
+  ]);
+  strongPanel.key = 'key-b';
+  strongIdentityHistory.apply([]);
+  assert.strictEqual(strongPanel.countNode.textContent, '1 alerts', 'Strong identity changes must invalidate history');
+  assert.strictEqual(strongIdentityHistory.api.getHistoryStats().entries, 0);
+}
+
+assert.ok(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.note.length > 0);
+assert.ok(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.ack.length > 0);
+assert.strictEqual(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.note.at(-1), 'сдано в ');
+assert.deepStrictEqual(Array.from(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.close), []);
 
 {
   const originalSearch = context.window.location.search;

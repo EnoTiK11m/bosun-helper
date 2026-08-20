@@ -308,6 +308,7 @@ async function testBosunInitialization() {
   const domReadyListeners = harness.documentListeners.get('DOMContentLoaded') || [];
   assert.strictEqual(domReadyListeners.length, 1, 'Bosun init listener was not installed');
   domReadyListeners[0]();
+  assert.strictEqual(harness.fetchCount, 1, 'Initial alerts request must start during initialization');
   await flushMicrotasks();
 
   assert.strictEqual(harness.fetchCount, 1, 'Initial alerts request was not sent exactly once');

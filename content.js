@@ -120,6 +120,8 @@
   let dataRefreshQueued = false;
   let dataRefreshDebounceTimer = null;
   let dataVisibilityTrackingInstalled = false;
+  let primedAlertsPayload = null;
+  let alertsPayloadApplyVersion = 0;
   let autoRefreshEnabled = true;
   let autoRefreshIdleSeconds = AUTO_REFRESH_DEFAULT_IDLE_SECONDS;
   let lastUserActivityTs = Date.now();
@@ -224,7 +226,7 @@
       }
   }) || null;
   const refreshCoordinatorApi = globalThis.BosunHelperRefreshCoordinator?.createRefreshCoordinator?.({
-    fetchSnapshot: () => fetchAlertsPayload(),
+    fetchSnapshot: () => consumeAlertsPayload(),
     applySnapshot: (payload, metadata) => applyAlertsPayload(payload, metadata),
     isVisible: () => document.visibilityState !== 'hidden',
     shouldRun: () => isDashboardEnhancementsPage(),
@@ -259,6 +261,31 @@
 
   const pageUtils = globalThis.BosunSilenceHiderPageUtils?.createPageUtils?.() || null;
   const stylesApi = globalThis.BosunSilenceHiderStyles || null;
+  const singleAlertAgeApi = globalThis.BosunHelperSingleAlertAge?.createSingleAlertAge?.({
+    normalizeChildren: (raw) => {
+      if (sharedUtils?.normalizeNeedAckChildren) return sharedUtils.normalizeNeedAckChildren(raw);
+      if (raw == null) return [];
+      return Array.isArray(raw) ? raw : [raw];
+    },
+    buildGroupKeyFromData: buildGroupMarkerKeyFromData,
+    buildGroupKeyFromDom: buildGroupMarkerKeyFromDom,
+    getRoots: () => [
+      { type: 'NeedAck', root: getNeedsAckRoot() },
+      { type: 'Acknowledged', root: getAcknowledgedRoot() }
+    ],
+    getGroupPanels: (root) => Array.from(root.querySelectorAll('.panel-group > .panel'))
+      .filter((panel) => isGroupPanel(panel)),
+    getGroupSubject: (panel) => getGroupSubjectFromPanel(panel),
+    getGroupCountNode: (panel) => getGroupCountNode(panel),
+    getRenderedChildAge: (panel) => panel
+      ?.querySelector('[ng-repeat="child in group.Children"] [ts-since="child.Ago"]')
+      ?.textContent,
+    getDomChildCount: (panel) => getGroupChildPanels(panel).length,
+    hasStrongDomIdentity: (panel) => {
+      const children = getGroupChildPanels(panel);
+      return children.length > 0 && children.every((child) => Boolean(getPanelIdFromHeading(getChildHeading(child))));
+    }
+  }) || null;
   const actionTemplatesApi = globalThis.BosunHelperActionTemplates?.createActionTemplates?.({
     isActionPage: () => isActionPage()
   }) || null;
@@ -991,7 +1018,10 @@
   }
 
   function clearAlertDerivedState() {
+    alertsPayloadApplyVersion += 1;
+    primedAlertsPayload = null;
     rebuildAlertDataIndex({ Groups: {} });
+    singleAlertAgeApi?.clear?.();
     alertDataIndexReady = false;
     document.querySelectorAll(
       `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}`
@@ -1008,6 +1038,7 @@
     ensureCopyButtons();
     markNoSelectElements();
     refreshSilencedBadges();
+    singleAlertAgeApi?.refresh?.();
     applyActionPageTweaks();
     actionTemplatesApi?.refresh?.();
 
@@ -2707,8 +2738,36 @@
     }
   }
 
+  function primeAlertsPayload() {
+    if (primedAlertsPayload || !isDashboardEnhancementsPage()) return;
+    const entry = {
+      startedAt: Date.now(),
+      applyVersion: alertsPayloadApplyVersion,
+      promise: fetchAlertsPayload()
+    };
+    primedAlertsPayload = entry;
+    entry.promise.then((payload) => {
+      if (isDashboardEnhancementsPage() && alertsPayloadApplyVersion === entry.applyVersion) {
+        singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now() });
+        singleAlertAgeApi?.refresh?.();
+      }
+    }).catch(() => {});
+  }
+
+  function consumeAlertsPayload() {
+    const entry = primedAlertsPayload;
+    primedAlertsPayload = null;
+    if (entry && Date.now() - entry.startedAt <= DATA_REFRESH_MS) return entry.promise;
+    return fetchAlertsPayload();
+  }
+
   function applyAlertsPayload(payload, metadata = {}) {
     if (!isDashboardEnhancementsPage()) return;
+    alertsPayloadApplyVersion += 1;
+    singleAlertAgeApi?.update?.(payload, {
+      source: metadata?.source || 'direct',
+      fetchedAt: metadata?.fetchedAt || Date.now()
+    });
     rebuildAlertDataIndex(payload);
     persistAlertMarkerCacheToSession();
     const trackerOwner = metadata?.source !== 'follower';
@@ -2725,6 +2784,7 @@
     ensureCopyButtons();
     markNoSelectElements();
     refreshSilencedBadges();
+    singleAlertAgeApi?.refresh?.();
     reportDiagnostics('refresh-ok', 'alerts payload received');
     clearToolbarStatus('refresh');
   }
@@ -2744,7 +2804,7 @@
     }
     dataRefreshInFlight = true;
     try {
-      applyAlertsPayload(await fetchAlertsPayload());
+      applyAlertsPayload(await consumeAlertsPayload());
     } catch (_) {
       // fetchAlertsPayload already reported a user-visible error.
     } finally {
@@ -2793,6 +2853,7 @@
     function isExtensionOwnedNode(node) {
       if (!node || node.nodeType !== 1) return false;
       return Boolean(
+        singleAlertAgeApi?.isSynchronizedMutationNode?.(node) ||
         node.id === TOP_BAR_ID ||
         node.closest?.(`#${TOP_BAR_ID}`) ||
         node.matches?.(
@@ -2836,6 +2897,7 @@
 
     function isUiRelevantNode(node) {
       if (!node || node.nodeType !== 1) return false;
+      if (singleAlertAgeApi?.isSynchronizedMutationNode?.(node)) return false;
       if (node.id === TOGGLE_ID || node.closest?.(`#${TOGGLE_ID}`)) return false;
       if (node.id === TOP_BAR_ID || node.closest?.(`#${TOP_BAR_ID}`)) return false;
       if (node.classList?.contains(OLD_NO_NOTE_ICON_CLASS) || node.closest?.(`.${OLD_NO_NOTE_ICON_CLASS}`)) return false;
@@ -2865,6 +2927,8 @@
       let shouldRefreshUi = false;
       let shouldRefreshData = false;
       const needsAckRoot = getNeedsAckRoot();
+      const ageResetProblems = [];
+      const ageDebugEnabled = singleAlertAgeApi?.isDebugEnabled?.() === true;
 
       for (const mutation of mutations) {
         const changedNodes = collectRelevantMutationNodes(mutation);
@@ -2876,9 +2940,12 @@
         const extensionOnlyChildChange =
           changedChildren.length > 0 &&
           changedChildren.every(isExtensionOwnedNode);
+        const mutationConsideredOwn = ageDebugEnabled && changedNodes.some(isExtensionOwnedNode);
+        let mutationRequestsRepaint = false;
 
         for (const node of changedNodes) {
-          if (!shouldRefreshUi && isUiRelevantNode(node)) {
+          if (isUiRelevantNode(node)) {
+            mutationRequestsRepaint = true;
             shouldRefreshUi = true;
           }
 
@@ -2886,15 +2953,28 @@
             (mutation.type === 'childList' && !extensionOnlyChildChange) ||
             mutation.attributeName === 'ts-ack-group' ||
             mutation.attributeName === 'ts-ack-item';
-          if (mutationCanChangeAlertData && isNeedsAckNode(node, needsAckRoot)) {
+          const agePresentationMutation = singleAlertAgeApi?.isManagedNode?.(node) === true;
+          if (mutationCanChangeAlertData && !agePresentationMutation && isNeedsAckNode(node, needsAckRoot)) {
             shouldRefreshData = true;
             break;
           }
         }
+        if (ageDebugEnabled) {
+          const problem = singleAlertAgeApi?.captureAgeReset?.(mutation, {
+            consideredOwn: mutationConsideredOwn,
+            repaint: mutationRequestsRepaint
+          });
+          if (problem) ageResetProblems.push(problem);
+        }
       }
 
       if (shouldRefreshUi) {
+        singleAlertAgeApi?.refresh?.();
         scheduleRefresh();
+      }
+
+      for (const problem of ageResetProblems) {
+        singleAlertAgeApi?.completeAgeReset?.(problem, shouldRefreshUi);
       }
 
       if (shouldRefreshData) {
@@ -2926,6 +3006,7 @@
     scheduleTopBarMount();
     restoreNeedAckSoundBaselineFromSession();
     restoreAlertMarkerCacheFromSession();
+    primeAlertsPayload();
 
     loadState(() => {
       markUserActivity();
