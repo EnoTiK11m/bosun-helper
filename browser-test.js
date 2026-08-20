@@ -241,6 +241,8 @@ ${source.slice(closing)}`;
 async function runBrowserAssertions(client) {
   const actionSource = fs.readFileSync(path.join(root, 'action-templates.js'), 'utf8');
   const singleAlertAgeSource = fs.readFileSync(path.join(root, 'single-alert-age.js'), 'utf8');
+  const pageUtilsSource = fs.readFileSync(path.join(root, 'page-utils.js'), 'utf8');
+  const stylesSource = fs.readFileSync(path.join(root, 'styles.js'), 'utf8');
   const handoffSource = fs.readFileSync(path.join(root, 'grafana-handoff.js'), 'utf8');
   const contentSource = instrumentContentSource(fs.readFileSync(path.join(root, 'content.js'), 'utf8'));
 
@@ -465,6 +467,345 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(singleAlertAgeResult.acknowledgedFallback, '1 alerts');
   assert.strictEqual(singleAlertAgeResult.sameNodeAndHandler, true);
   assert.strictEqual(singleAlertAgeResult.checkboxPreserved, true);
+
+  let narrowGroupLayout;
+  let wideGroupLayout;
+  let checkboxBehavior;
+  try {
+    await client.send('Emulation.setDeviceMetricsOverride', {
+      width: 360,
+      height: 720,
+      deviceScaleFactor: 1,
+      mobile: false
+    });
+    narrowGroupLayout = await evaluate(client, `(() => {
+      ${stylesSource}
+      BosunSilenceHiderStyles.injectStyles({
+        hiddenClass: 'test-hidden',
+        userCommentFilterHiddenClass: 'test-user-hidden',
+        acknowledgedCollapsedClass: 'test-ack-collapsed',
+        copyButtonClass: 'bosun-copy-alert-btn',
+        copyAllButtonClass: 'bosun-copy-all-alerts-btn',
+        copyLastActionButtonClass: 'test-copy-last-action',
+        grafanaQueryButtonClass: 'test-grafana-query',
+        noSelectClass: 'test-no-select',
+        silencedBadgeClass: 'test-silenced',
+        oldNoNoteIconClass: 'test-old-note',
+        hasNoteIconClass: 'test-has-note',
+        topBarId: 'test-top-bar',
+        topBarStatusId: 'test-top-status',
+        toggleId: 'test-toggle',
+        toggleCounterId: 'test-toggle-counter',
+        autoRefreshToggleId: 'test-auto-toggle',
+        autoRefreshInputId: 'test-auto-input',
+        autoRefreshCountdownId: 'test-auto-countdown',
+        soundAlertsToggleId: 'test-sound-toggle',
+        diagnosticsModalId: 'test-diagnostics-modal',
+        diagnosticsLogListId: 'test-diagnostics-list'
+      });
+      document.body.innerHTML =
+        '<style>' +
+          'body{margin:8px;font:14px Arial,sans-serif}' +
+          '.layout-root{width:calc(100vw - 16px)}' +
+          '.panel-heading{padding:10px 15px;border:1px solid #ddd}' +
+          '.panel-title{font-size:16px;line-height:1.2}' +
+          '.panel-title>a{color:#333;text-decoration:none}' +
+        '</style>' +
+        '<button id="select-all-layout" type="button">Select all</button>' +
+        '<div class="layout-root" ts-ack-group="schedule.Groups.Acknowledged">' +
+          '<div class="panel-group"><div class="panel"><div class="panel-heading" id="age-heading"><div class="panel-title" id="age-title">' +
+            '<label id="age-checkbox-label" class="pull-right select"><input id="age-checkbox" type="checkbox" aria-label="Select age group"></label>' +
+            '<a href="#age"><span id="age-severity" class="fa fa-exclamation-circle" aria-hidden="true">!</span><span class="fa" aria-hidden="true"></span><span id="age-subject" ng-bind="group.Subject">warning: very long alert name with many descriptive words and identifiers that must be shortened on a narrow screen</span>' +
+            '<button id="age-copy" class="bosun-copy-alert-btn">Копировать</button><span id="age-value" class="pull-right ng-binding">14h-ago</span></a>' +
+          '</div></div></div></div>' +
+        '</div>' +
+        '<div class="layout-root" ts-ack-group="schedule.Groups.NeedAck">' +
+          '<div class="panel-group"><div class="panel"><div class="panel-heading" id="count-heading"><div class="panel-title" id="count-title">' +
+            '<label id="count-checkbox-label" class="pull-right select"><input id="count-checkbox" type="checkbox" aria-label="Select count group"></label>' +
+            '<a href="#count"><span id="count-subject" ng-bind="group.Subject">critical: another extremely long grouped alert name with enough detail to require truncation at narrow widths</span>' +
+            '<button id="count-copy" class="bosun-copy-alert-btn">Копировать</button><span id="count-value" class="pull-right ng-binding">6 alerts</span><button id="copy-all-layout" class="bosun-copy-all-alerts-btn">Копировать все</button></a>' +
+          '</div></div></div></div>' +
+        '</div>';
+
+      globalThis.__measureBosunGroupLayout = () => {
+        function measure(id) {
+          const node = document.getElementById(id);
+          const rect = node.getBoundingClientRect();
+          const style = getComputedStyle(node);
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          return {
+            rect: { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height },
+            clientWidth: node.clientWidth,
+            scrollWidth: node.scrollWidth,
+            fragmentCount: node.getClientRects().length,
+            textRangeWidth: range.getBoundingClientRect().width,
+            whiteSpace: style.whiteSpace,
+            overflow: style.overflow,
+            textOverflow: style.textOverflow,
+            flexShrink: style.flexShrink,
+            outlineWidth: style.outlineWidth,
+            backgroundColor: style.backgroundColor
+          };
+        }
+        return {
+          ageHeading: measure('age-heading'),
+          ageTitle: measure('age-title'),
+          ageSeverity: measure('age-severity'),
+          ageSubject: measure('age-subject'),
+          ageCopy: measure('age-copy'),
+          ageValue: measure('age-value'),
+          ageCheckboxLabel: measure('age-checkbox-label'),
+          ageCheckbox: measure('age-checkbox'),
+          countHeading: measure('count-heading'),
+          countTitle: measure('count-title'),
+          countSubject: measure('count-subject'),
+          countCopy: measure('count-copy'),
+          countValue: measure('count-value'),
+          countCheckboxLabel: measure('count-checkbox-label'),
+          countCheckbox: measure('count-checkbox'),
+          copyAll: measure('copy-all-layout')
+        };
+      };
+      const originalAgeCheckbox = document.getElementById('age-checkbox');
+      const originalCountCheckbox = document.getElementById('count-checkbox');
+      ${pageUtilsSource}
+      const checkboxPageUtils = BosunSilenceHiderPageUtils.createPageUtils();
+      checkboxPageUtils.ensureDashboardGroupCheckboxHitAreaGuards();
+      checkboxPageUtils.ensureDashboardGroupCheckboxHitAreaGuards();
+      let headingClicks = 0;
+      document.querySelectorAll('.panel-heading').forEach((heading) => {
+        heading.addEventListener('click', () => { headingClicks += 1; });
+      });
+      document.querySelector('#age-title > a').addEventListener('click', (event) => event.preventDefault());
+      for (const checkbox of [originalAgeCheckbox, originalCountCheckbox]) {
+        checkbox.addEventListener('click', (event) => event.stopPropagation());
+      }
+      globalThis.__getBosunCheckboxState = () => {
+        const ageCheckbox = document.getElementById('age-checkbox');
+        const countCheckbox = document.getElementById('count-checkbox');
+        const ageLabel = document.getElementById('age-checkbox-label');
+        const headingStyle = getComputedStyle(document.querySelector('#age-title').parentElement);
+        return {
+          originalInputsPreserved: ageCheckbox === originalAgeCheckbox && countCheckbox === originalCountCheckbox,
+          ageLabelSize: { width: ageLabel.getBoundingClientRect().width, height: ageLabel.getBoundingClientRect().height },
+          ageInputSize: { width: ageCheckbox.getBoundingClientRect().width, height: ageCheckbox.getBoundingClientRect().height },
+          ageChecked: ageCheckbox.checked,
+          countChecked: countCheckbox.checked,
+          outlineWidth: headingStyle.outlineWidth,
+          outlineStyle: headingStyle.outlineStyle,
+          labelBackground: getComputedStyle(ageLabel).backgroundColor,
+          labelBoxShadow: getComputedStyle(ageLabel).boxShadow,
+          headingClicks
+        };
+      };
+      document.getElementById('select-all-layout').addEventListener('click', (event) => {
+        const checked = event.currentTarget.dataset.checked !== 'true';
+        event.currentTarget.dataset.checked = String(checked);
+        for (const checkbox of [originalAgeCheckbox, originalCountCheckbox]) {
+          checkbox.checked = checked;
+          checkbox.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      });
+      return __measureBosunGroupLayout();
+    })()`);
+
+    const labelRect = narrowGroupLayout.ageCheckboxLabel.rect;
+    const hitAreaPoint = {
+      x: labelRect.left + 2,
+      y: labelRect.top + (labelRect.height / 2)
+    };
+    const hitAreaTarget = await evaluate(client, `(() => {
+      const target = document.elementFromPoint(${hitAreaPoint.x}, ${hitAreaPoint.y});
+      return { id: target?.id || '', tagName: target?.tagName || '' };
+    })()`);
+    async function clickCheckboxHitArea() {
+      await client.send('Input.dispatchMouseEvent', {
+        type: 'mousePressed',
+        x: hitAreaPoint.x,
+        y: hitAreaPoint.y,
+        button: 'left',
+        clickCount: 1
+      });
+      await client.send('Input.dispatchMouseEvent', {
+        type: 'mouseReleased',
+        x: hitAreaPoint.x,
+        y: hitAreaPoint.y,
+        button: 'left',
+        clickCount: 1
+      });
+    }
+    await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 });
+    await evaluate(client, `document.querySelector('#age-title > a').click()`);
+    const initialCheckboxState = await evaluate(client, `__getBosunCheckboxState()`);
+    await clickCheckboxHitArea();
+    const selectedCheckboxState = await evaluate(client, `__getBosunCheckboxState()`);
+    await clickCheckboxHitArea();
+    const uncheckedCheckboxState = await evaluate(client, `__getBosunCheckboxState()`);
+    await evaluate(client, `document.getElementById('age-checkbox').focus()`);
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32
+    });
+    const keyboardCheckedState = await evaluate(client, `__getBosunCheckboxState()`);
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32
+    });
+    await client.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32
+    });
+    const keyboardUncheckedState = await evaluate(client, `__getBosunCheckboxState()`);
+    await evaluate(client, `document.getElementById('select-all-layout').click()`);
+    const selectAllCheckedState = await evaluate(client, `__getBosunCheckboxState()`);
+    await evaluate(client, `document.getElementById('select-all-layout').click()`);
+    const selectAllUncheckedState = await evaluate(client, `__getBosunCheckboxState()`);
+    checkboxBehavior = {
+      originalInputsPreserved: initialCheckboxState.originalInputsPreserved,
+      hitAreaTarget,
+      hitAreaOutsideInput: hitAreaPoint.x < narrowGroupLayout.ageCheckbox.rect.left,
+      ageLabelSize: initialCheckboxState.ageLabelSize,
+      ageInputSize: initialCheckboxState.ageInputSize,
+      checkedAfterHitAreaClick: selectedCheckboxState.ageChecked,
+      uncheckedAfterSecondClick: !uncheckedCheckboxState.ageChecked,
+      hoverBackgroundChanged: selectedCheckboxState.labelBackground !== initialCheckboxState.labelBackground,
+      checkedWithKeyboard: keyboardCheckedState.ageChecked,
+      uncheckedWithKeyboard: !keyboardUncheckedState.ageChecked,
+      keyboardFocusVisible: keyboardCheckedState.labelBoxShadow !== 'none',
+      selectedOutlineWidth: selectedCheckboxState.outlineWidth,
+      selectedOutlineStyle: selectedCheckboxState.outlineStyle,
+      uncheckedOutlineStyle: uncheckedCheckboxState.outlineStyle,
+      checkedAfterSelectAll: selectAllCheckedState.ageChecked && selectAllCheckedState.countChecked,
+      uncheckedAfterSelectAll: !selectAllUncheckedState.ageChecked && !selectAllUncheckedState.countChecked,
+      headingClicksBeforeHitArea: initialCheckboxState.headingClicks,
+      headingClicksAfterInteractions: selectAllUncheckedState.headingClicks
+    };
+
+    await client.send('Emulation.setDeviceMetricsOverride', {
+      width: 1280,
+      height: 800,
+      deviceScaleFactor: 1,
+      mobile: false
+    });
+    wideGroupLayout = await evaluate(client, `(async () => {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return __measureBosunGroupLayout();
+    })()`);
+  } finally {
+    await client.send('Emulation.clearDeviceMetricsOverride');
+  }
+
+  function verticalOverlapRatio(first, second) {
+    const overlap = Math.max(0, Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top));
+    return overlap / Math.max(1, Math.min(first.height, second.height));
+  }
+
+  for (const value of [narrowGroupLayout.ageValue, narrowGroupLayout.countValue]) {
+    assert.strictEqual(value.whiteSpace, 'nowrap');
+    assert.strictEqual(value.flexShrink, '0');
+    assert.strictEqual(value.fragmentCount, 1);
+    assert.ok(value.rect.width + 1 >= value.textRangeWidth, 'Right-side text was clipped');
+  }
+  assert.strictEqual(checkboxBehavior.originalInputsPreserved, true);
+  assert.strictEqual(checkboxBehavior.hitAreaTarget.id, 'age-checkbox-label');
+  assert.strictEqual(checkboxBehavior.hitAreaOutsideInput, true);
+  assert.ok(checkboxBehavior.ageLabelSize.width >= 27 && checkboxBehavior.ageLabelSize.height >= 27);
+  assert.ok(checkboxBehavior.ageInputSize.width >= 15 && checkboxBehavior.ageInputSize.height >= 15);
+  assert.ok(checkboxBehavior.ageLabelSize.width > checkboxBehavior.ageInputSize.width);
+  assert.ok(narrowGroupLayout.ageTitle.rect.height < narrowGroupLayout.ageCheckboxLabel.rect.height);
+  assert.ok(narrowGroupLayout.countTitle.rect.height < narrowGroupLayout.countCheckboxLabel.rect.height);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.top >= narrowGroupLayout.ageHeading.rect.top);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.bottom <= narrowGroupLayout.ageHeading.rect.bottom);
+  assert.ok(narrowGroupLayout.countCheckboxLabel.rect.top >= narrowGroupLayout.countHeading.rect.top);
+  assert.ok(narrowGroupLayout.countCheckboxLabel.rect.bottom <= narrowGroupLayout.countHeading.rect.bottom);
+  assert.strictEqual(checkboxBehavior.checkedAfterHitAreaClick, true);
+  assert.strictEqual(checkboxBehavior.uncheckedAfterSecondClick, true);
+  assert.strictEqual(checkboxBehavior.hoverBackgroundChanged, true);
+  assert.strictEqual(checkboxBehavior.checkedWithKeyboard, true);
+  assert.strictEqual(checkboxBehavior.uncheckedWithKeyboard, true);
+  assert.strictEqual(checkboxBehavior.keyboardFocusVisible, true);
+  assert.strictEqual(checkboxBehavior.selectedOutlineWidth, '2px');
+  assert.strictEqual(checkboxBehavior.selectedOutlineStyle, 'solid');
+  assert.strictEqual(checkboxBehavior.uncheckedOutlineStyle, 'none');
+  assert.strictEqual(checkboxBehavior.checkedAfterSelectAll, true);
+  assert.strictEqual(checkboxBehavior.uncheckedAfterSelectAll, true);
+  assert.strictEqual(checkboxBehavior.headingClicksBeforeHitArea, 1);
+  assert.strictEqual(checkboxBehavior.headingClicksAfterInteractions, 1);
+  for (const subject of [narrowGroupLayout.ageSubject, narrowGroupLayout.countSubject]) {
+    assert.strictEqual(subject.whiteSpace, 'nowrap');
+    assert.strictEqual(subject.overflow, 'hidden');
+    assert.strictEqual(subject.textOverflow, 'ellipsis');
+    assert.ok(subject.scrollWidth > subject.clientWidth + 1, 'Long subject was not truncated at narrow width');
+    assert.strictEqual(subject.fragmentCount, 1);
+  }
+  assert.ok(verticalOverlapRatio(narrowGroupLayout.ageValue.rect, narrowGroupLayout.ageCheckbox.rect) >= 0.5);
+  assert.ok(verticalOverlapRatio(narrowGroupLayout.countValue.rect, narrowGroupLayout.countCheckbox.rect) >= 0.5);
+  assert.ok(verticalOverlapRatio(narrowGroupLayout.ageValue.rect, narrowGroupLayout.ageCheckboxLabel.rect) >= 0.5);
+  assert.ok(verticalOverlapRatio(narrowGroupLayout.countValue.rect, narrowGroupLayout.countCheckboxLabel.rect) >= 0.5);
+  assert.ok(verticalOverlapRatio(narrowGroupLayout.countValue.rect, narrowGroupLayout.copyAll.rect) >= 0.5);
+  assert.ok(narrowGroupLayout.ageValue.rect.right <= narrowGroupLayout.ageTitle.rect.right + 1);
+  assert.ok(narrowGroupLayout.ageCheckbox.rect.right <= narrowGroupLayout.ageTitle.rect.right + 1);
+  assert.ok(narrowGroupLayout.countCheckbox.rect.right <= narrowGroupLayout.countTitle.rect.right + 1);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.right <= narrowGroupLayout.ageTitle.rect.right + 1);
+  assert.ok(narrowGroupLayout.countCheckboxLabel.rect.right <= narrowGroupLayout.countTitle.rect.right + 1);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.left <= narrowGroupLayout.ageCheckbox.rect.left);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.right >= narrowGroupLayout.ageCheckbox.rect.right);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.top <= narrowGroupLayout.ageCheckbox.rect.top);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.bottom >= narrowGroupLayout.ageCheckbox.rect.bottom);
+  assert.ok(Math.abs(
+    (narrowGroupLayout.ageCheckboxLabel.rect.left + narrowGroupLayout.ageCheckboxLabel.rect.width / 2) -
+    (narrowGroupLayout.ageCheckbox.rect.left + narrowGroupLayout.ageCheckbox.rect.width / 2)
+  ) <= 1);
+  assert.ok(Math.abs(
+    (narrowGroupLayout.ageCheckboxLabel.rect.top + narrowGroupLayout.ageCheckboxLabel.rect.height / 2) -
+    (narrowGroupLayout.ageCheckbox.rect.top + narrowGroupLayout.ageCheckbox.rect.height / 2)
+  ) <= 1);
+  assert.ok(narrowGroupLayout.ageSubject.rect.right <= narrowGroupLayout.ageValue.rect.left + 1);
+  assert.ok(narrowGroupLayout.countSubject.rect.right <= narrowGroupLayout.countValue.rect.left + 1);
+  assert.ok(narrowGroupLayout.ageSubject.rect.left - narrowGroupLayout.ageSeverity.rect.right >= 3);
+  assert.ok(narrowGroupLayout.ageSubject.rect.left - narrowGroupLayout.ageSeverity.rect.right <= 5);
+  assert.ok(narrowGroupLayout.ageValue.rect.right <= narrowGroupLayout.ageCheckbox.rect.left + 1);
+  assert.ok(narrowGroupLayout.ageValue.rect.left - narrowGroupLayout.ageCopy.rect.right >= 7);
+  assert.ok(narrowGroupLayout.ageValue.rect.left - narrowGroupLayout.ageCopy.rect.right <= 10);
+  assert.ok(narrowGroupLayout.ageCheckbox.rect.left - narrowGroupLayout.ageValue.rect.right >= 7);
+  assert.ok(narrowGroupLayout.ageCheckbox.rect.left - narrowGroupLayout.ageValue.rect.right <= 10);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.left - narrowGroupLayout.ageValue.rect.right >= 1);
+  assert.ok(narrowGroupLayout.ageCheckboxLabel.rect.left - narrowGroupLayout.ageValue.rect.right <= 3);
+  assert.ok(narrowGroupLayout.countValue.rect.left - narrowGroupLayout.countCopy.rect.right >= 7);
+  assert.ok(narrowGroupLayout.countValue.rect.left - narrowGroupLayout.countCopy.rect.right <= 10);
+  assert.ok(narrowGroupLayout.countValue.rect.right <= narrowGroupLayout.copyAll.rect.left + 1);
+  assert.ok(narrowGroupLayout.copyAll.rect.right <= narrowGroupLayout.countCheckbox.rect.left + 1);
+  assert.ok(narrowGroupLayout.countCheckbox.rect.left - narrowGroupLayout.copyAll.rect.right >= 7);
+  assert.ok(narrowGroupLayout.countCheckbox.rect.left - narrowGroupLayout.copyAll.rect.right <= 10);
+
+  assert.ok(wideGroupLayout.ageSubject.rect.width > narrowGroupLayout.ageSubject.rect.width);
+  assert.ok(wideGroupLayout.countSubject.rect.width > narrowGroupLayout.countSubject.rect.width);
+  assert.ok(wideGroupLayout.ageSubject.scrollWidth <= wideGroupLayout.ageSubject.clientWidth + 1);
+  assert.ok(wideGroupLayout.countSubject.scrollWidth <= wideGroupLayout.countSubject.clientWidth + 1);
+  assert.ok(verticalOverlapRatio(wideGroupLayout.ageValue.rect, wideGroupLayout.ageCheckbox.rect) >= 0.5);
+  assert.ok(verticalOverlapRatio(wideGroupLayout.countValue.rect, wideGroupLayout.countCheckbox.rect) >= 0.5);
+  assert.ok(wideGroupLayout.ageValue.rect.left - wideGroupLayout.ageCopy.rect.right >= 7);
+  assert.ok(wideGroupLayout.ageCheckbox.rect.left - wideGroupLayout.ageValue.rect.right >= 7);
+  assert.ok(wideGroupLayout.countValue.rect.left - wideGroupLayout.countCopy.rect.right >= 7);
+  assert.ok(wideGroupLayout.ageSubject.rect.left - wideGroupLayout.ageSeverity.rect.right >= 3);
+  assert.ok(wideGroupLayout.ageSubject.rect.left - wideGroupLayout.ageSeverity.rect.right <= 5);
+  assert.ok(Math.abs(wideGroupLayout.ageValue.rect.width - narrowGroupLayout.ageValue.rect.width) <= 2);
+  assert.ok(Math.abs(wideGroupLayout.countValue.rect.width - narrowGroupLayout.countValue.rect.width) <= 2);
+  assert.ok(Math.abs(wideGroupLayout.ageCheckboxLabel.rect.width - narrowGroupLayout.ageCheckboxLabel.rect.width) <= 1);
+  assert.ok(Math.abs(wideGroupLayout.ageCheckbox.rect.width - narrowGroupLayout.ageCheckbox.rect.width) <= 1);
 
   const singleAlertLifecycleResult = await evaluate(client, `(async () => {
     const ageDebugLogs = [];

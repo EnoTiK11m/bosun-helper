@@ -2,6 +2,8 @@
   'use strict';
 
   function createPageUtils() {
+    const guardedGroupCheckboxTitles = new WeakSet();
+
     function isActionPage() {
       const path = window.location.pathname.replace(/\/+$/, '') || '/';
       if (path !== '/action') return false;
@@ -14,6 +16,34 @@
 
     function isDashboardHome() {
       return window.location.pathname === '/';
+    }
+
+    function isDashboardGroupCheckboxLabelHitArea(target) {
+      const label = target?.closest?.('label.pull-right.select');
+      if (!label || target?.closest?.('input[type="checkbox"]')) return false;
+      const title = label.parentElement;
+      if (!title?.classList?.contains('panel-title')) return false;
+      if (!title.querySelector?.('[ng-bind="group.Subject"]')) return false;
+      return Boolean(title.closest?.(
+        '[ts-ack-group="schedule.Groups.NeedAck"], ' +
+        '[ts-ack-group="schedule.Groups.Acknowledged"]'
+      ));
+    }
+
+    function ensureDashboardGroupCheckboxHitAreaGuards(root = document) {
+      const titles = root.querySelectorAll?.(
+        ':is(' +
+          '[ts-ack-group="schedule.Groups.NeedAck"], ' +
+          '[ts-ack-group="schedule.Groups.Acknowledged"]' +
+        ') > .panel-group > .panel > .panel-heading > .panel-title'
+      ) || [];
+      for (const title of titles) {
+        if (guardedGroupCheckboxTitles.has(title)) continue;
+        guardedGroupCheckboxTitles.add(title);
+        title.addEventListener('click', (event) => {
+          if (isDashboardGroupCheckboxLabelHitArea(event.target)) event.stopPropagation();
+        });
+      }
     }
 
     function uncheckActionNotificationCheckbox() {
@@ -51,6 +81,8 @@
     return {
       isActionPage,
       isDashboardHome,
+      isDashboardGroupCheckboxLabelHitArea,
+      ensureDashboardGroupCheckboxHitAreaGuards,
       uncheckActionNotificationCheckbox,
       applyActionPageTweaks
     };
