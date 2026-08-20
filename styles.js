@@ -105,6 +105,140 @@
         user-select: none;
         transition: background-color .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .05s ease;
       }
+
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title {
+        display: flex;
+        align-items: center;
+        flex-wrap: nowrap;
+        min-width: 0;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > a {
+        order: 1;
+        display: flex;
+        flex: 1 1 auto;
+        align-items: center;
+        flex-wrap: nowrap;
+        min-width: 0;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title [ng-bind="group.Subject"] {
+        flex: 1 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        margin-left: 4px;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title .pull-right.ng-binding {
+        flex: 0 0 auto;
+        float: none !important;
+        margin-left: auto;
+        white-space: nowrap;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select {
+        order: 2;
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        box-sizing: border-box;
+        float: none !important;
+        margin: -4px 4px -4px 2px;
+        border-radius: 4px;
+        white-space: nowrap;
+        cursor: pointer;
+        transition: background-color .12s ease, box-shadow .12s ease;
+      }
+      @media (hover: hover) {
+        :is(
+          [ts-ack-group="schedule.Groups.NeedAck"],
+          [ts-ack-group="schedule.Groups.Acknowledged"]
+        ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select:hover {
+          background: rgba(0, 0, 0, .055);
+        }
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select:has(input:focus-visible) {
+        box-shadow: 0 0 0 2px rgba(255, 255, 255, .9), 0 0 0 4px #2d69a0;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select > input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+        cursor: pointer;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > input[type="checkbox"] {
+        order: 2;
+        flex: 0 0 auto;
+        width: 16px;
+        height: 16px;
+        margin-left: 8px;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading:has(
+        > .panel-title > label.pull-right.select input[type="checkbox"]:checked,
+        > .panel-title > input[type="checkbox"]:checked
+      ) {
+        outline: 2px solid rgba(0, 0, 0, .10);
+        outline-offset: -2px;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title > .bosun-parent-marker {
+        order: 0;
+        flex: 0 0 auto;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title :is(
+        .${copyButtonClass},
+        .${copyAllButtonClass}
+      ) {
+        flex: 0 0 auto;
+        float: none;
+        white-space: nowrap;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title .${copyButtonClass} {
+        margin-right: 8px;
+      }
+      :is(
+        [ts-ack-group="schedule.Groups.NeedAck"],
+        [ts-ack-group="schedule.Groups.Acknowledged"]
+      ) > .panel-group > .panel > .panel-heading > .panel-title .${copyAllButtonClass} {
+        margin-right: 0;
+      }
+
       .${copyAllButtonClass} { margin-right: 8px; float: right; }
       .${grafanaQueryButtonClass} {
         border-color: rgba(229, 132, 33, 0.85);
@@ -588,6 +722,12 @@
         #${topBarId} .bosun-toolbar-btn:active { transform: none; }
         .${copyButtonClass}, .${copyAllButtonClass}, .${copyLastActionButtonClass}, .${grafanaQueryButtonClass} { transition: none; }
         .${copyButtonClass}:active, .${copyAllButtonClass}:active, .${copyLastActionButtonClass}:active { transform: none; }
+        :is(
+          [ts-ack-group="schedule.Groups.NeedAck"],
+          [ts-ack-group="schedule.Groups.Acknowledged"]
+        ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select {
+          transition: none;
+        }
       }
     `;
 

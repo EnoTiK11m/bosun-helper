@@ -1036,6 +1036,7 @@
     applyAcknowledgedCollapse();
     applyUserCommentFilter();
     ensureCopyButtons();
+    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
     refreshSilencedBadges();
     singleAlertAgeApi?.refresh?.();
@@ -2782,6 +2783,7 @@
     applyNeedsAckMarkersFromData();
     applyUserCommentFilter();
     ensureCopyButtons();
+    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
     refreshSilencedBadges();
     singleAlertAgeApi?.refresh?.();
@@ -2916,6 +2918,7 @@
     }
 
     const observer = new MutationObserver((mutations) => {
+      pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
       const currentUrl = window.location.href;
       if (currentUrl !== lastKnownUrl) {
         lastKnownUrl = currentUrl;
@@ -2997,6 +3000,7 @@
     newAlertTrackerApi?.start?.();
     restoreDiagnosticsLogFromStorage();
     injectStyles();
+    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     installSelectionGuard();
     installSelectionCopySanitizer();
     installUserActivityTracking();
