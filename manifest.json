@@ -34,6 +34,7 @@
         "diagnostics.js",
         "sound.js",
         "alerts-data.js",
+        "single-alert-age.js",
         "needack-baseline.js",
         "needack-severity.js",
         "promql.js",

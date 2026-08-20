@@ -47,6 +47,7 @@ const contentIndex = bosunScripts.indexOf('content.js');
 assert.ok(contentIndex >= 0, 'Bosun entry must include content.js');
 for (const provider of [
   'promql.js',
+  'single-alert-age.js',
   'action-templates.js',
   'grafana-handoff.js',
   'new-alert-tracker.js',

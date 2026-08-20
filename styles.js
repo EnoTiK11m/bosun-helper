@@ -314,6 +314,10 @@
       .${copyLastActionButtonClass}:focus-visible,
       .${grafanaQueryButtonClass}:focus-visible,
       .bosun-action-template-btn:focus-visible,
+      .bosun-action-templates-settings:focus-visible,
+      .bosun-action-template-icon-btn:focus-visible,
+      .bosun-action-template-editor-btn:focus-visible,
+      .bosun-action-template-input:focus-visible,
       .bosun-grafana-preview-dialog button:focus-visible,
       #${diagnosticsModalId} button:focus-visible {
         outline: 2px solid #2f6fad;
@@ -416,12 +420,35 @@
       }
 
       .bosun-action-templates { margin: 0 0 10px 0; }
-      .bosun-action-templates-title {
+      .bosun-action-templates-title-row {
+        display: flex;
+        align-items: center;
+        gap: 5px;
         margin: 0 0 6px 0;
+      }
+      .bosun-action-templates-title {
+        margin: 0;
         font-size: 12px;
         font-weight: 700;
         color: #555;
       }
+      .bosun-action-templates-settings,
+      .bosun-action-template-icon-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        background: transparent;
+        color: #666;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .bosun-action-templates-settings:hover,
+      .bosun-action-template-icon-btn:hover { background: #f1f1f1; border-color: #d2d2d2; }
       .bosun-action-templates-buttons {
         display: flex;
         flex-wrap: wrap;
@@ -442,6 +469,50 @@
         cursor: pointer;
       }
       .bosun-action-template-btn:hover { background: #f5f5f5; border-color: #bcbcbc; }
+      .bosun-action-templates-editor {
+        max-width: 620px;
+        margin-top: 8px;
+        padding: 8px;
+        border: 1px solid #d5d5d5;
+        border-radius: 6px;
+        background: #fafafa;
+      }
+      .bosun-action-template-rows { display: grid; gap: 5px; }
+      .bosun-action-template-row { display: flex; align-items: center; gap: 5px; }
+      .bosun-action-template-input {
+        flex: 1 1 auto;
+        min-width: 0;
+        height: 28px;
+        padding: 3px 7px;
+        border: 1px solid #8c8c8c;
+        border-radius: 4px;
+        background: #fff;
+        color: #333;
+        font-size: 12px;
+      }
+      .bosun-action-template-row-actions { display: inline-flex; gap: 2px; }
+      .bosun-action-template-icon-btn:disabled { opacity: .35; cursor: default; }
+      .bosun-action-template-icon-btn.is-danger { color: #a33; }
+      .bosun-action-template-editor-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 7px;
+      }
+      .bosun-action-template-editor-btn {
+        min-height: 26px;
+        padding: 3px 8px;
+        border: 1px solid #c9c9c9;
+        border-radius: 4px;
+        background: #fff;
+        color: #444;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .bosun-action-template-editor-btn:hover { background: #f1f1f1; }
+      .bosun-action-template-editor-btn.is-primary { border-color: #2f6fad; background: #337ab7; color: #fff; }
+      .bosun-action-template-status { margin: -2px 0 6px; color: #4d6b45; font-size: 11px; }
+      .bosun-action-template-status.is-error { color: #a33; }
 
       #${diagnosticsModalId} {
         position: fixed;
