@@ -581,6 +581,23 @@ async function runBrowserAssertions(client) {
       for (const checkbox of [originalAgeCheckbox, originalCountCheckbox]) {
         checkbox.addEventListener('click', (event) => event.stopPropagation());
       }
+      function hasCheckboxHoverRule(rules, insideHoverMedia = false) {
+        for (const rule of Array.from(rules || [])) {
+          const isHoverMedia = insideHoverMedia ||
+            String(rule.media?.mediaText || '').includes('(hover: hover)');
+          if (
+            isHoverMedia &&
+            rule.selectorText?.includes('label.pull-right.select:hover') &&
+            Boolean(rule.style?.backgroundColor) &&
+            rule.style.backgroundColor !== 'transparent'
+          ) return true;
+          if (rule.cssRules && hasCheckboxHoverRule(rule.cssRules, isHoverMedia)) return true;
+        }
+        return false;
+      }
+      const checkboxHoverRulePresent = hasCheckboxHoverRule(
+        document.getElementById('bosun-silence-hider-styles')?.sheet?.cssRules
+      );
       globalThis.__getBosunCheckboxState = () => {
         const ageCheckbox = document.getElementById('age-checkbox');
         const countCheckbox = document.getElementById('count-checkbox');
@@ -596,6 +613,8 @@ async function runBrowserAssertions(client) {
           outlineStyle: headingStyle.outlineStyle,
           labelBackground: getComputedStyle(ageLabel).backgroundColor,
           labelBoxShadow: getComputedStyle(ageLabel).boxShadow,
+          hoverSupported: matchMedia('(hover: hover)').matches,
+          hoverRulePresent: checkboxHoverRulePresent,
           headingClicks
         };
       };
@@ -621,6 +640,12 @@ async function runBrowserAssertions(client) {
     })()`);
     async function clickCheckboxHitArea() {
       await client.send('Input.dispatchMouseEvent', {
+        type: 'mouseMoved',
+        x: hitAreaPoint.x,
+        y: hitAreaPoint.y
+      });
+      await evaluate(client, `new Promise((resolve) => requestAnimationFrame(resolve))`);
+      await client.send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
         x: hitAreaPoint.x,
         y: hitAreaPoint.y,
@@ -634,8 +659,10 @@ async function runBrowserAssertions(client) {
         button: 'left',
         clickCount: 1
       });
+      await evaluate(client, `new Promise((resolve) => requestAnimationFrame(resolve))`);
     }
     await client.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 0, y: 0 });
+    await evaluate(client, `new Promise((resolve) => requestAnimationFrame(resolve))`);
     await evaluate(client, `document.querySelector('#age-title > a').click()`);
     const initialCheckboxState = await evaluate(client, `__getBosunCheckboxState()`);
     await clickCheckboxHitArea();
@@ -682,6 +709,8 @@ async function runBrowserAssertions(client) {
       checkedAfterHitAreaClick: selectedCheckboxState.ageChecked,
       uncheckedAfterSecondClick: !uncheckedCheckboxState.ageChecked,
       hoverBackgroundChanged: selectedCheckboxState.labelBackground !== initialCheckboxState.labelBackground,
+      hoverSupported: initialCheckboxState.hoverSupported,
+      hoverRulePresent: initialCheckboxState.hoverRulePresent,
       checkedWithKeyboard: keyboardCheckedState.ageChecked,
       uncheckedWithKeyboard: !keyboardUncheckedState.ageChecked,
       keyboardFocusVisible: keyboardCheckedState.labelBoxShadow !== 'none',
@@ -733,7 +762,14 @@ async function runBrowserAssertions(client) {
   assert.ok(narrowGroupLayout.countCheckboxLabel.rect.bottom <= narrowGroupLayout.countHeading.rect.bottom);
   assert.strictEqual(checkboxBehavior.checkedAfterHitAreaClick, true);
   assert.strictEqual(checkboxBehavior.uncheckedAfterSecondClick, true);
-  assert.strictEqual(checkboxBehavior.hoverBackgroundChanged, true);
+  assert.strictEqual(checkboxBehavior.hoverRulePresent, true);
+  assert.strictEqual(
+    checkboxBehavior.hoverBackgroundChanged,
+    checkboxBehavior.hoverSupported,
+    checkboxBehavior.hoverSupported
+      ? 'Hover-capable browser did not show checkbox hit-area feedback'
+      : 'Non-hover browser unexpectedly applied hover-only feedback'
+  );
   assert.strictEqual(checkboxBehavior.checkedWithKeyboard, true);
   assert.strictEqual(checkboxBehavior.uncheckedWithKeyboard, true);
   assert.strictEqual(checkboxBehavior.keyboardFocusVisible, true);
