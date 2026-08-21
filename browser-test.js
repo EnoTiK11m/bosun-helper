@@ -68,7 +68,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function removeTemporaryProfile(profileDirectory) {
+async function removeTemporaryProfile(profileDirectory, options = {}) {
   const resolvedProfile = path.resolve(profileDirectory);
   const resolvedTemp = path.resolve(os.tmpdir());
   assert.ok(
@@ -76,17 +76,63 @@ async function removeTemporaryProfile(profileDirectory) {
       path.basename(resolvedProfile).startsWith('bosun-helper-browser-'),
     `Refusing to remove unexpected browser profile path: ${resolvedProfile}`
   );
+  const remove = options.remove || ((target) => fs.promises.rm(target, {
+    recursive: true,
+    force: true
+  }));
+  const wait = options.wait || delay;
+  const maxAttempts = options.maxAttempts || 12;
   let lastError = null;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
-      fs.rmSync(resolvedProfile, { recursive: true, force: true });
+      await remove(resolvedProfile);
       return;
     } catch (error) {
       lastError = error;
-      await delay(250);
+      if (!['EACCES', 'EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
+      if (attempt + 1 < maxAttempts) {
+        await wait(Math.min(1000, 100 * (2 ** attempt)));
+      }
     }
   }
   throw lastError || new Error('Temporary browser profile cleanup failed');
+}
+
+async function testTemporaryProfileCleanupRetry() {
+  const attemptedDelays = [];
+  let removeAttempts = 0;
+  await removeTemporaryProfile(
+    path.join(os.tmpdir(), 'bosun-helper-browser-cleanup-test'),
+    {
+      maxAttempts: 4,
+      async remove() {
+        removeAttempts += 1;
+        if (removeAttempts < 3) {
+          const error = new Error('simulated Windows profile lock');
+          error.code = 'EPERM';
+          throw error;
+        }
+      },
+      async wait(milliseconds) { attemptedDelays.push(milliseconds); }
+    }
+  );
+  assert.strictEqual(removeAttempts, 3, 'Temporary profile cleanup did not retry EPERM');
+  assert.deepStrictEqual(attemptedDelays, [100, 200]);
+}
+
+function waitForBrowserExit(browser, timeoutMs) {
+  if (browser.exitCode != null || browser.signalCode != null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = () => {
+      clearTimeout(timeoutId);
+      resolve(true);
+    };
+    const timeoutId = setTimeout(() => {
+      browser.removeListener('exit', onExit);
+      resolve(false);
+    }, timeoutMs);
+    browser.once('exit', onExit);
+  });
 }
 
 async function waitForJson(url, browserProcess, stderr) {
@@ -193,6 +239,18 @@ function instrumentContentSource(source) {
   const closing = source.lastIndexOf('})();');
   assert.ok(closing > 0, 'Unable to instrument content.js for browser assertions');
   return `${source.slice(0, closing)}
+  let browserTestScheduledDomRefreshes = 0;
+  let browserTestScheduledDataRefreshes = 0;
+  const browserTestOriginalScheduleRefresh = scheduleRefresh;
+  const browserTestOriginalScheduleAlertsDataRefresh = scheduleAlertsDataRefresh;
+  scheduleRefresh = (...args) => {
+    browserTestScheduledDomRefreshes += 1;
+    return browserTestOriginalScheduleRefresh(...args);
+  };
+  scheduleAlertsDataRefresh = (...args) => {
+    browserTestScheduledDataRefreshes += 1;
+    return browserTestOriginalScheduleAlertsDataRefresh(...args);
+  };
   globalThis.__BosunHelperBrowserTest = {
     ensureStateIcon,
     ensureParentStateIcon,
@@ -203,14 +261,25 @@ function instrumentContentSource(source) {
     flashCopyButtonState,
     handleRouteChange,
     startObserver,
+    setExtensionClass,
     singleAlertAge: singleAlertAgeApi,
     refreshIntervals: { visible: DATA_REFRESH_MS, hidden: DATA_REFRESH_HIDDEN_MS },
+    resetLifecycleCounters() {
+      browserTestScheduledDomRefreshes = 0;
+      browserTestScheduledDataRefreshes = 0;
+    },
+    getLifecycleCounters() {
+      return {
+        domRefreshes: browserTestScheduledDomRefreshes,
+        dataRefreshes: browserTestScheduledDataRefreshes
+      };
+    },
     seedMarkerCache(id, state) {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
       if (state === 'note') childHasNoteById.set(id, true);
       if (state === 'warning') childOldNoNoteById.set(id, true);
       alertDataIndexReady = true;
-      persistAlertMarkerCacheToSession();
+      flushAlertMarkerCacheToSession();
     },
     clearMarkerState() {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
@@ -397,6 +466,58 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(templateSettingsResult.sanitizedAck, ['ok']);
   assert.ok(templateSettingsResult.defaults.note.length > 0);
   assert.ok(Array.isArray(templateSettingsResult.defaults.close));
+
+  const delayedTemplateSaveResult = await evaluate(client, `(() => {
+    document.body.innerHTML = '<div><textarea></textarea></div>';
+    let pendingSave = null;
+    let pendingValues = null;
+    const storage = {
+      get(_keys, callback) { callback({ 'delayed:note': ['first'] }); },
+      set(values, callback) { pendingValues = values; pendingSave = callback; },
+      remove(_keys, callback) { callback?.(); }
+    };
+    const api = BosunHelperActionTemplates.createActionTemplates({
+      isActionPage: () => true,
+      templatesByType: { note: ['default'], ack: [], close: [] },
+      storageKey: 'delayed',
+      getStorage: () => storage,
+      getLastError: () => null
+    });
+    api.refresh();
+    document.querySelector('.bosun-action-templates-settings').click();
+    const input = document.querySelector('.bosun-action-template-input');
+    input.value = 'changed';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const save = Array.from(document.querySelectorAll('.bosun-action-template-editor-btn'))
+      .find((node) => node.textContent === 'Сохранить');
+    save.focus();
+    save.click();
+    const focusedWhilePending = document.activeElement === save;
+    const busyWhilePending = document.querySelector('.bosun-action-templates-editor')
+      ?.getAttribute('aria-busy');
+    const readOnlyWhilePending = input.readOnly;
+    const describedBy = input.getAttribute('aria-describedby');
+    const limitHint = document.getElementById(describedBy)?.textContent || '';
+    input.value = 'late change';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    pendingSave?.();
+    return {
+      focusedWhilePending,
+      busyWhilePending,
+      readOnlyWhilePending,
+      limitHint,
+      savedWhilePending: pendingValues?.['delayed:note'],
+      focusedAfterSave: document.activeElement?.classList.contains('bosun-action-templates-settings') === true
+    };
+  })()`);
+  assert.deepStrictEqual(delayedTemplateSaveResult, {
+    focusedWhilePending: true,
+    busyWhilePending: 'true',
+    readOnlyWhilePending: true,
+    limitHint: 'До 50 шаблонов, до 500 символов каждый, без дубликатов, общий объём до 10000 символов',
+    savedWhilePending: ['changed'],
+    focusedAfterSave: true
+  });
 
   const singleAlertAgeResult = await evaluate(client, `(() => {
     ${singleAlertAgeSource}
@@ -859,6 +980,9 @@ async function runBrowserAssertions(client) {
       grafanaHost: 'grafana.example.test',
       grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
     };
+    const createSingleAlertAgeForDiagnostics = BosunHelperSingleAlertAge.createSingleAlertAge;
+    BosunHelperSingleAlertAge.createSingleAlertAge = (options) =>
+      createSingleAlertAgeForDiagnostics({ ...options, debug: true });
     globalThis.BosunSilenceHiderPageUtils = {
       createPageUtils() {
         return {
@@ -940,6 +1064,34 @@ async function runBrowserAssertions(client) {
     const lateAge = document.querySelector('#late-single .pull-right').textContent;
     const normalMutationLogCount = ageDebugLogs.length;
 
+    hooks.resetLifecycleCounters();
+    const extensionManagedSubject = document.querySelector('#existing-single [ng-bind="group.Subject"]');
+    for (let index = 0; index < 100; index += 1) {
+      hooks.setExtensionClass(extensionManagedSubject, 'bosun-no-select', true);
+      hooks.setExtensionClass(extensionManagedSubject, 'bosun-no-select', false);
+    }
+    await Promise.resolve();
+    await Promise.resolve();
+    const extensionMutationCounters = hooks.getLifecycleCounters();
+
+    const externallyResetCount = document.querySelector('#multi-group .pull-right');
+    hooks.setExtensionClass(externallyResetCount, 'bosun-no-select', true);
+    await Promise.resolve();
+    await Promise.resolve();
+    hooks.resetLifecycleCounters();
+    externallyResetCount.classList.remove('bosun-no-select');
+    await Promise.resolve();
+    await Promise.resolve();
+    const externalClassResetCounters = hooks.getLifecycleCounters();
+
+    hooks.resetLifecycleCounters();
+    const unrelatedNode = document.createElement('span');
+    unrelatedNode.textContent = 'unrelated';
+    document.body.appendChild(unrelatedNode);
+    await Promise.resolve();
+    await Promise.resolve();
+    const unrelatedMutationCounters = hooks.getLifecycleCounters();
+
     hooks.applyAlertsPayload({ Groups: { NeedAck: [], Acknowledged: [] } }, { source: 'follower' });
     const preservedAfterMissing = {
       existing: document.querySelector('#existing-single .pull-right').textContent,
@@ -1000,6 +1152,9 @@ async function runBrowserAssertions(client) {
       resetTriggeredFetch,
       requestsAfterInitialDom,
       totalRefreshRequests: refreshRequests,
+      extensionMutationCounters,
+      externalClassResetCounters,
+      unrelatedMutationCounters,
       normalMutationLogCount,
       resetLogCount,
       resetLog,
@@ -1030,6 +1185,21 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(singleAlertLifecycleResult.resetTriggeredFetch, false);
   assert.ok(singleAlertLifecycleResult.requestsAfterInitialDom <= 1);
   assert.ok(singleAlertLifecycleResult.totalRefreshRequests <= 3, 'MutationObserver entered a refresh loop');
+  assert.deepStrictEqual(
+    singleAlertLifecycleResult.extensionMutationCounters,
+    { domRefreshes: 0, dataRefreshes: 0 },
+    'Extension-managed class mutations must not schedule a full DOM or data refresh'
+  );
+  assert.deepStrictEqual(
+    singleAlertLifecycleResult.externalClassResetCounters,
+    { domRefreshes: 1, dataRefreshes: 0 },
+    'External removal of an extension class must schedule one repaint'
+  );
+  assert.deepStrictEqual(
+    singleAlertLifecycleResult.unrelatedMutationCounters,
+    { domRefreshes: 0, dataRefreshes: 0 },
+    'Mutation outside scoped alert roots must not schedule refresh work'
+  );
   assert.strictEqual(singleAlertLifecycleResult.normalMutationLogCount, 0);
   assert.strictEqual(singleAlertLifecycleResult.resetLogCount, 1);
   assert.deepStrictEqual({
@@ -1332,6 +1502,7 @@ async function runBrowserAssertions(client) {
 }
 
 async function main() {
+  await testTemporaryProfileCleanupRetry();
   const executable = findBrowserExecutable();
   const debugPort = await reservePort();
   const pagePort = await reservePort();
@@ -1379,14 +1550,16 @@ async function main() {
     await runBrowserAssertions(client);
     console.log(`Browser test passed (${path.basename(executable)})`);
   } finally {
-    const browserExited = new Promise((resolve) => browser.once('exit', resolve));
     try {
       const closeRequest = client?.send('Browser.close').catch(() => undefined);
-      if (closeRequest) await Promise.race([closeRequest, delay(1000)]);
+      if (closeRequest) await Promise.race([closeRequest, delay(3000)]);
     } catch (_) {}
     client?.close();
-    if (browser.exitCode == null) browser.kill();
-    await Promise.race([browserExited, delay(2000)]);
+    let exited = await waitForBrowserExit(browser, 5000);
+    if (!exited && browser.exitCode == null && browser.signalCode == null) {
+      browser.kill();
+      exited = await waitForBrowserExit(browser, 5000);
+    }
     await new Promise((resolve) => pageServer.close(resolve));
     try {
       await removeTemporaryProfile(profileDirectory);

@@ -3,6 +3,11 @@
 
   function createPageUtils() {
     const guardedGroupCheckboxTitles = new WeakSet();
+    const groupCheckboxTitleSelector =
+      ':is(' +
+        '[ts-ack-group="schedule.Groups.NeedAck"], ' +
+        '[ts-ack-group="schedule.Groups.Acknowledged"]' +
+      ') > .panel-group > .panel > .panel-heading > .panel-title';
 
     function isActionPage() {
       const path = window.location.pathname.replace(/\/+$/, '') || '/';
@@ -31,12 +36,11 @@
     }
 
     function ensureDashboardGroupCheckboxHitAreaGuards(root = document) {
-      const titles = root.querySelectorAll?.(
-        ':is(' +
-          '[ts-ack-group="schedule.Groups.NeedAck"], ' +
-          '[ts-ack-group="schedule.Groups.Acknowledged"]' +
-        ') > .panel-group > .panel > .panel-heading > .panel-title'
-      ) || [];
+      const titles = [];
+      if (root.matches?.(groupCheckboxTitleSelector)) titles.push(root);
+      for (const title of root.querySelectorAll?.(groupCheckboxTitleSelector) || []) {
+        titles.push(title);
+      }
       for (const title of titles) {
         if (guardedGroupCheckboxTitles.has(title)) continue;
         guardedGroupCheckboxTitles.add(title);

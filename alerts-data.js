@@ -6,6 +6,7 @@
     const DEFAULT_REQUEST_TIMEOUT_MS = 4500;
     const DEFAULT_RETRY_DELAY_MS = 350;
     const DEFAULT_RETRY_ATTEMPTS = 3;
+    const MAX_ALERTS_RESPONSE_CHARS = 10 * 1024 * 1024;
 
     function isOlderThanThreshold(agoValue) {
       if (!agoValue) return false;
@@ -202,8 +203,69 @@
       return nextIndex;
     }
 
-    function delay(ms) {
-      return new Promise((resolve) => setTimeout(resolve, ms));
+    function createAbortError() {
+      const error = new Error('Alerts request aborted');
+      error.name = 'AbortError';
+      return error;
+    }
+
+    function throwIfAborted(signal) {
+      if (signal?.aborted) throw createAbortError();
+    }
+
+    function delay(ms, signal) {
+      return new Promise((resolve, reject) => {
+        throwIfAborted(signal);
+        let timer = null;
+        const onAbort = () => {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener?.('abort', onAbort);
+          reject(createAbortError());
+        };
+        timer = setTimeout(() => {
+          signal?.removeEventListener?.('abort', onAbort);
+          resolve();
+        }, ms);
+        signal?.addEventListener?.('abort', onAbort, { once: true });
+      });
+    }
+
+    function ensureResponseSizeAllowed(length) {
+      if (Number(length) > MAX_ALERTS_RESPONSE_CHARS) {
+        throw createResponseTooLargeError();
+      }
+    }
+
+    function createResponseTooLargeError() {
+      const error = new Error('Alerts response is too large');
+      error.code = 'ERESPONSETOOLARGE';
+      return error;
+    }
+
+    async function readBoundedResponseText(response) {
+      const reader = response.body?.getReader?.();
+      if (!reader || typeof TextDecoder !== 'function') {
+        const text = await response.text();
+        ensureResponseSizeAllowed(text.length);
+        return text;
+      }
+      const decoder = new TextDecoder();
+      const chunks = [];
+      let receivedBytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        receivedBytes += Number(value?.byteLength || 0);
+        if (receivedBytes > MAX_ALERTS_RESPONSE_CHARS) {
+          try { await reader.cancel(); } catch (_) {}
+          throw createResponseTooLargeError();
+        }
+        chunks.push(decoder.decode(value, { stream: true }));
+      }
+      chunks.push(decoder.decode());
+      const text = chunks.join('');
+      ensureResponseSizeAllowed(text.length);
+      return text;
     }
 
     function createTimeoutError(source, timeoutMs) {
@@ -233,8 +295,16 @@
       const controller = typeof AbortController === 'function'
         ? new AbortController()
         : null;
+      const externalSignal = options.signal;
+      throwIfAborted(externalSignal);
+      let timedOut = false;
+      const onExternalAbort = () => controller?.abort();
+      externalSignal?.addEventListener?.('abort', onExternalAbort, { once: true });
       const timeoutId = controller
-        ? setTimeout(() => controller.abort(), timeoutMs)
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs)
         : null;
 
       try {
@@ -243,21 +313,26 @@
           credentials: 'same-origin',
           headers: { Accept: 'application/json' },
           cache: 'no-store',
-          signal: controller?.signal
+          signal: controller?.signal || externalSignal
         });
 
         if (!resp.ok) {
           throw createHttpError(resp.status);
         }
 
-        return await resp.json();
+        ensureResponseSizeAllowed(resp.headers?.get?.('content-length'));
+        if (typeof resp.text !== 'function') return await resp.json();
+        const text = await readBoundedResponseText(resp);
+        return JSON.parse(text);
       } catch (err) {
         if (err?.name === 'AbortError') {
+          if (externalSignal?.aborted && !timedOut) throw createAbortError();
           throw createTimeoutError('fetch', timeoutMs);
         }
         throw err;
       } finally {
         if (timeoutId) clearTimeout(timeoutId);
+        externalSignal?.removeEventListener?.('abort', onExternalAbort);
       }
     }
 
@@ -267,33 +342,66 @@
           ? Math.max(1, Number(options.timeoutMs))
           : DEFAULT_REQUEST_TIMEOUT_MS;
         const xhr = new XMLHttpRequest();
-        xhr.open('GET', '/api/alerts?filter=', true);
-        xhr.withCredentials = true;
-        xhr.timeout = timeoutMs;
-        xhr.setRequestHeader('Accept', 'application/json');
-
+        const externalSignal = options.signal;
+        let settled = false;
+        const finish = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          externalSignal?.removeEventListener?.('abort', onExternalAbort);
+          callback(value);
+        };
+        const onExternalAbort = () => {
+          try { xhr.abort(); } catch (_) {}
+          finish(reject, createAbortError());
+        };
+        try {
+          throwIfAborted(externalSignal);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        externalSignal?.addEventListener?.('abort', onExternalAbort, { once: true });
         xhr.onload = function () {
           if (xhr.status < 200 || xhr.status >= 300) {
-            reject(createHttpError(xhr.status));
+            finish(reject, createHttpError(xhr.status));
             return;
           }
 
           try {
-            resolve(JSON.parse(xhr.responseText));
+            ensureResponseSizeAllowed(xhr.responseText.length);
+            finish(resolve, JSON.parse(xhr.responseText));
           } catch (err) {
-            reject(err);
+            finish(reject, err);
           }
         };
 
         xhr.onerror = function () {
-          reject(new Error('XMLHttpRequest network error'));
+          finish(reject, new Error('XMLHttpRequest network error'));
         };
 
         xhr.ontimeout = function () {
-          reject(createTimeoutError('XMLHttpRequest', timeoutMs));
+          finish(reject, createTimeoutError('XMLHttpRequest', timeoutMs));
         };
 
-        xhr.send();
+        xhr.onprogress = function (event) {
+          if (Number(event?.loaded || 0) <= MAX_ALERTS_RESPONSE_CHARS) return;
+          finish(reject, createResponseTooLargeError());
+          try { xhr.abort(); } catch (_) {}
+        };
+
+        xhr.onabort = function () {
+          finish(reject, createAbortError());
+        };
+
+        try {
+          xhr.open('GET', '/api/alerts?filter=', true);
+          xhr.withCredentials = true;
+          xhr.timeout = timeoutMs;
+          xhr.setRequestHeader('Accept', 'application/json');
+          xhr.send();
+        } catch (error) {
+          finish(reject, error);
+        }
       });
     }
 
@@ -310,11 +418,12 @@
 
       let lastError = null;
       for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        throwIfAborted(options.signal);
         try {
           if (typeof fetch === 'function') {
-            return await fetchAlertsDataViaFetch({ timeoutMs });
+            return await fetchAlertsDataViaFetch({ timeoutMs, signal: options.signal });
           }
-          return await fetchAlertsDataViaXHR({ timeoutMs });
+          return await fetchAlertsDataViaXHR({ timeoutMs, signal: options.signal });
         } catch (requestError) {
           lastError = requestError;
           if (!isRetryableError(requestError)) throw requestError;
@@ -323,7 +432,7 @@
         if (attempt < attempts && retryDelayMs > 0) {
           const exponentialDelay = retryDelayMs * (2 ** (attempt - 1));
           const jitter = Math.round(exponentialDelay * Math.random() * 0.25);
-          await delay(exponentialDelay + jitter);
+          await delay(exponentialDelay + jitter, options.signal);
         }
       }
 

@@ -25,6 +25,7 @@
     let autoRefreshTimer = null;
     let autoRefreshReEnableTimer = null;
     let lastHighFrequencyActivityAt = 0;
+    let autoRefreshUpdateCountdown = null;
 
     function markUserActivity() {
       setLastUserActivityTs(Date.now());
@@ -67,6 +68,10 @@
 
     function maybeAutoRefreshPage() {
       if (!getAutoRefreshEnabled() || !pageUtils.isDashboardHome()) return;
+      if (document.visibilityState === 'hidden') {
+        reportDiagnostics?.('auto-refresh-deferred', 'page-hidden');
+        return;
+      }
       if (Date.now() - getLastUserActivityTs() < getAutoRefreshIdleSeconds() * 1000) return;
       const activeElement = document.activeElement;
       const isEditing = Boolean(activeElement?.matches?.(
@@ -145,11 +150,21 @@
         window.addEventListener(eventName, handler, { passive: true, capture: true });
       });
 
-      document.addEventListener('visibilitychange', markUserActivity, { passive: true });
+      document.addEventListener('visibilitychange', () => {
+        markUserActivity();
+        if (document.visibilityState === 'hidden') {
+          if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+          autoRefreshTimer = null;
+        } else if (autoRefreshUpdateCountdown) {
+          startAutoRefreshLoop(autoRefreshUpdateCountdown);
+        }
+      }, { passive: true });
     }
 
     function startAutoRefreshLoop(updateCountdown) {
+      if (typeof updateCountdown === 'function') autoRefreshUpdateCountdown = updateCountdown;
       if (autoRefreshTimer) return;
+      if (document.visibilityState === 'hidden') return;
 
       autoRefreshTimer = setInterval(() => {
         const currentUrl = window.location.href;
@@ -159,7 +174,7 @@
           onUrlChanged?.();
         }
 
-        updateCountdown?.();
+        autoRefreshUpdateCountdown?.();
         maybeAutoRefreshPage();
       }, 1000);
     }

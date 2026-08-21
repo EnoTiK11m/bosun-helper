@@ -11,6 +11,7 @@
       hiddenPollMs = 30000,
       leaseMs = 12000,
       heartbeatMs = 3500,
+      deferFollowerSnapshotsWhileHidden = true,
       shouldRun = () => true,
       storageKeyPrefix = 'bosunAlertsCoordinatorV1'
     } = options;
@@ -48,6 +49,40 @@
     let currentChannelToken = '';
     let storageChangeListener = null;
     let pageShowListener = null;
+    let deferredFollowerSnapshot = null;
+    let activeFetchController = null;
+
+    function abortActiveFetch() {
+      try { activeFetchController?.abort?.(); } catch (_) {}
+      activeFetchController = null;
+    }
+
+    async function applyDeferredFollowerSnapshot() {
+      const snapshot = deferredFollowerSnapshot;
+      deferredFollowerSnapshot = null;
+      if (!snapshot || !isVisible()) return false;
+      const fetchedAt = Number(snapshot.fetchedAt);
+      if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt > Math.max(hiddenPollMs * 2, 60000)) {
+        return false;
+      }
+      const lease = await readLease();
+      if (
+        stopped ||
+        role !== 'follower' ||
+        !isVisible() ||
+        !validLease(lease) ||
+        lease.tabId !== snapshot.leaderTabId ||
+        lease.term !== snapshot.term ||
+        snapshot.term !== lastAcceptedTerm ||
+        snapshot.seq !== lastAcceptedSequence
+      ) return false;
+      applySnapshot(snapshot.payload, {
+        source: 'follower',
+        reason: 'visibility-buffer',
+        fetchedAt
+      });
+      return true;
+    }
 
     function getLastError() {
       return runtime?.lastError || null;
@@ -151,13 +186,21 @@
         return;
       }
       fetchInFlight = true;
+      const refreshController = typeof AbortController === 'function'
+        ? new AbortController()
+        : null;
+      activeFetchController = refreshController;
       try {
         if (!fallbackMode && !(await stillOwnsLease())) {
           becomeFollower('lease-lost-before-fetch');
           return;
         }
         if (stopped || role !== 'leader' || expectedGeneration !== lifecycleGeneration) return;
-        const payload = await fetchSnapshot();
+        const payload = await fetchSnapshot({
+          signal: refreshController?.signal,
+          reason,
+          generation: expectedGeneration
+        });
         if (stopped || role !== 'leader' || expectedGeneration !== lifecycleGeneration) return;
         if (!fallbackMode && !(await stillOwnsLease())) {
           becomeFollower('lease-lost-after-fetch');
@@ -179,8 +222,13 @@
           return;
         }
       } catch (error) {
+        if (
+          error?.name === 'AbortError' &&
+          (refreshController?.signal?.aborted || stopped || expectedGeneration !== lifecycleGeneration || role !== 'leader')
+        ) return;
         reportDiagnostics('refresh-coordinator-fetch-failed', error?.message || 'unknown-error');
       } finally {
+        if (activeFetchController === refreshController) activeFetchController = null;
         if (expectedGeneration !== lifecycleGeneration) return;
         fetchInFlight = false;
         const queued = refreshQueued;
@@ -230,6 +278,7 @@
 
     function becomeFollower(reason) {
       if (stopped || fallbackMode) return;
+      if (role === 'leader') abortActiveFetch();
       role = 'follower';
       term = '';
       clearTimer('poll');
@@ -265,6 +314,7 @@
       }
 
       role = 'leader';
+      deferredFollowerSnapshot = null;
       term = candidateTerm;
       sequence = 0;
       lastAcceptedTerm = candidateTerm;
@@ -307,6 +357,11 @@
           ) return;
           lastAcceptedTerm = message.term;
           lastAcceptedSequence = message.seq;
+          if (deferFollowerSnapshotsWhileHidden && !isVisible()) {
+            deferredFollowerSnapshot = message;
+            return;
+          }
+          deferredFollowerSnapshot = null;
           applySnapshot(message.payload, {
             source: 'follower',
             fetchedAt: message.fetchedAt
@@ -411,6 +466,7 @@
       }
       fallbackMode = true;
       role = 'leader';
+      deferredFollowerSnapshot = null;
       term = `fallback:${tabId}`;
       try { channel?.close?.(); } catch (_) {}
       channel = null;
@@ -475,10 +531,19 @@
       clearRejoinTimer();
       fallbackMode = false;
       role = 'starting';
+      deferredFollowerSnapshot = null;
 
-      visibilityListener = () => {
+      visibilityListener = async () => {
         post({ type: 'hello', tabId, visible: Boolean(isVisible()) });
-        if (isVisible()) requestRefresh('visibility');
+        if (isVisible()) {
+          try {
+            await applyDeferredFollowerSnapshot();
+          } catch (error) {
+            reportDiagnostics('refresh-buffer-apply-failed', error?.message || 'unknown-error');
+          } finally {
+            requestRefresh('visibility');
+          }
+        }
       };
       pageShowListener ||= (event) => {
         if (event?.persisted && stopped && shouldRun()) start();
@@ -515,6 +580,7 @@
       if (stopped) return;
       stopped = true;
       lifecycleGeneration += 1;
+      abortActiveFetch();
       clearTimer('heartbeat');
       clearTimer('poll');
       clearTimer('refresh');
@@ -527,6 +593,7 @@
       try { channel?.close?.(); } catch (_) {}
       channel = null;
       currentChannelToken = '';
+      deferredFollowerSnapshot = null;
       void releaseLease(term);
       role = 'stopped';
       term = '';

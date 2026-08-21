@@ -8,6 +8,8 @@
   const APPLY_MESSAGE = 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
   const RESULT_MESSAGE = 'BOSUN_HELPER_GRAFANA_QUERY_RESULT';
   const APPLY_DEADLINE_MS = 20000;
+  const MAX_REQUEST_ID_LENGTH = 128;
+  const MAX_QUERY_LENGTH = 16 * 1024;
   const config = globalThis.BosunHelperLocalConfig || {};
 
   let bridgeToken = '';
@@ -18,7 +20,10 @@
 
   function getRequestId() {
     try {
-      return new URL(window.location.href).searchParams.get(REQUEST_PARAM) || '';
+      const requestId = new URL(window.location.href).searchParams.get(REQUEST_PARAM) || '';
+      return requestId.length <= MAX_REQUEST_ID_LENGTH && /^[a-zA-Z0-9-]+$/.test(requestId)
+        ? requestId
+        : '';
     } catch (_) {
       return '';
     }
@@ -30,12 +35,18 @@
 
   function isConfiguredPanelPage() {
     if (window.location.host.toLowerCase() !== String(config.grafanaHost || '').toLowerCase()) return false;
-    if (!window.location.search.includes('editPanel=')) return false;
     try {
       const configuredUrl = new URL(config.grafanaPanelUrl);
+      const currentUrl = new URL(window.location.href);
+      const configuredPanel = configuredUrl.searchParams.get('editPanel');
+      const currentPanel = currentUrl.searchParams.get('editPanel');
+      const configuredOrg = configuredUrl.searchParams.get('orgId');
       return configuredUrl.protocol === 'https:' &&
         configuredUrl.host.toLowerCase() === window.location.host.toLowerCase() &&
-        configuredUrl.pathname === window.location.pathname;
+        configuredUrl.pathname === window.location.pathname &&
+        Boolean(configuredPanel) &&
+        currentPanel === configuredPanel &&
+        (configuredOrg === null || currentUrl.searchParams.get('orgId') === configuredOrg);
     } catch (_) {
       return false;
     }
@@ -197,6 +208,7 @@
 
     if (
       !query ||
+      query.length > MAX_QUERY_LENGTH ||
       !Number.isFinite(createdAt) ||
       createdAt > now + 5000 ||
       now - createdAt > PENDING_TTL_MS
