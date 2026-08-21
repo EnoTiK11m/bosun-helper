@@ -112,7 +112,7 @@ function createSharedCoordination(clock) {
   };
 }
 
-function createCoordinatorTab(name, clock, shared) {
+function createCoordinatorTab(name, clock, shared, options = {}) {
   const documentListeners = new Map();
   const windowListeners = new Map();
   const applied = [];
@@ -151,6 +151,7 @@ function createCoordinatorTab(name, clock, shared) {
     Object,
     Array,
     JSON,
+    AbortController,
     setTimeout: clock.setTimeout.bind(clock),
     clearTimeout: clock.clearTimeout.bind(clock),
     addEventListener(event, listener) { windowListeners.set(event, listener); },
@@ -164,8 +165,11 @@ function createCoordinatorTab(name, clock, shared) {
     filename: 'refresh-coordinator.js'
   });
   const coordinator = context.BosunHelperRefreshCoordinator.createRefreshCoordinator({
-    async fetchSnapshot() {
+    async fetchSnapshot(fetchOptions) {
       fetchCount += 1;
+      if (typeof options.fetchSnapshot === 'function') {
+        return options.fetchSnapshot(fetchOptions, fetchCount);
+      }
       return { owner: name, fetchCount };
     },
     applySnapshot(payload, metadata) { applied.push({ payload, metadata }); },
@@ -178,6 +182,7 @@ function createCoordinatorTab(name, clock, shared) {
   return {
     coordinator,
     applied,
+    document,
     documentListeners,
     windowListeners,
     setVisibility(value) {
@@ -186,6 +191,170 @@ function createCoordinatorTab(name, clock, shared) {
     },
     get fetchCount() { return fetchCount; }
   };
+}
+
+async function testHiddenFollowerDefersSnapshotsUntilVisible() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  const leader = createCoordinatorTab('visible-leader', clock, shared);
+  const follower = createCoordinatorTab('hidden-follower', clock, shared);
+  follower.document.visibilityState = 'hidden';
+
+  leader.coordinator.start();
+  await clock.advance(0);
+  follower.coordinator.start();
+  await clock.advance(0);
+  await clock.advance(220);
+
+  assert.strictEqual(leader.coordinator.getRole(), 'leader');
+  assert.strictEqual(follower.coordinator.getRole(), 'follower');
+  assert.strictEqual(follower.applied.length, 0, 'Hidden follower must not apply snapshots');
+
+  follower.setVisibility('visible');
+  await flushMicrotasks();
+  assert.strictEqual(follower.applied.length, 1, 'Visible follower must apply only the latest buffered snapshot');
+  assert.strictEqual(follower.applied[0].metadata.reason, 'visibility-buffer');
+
+  await clock.advance(0);
+  leader.coordinator.stop();
+  follower.coordinator.stop();
+}
+
+async function testHiddenFollowerRejectsSnapshotFromExpiredLeader() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  const leader = createCoordinatorTab('stale-leader', clock, shared);
+  const follower = createCoordinatorTab('stale-follower', clock, shared);
+  follower.document.visibilityState = 'hidden';
+  leader.coordinator.start();
+  await clock.advance(0);
+  follower.coordinator.start();
+  await clock.advance(0);
+  await clock.advance(120);
+  assert.strictEqual(follower.applied.length, 0);
+
+  shared.storage.set({
+    'test-coordinator:lease:https://bosun.example.test': {
+      version: 1,
+      tabId: 'replacement-leader',
+      term: 'replacement-term',
+      visible: true,
+      expiresAt: clock.now + 240
+    }
+  });
+  follower.setVisibility('visible');
+  await flushMicrotasks();
+  assert.strictEqual(follower.applied.length, 0, 'Snapshot from an expired leader must not be applied');
+  leader.coordinator.stop();
+  follower.coordinator.stop();
+}
+
+async function testCoordinatorStopAbortsActiveFetch() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  let aborted = false;
+  const tab = createCoordinatorTab('abort-owner', clock, shared, {
+    fetchSnapshot({ signal }) {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          aborted = true;
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      });
+    }
+  });
+
+  tab.coordinator.start();
+  await clock.advance(0);
+  await flushMicrotasks();
+  await clock.advance(0);
+  assert.strictEqual(tab.fetchCount, 1);
+  tab.coordinator.stop();
+  await flushMicrotasks();
+  assert.strictEqual(aborted, true, 'Stopping coordinator must abort the active fetch');
+  assert.strictEqual(tab.coordinator.getRole(), 'stopped');
+}
+
+async function testAlertsDataBoundsAndAbort() {
+  let fetchCalls = 0;
+  const context = {
+    console,
+    globalThis: null,
+    fetch: async () => {
+      fetchCalls += 1;
+      return {
+        ok: true,
+        headers: { get: () => String(11 * 1024 * 1024) },
+        async text() { return '{}'; }
+      };
+    },
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    Date,
+    Math,
+    Promise,
+    Error,
+    Number,
+    String,
+    Boolean,
+    Object,
+    Array,
+    JSON
+  };
+  context.TextDecoder = TextDecoder;
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'alerts-data.js'), 'utf8'), context, {
+    filename: 'alerts-data.js'
+  });
+  const api = context.BosunSilenceHiderAlertsData.createAlertsData({ oldNoNoteMinutes: 60 });
+  await assert.rejects(
+    api.fetchAlertsDataWithRetry({ attempts: 1 }),
+    (error) => error?.code === 'ERESPONSETOOLARGE'
+  );
+  assert.strictEqual(fetchCalls, 1, 'Oversized response must not be retried');
+
+  let streamCancelled = false;
+  let chunkIndex = 0;
+  const oversizedChunks = [new Uint8Array(6 * 1024 * 1024), new Uint8Array(6 * 1024 * 1024)];
+  context.fetch = async () => ({
+    ok: true,
+    headers: { get: () => null },
+    text() { throw new Error('Streaming path expected'); },
+    body: {
+      getReader() {
+        return {
+          async read() {
+            return chunkIndex < oversizedChunks.length
+              ? { done: false, value: oversizedChunks[chunkIndex++] }
+              : { done: true, value: undefined };
+          },
+          async cancel() { streamCancelled = true; }
+        };
+      }
+    }
+  });
+  await assert.rejects(
+    api.fetchAlertsDataWithRetry({ attempts: 1 }),
+    (error) => error?.code === 'ERESPONSETOOLARGE'
+  );
+  assert.strictEqual(streamCancelled, true, 'Oversized streaming response must be cancelled early');
+
+  context.fetch = (_url, options) => new Promise((_resolve, reject) => {
+    fetchCalls += 1;
+    options.signal.addEventListener('abort', () => {
+      const error = new Error('aborted');
+      error.name = 'AbortError';
+      reject(error);
+    }, { once: true });
+  });
+  const controller = new AbortController();
+  const pending = api.fetchAlertsDataWithRetry({ signal: controller.signal, attempts: 3 });
+  controller.abort();
+  await assert.rejects(pending, (error) => error?.name === 'AbortError');
+  assert.strictEqual(fetchCalls, 2, 'Lifecycle abort must not be retried');
 }
 
 async function testRefreshCoordinatorLeaderFailoverAndStop() {
@@ -778,6 +947,10 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
 
 (async () => {
   await testRefreshCoordinatorLeaderFailoverAndStop();
+  await testHiddenFollowerDefersSnapshotsUntilVisible();
+  await testHiddenFollowerRejectsSnapshotFromExpiredLeader();
+  await testCoordinatorStopAbortsActiveFetch();
+  await testAlertsDataBoundsAndAbort();
   await testRefreshCoordinatorResumesFromBfcache();
   await testVisibleFollowerImmediatelyTakesLeadership();
   await testNewAlertTrackerPersistsUntilNote();

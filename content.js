@@ -33,6 +33,11 @@
   const ALERT_MARKER_CACHE_SESSION_KEY = 'bosunAlertMarkerCacheV1';
   const ALERT_MARKER_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
   const ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP = 2000;
+  const ALERT_MARKER_CACHE_PERSIST_DELAY_MS = 5000;
+  const ALERT_MARKER_CACHE_MIN_PERSIST_INTERVAL_MS = 30000;
+  const ALERT_MARKER_CACHE_MAX_UNCHANGED_AGE_MS = 5 * 60 * 1000;
+  const ALERT_MARKER_CACHE_MAX_RAW_LENGTH = 5 * 1024 * 1024;
+  const ALERT_MARKER_CACHE_MAX_KEY_LENGTH = 1000;
   const SOUND_FILE_ALERT = 'bosun_notification_alert_chime.wav';
   const SOUND_FILE_SOFT = 'bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
@@ -113,12 +118,17 @@
   let showSilenced = false;
   let refreshTimer = null;
   let observerStarted = false;
+  let syncScopedDomObservers = () => {};
   let hiddenCount = 0;
 
   let dataRefreshInFlight = false;
   let dataRefreshTimer = null;
   let dataRefreshQueued = false;
   let dataRefreshDebounceTimer = null;
+  let alertMarkerCachePersistTimer = null;
+  let lastAlertMarkerCacheSerializedMaps = '';
+  let lastAlertMarkerCachePersistAttemptAt = 0;
+  let lastAlertMarkerCacheSavedAt = 0;
   let dataVisibilityTrackingInstalled = false;
   let primedAlertsPayload = null;
   let alertsPayloadApplyVersion = 0;
@@ -159,6 +169,8 @@
   const groupCountBySubject = new Map();
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
+  const expectedExtensionClassStates = new WeakMap();
+  const expectedExtensionClassNodes = new Set();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
   const promqlApi = globalThis.BosunHelperPromQL || null;
   const diagnosticsApi = globalThis.BosunSilenceHiderDiagnostics?.createDiagnostics?.({
@@ -226,7 +238,7 @@
       }
   }) || null;
   const refreshCoordinatorApi = globalThis.BosunHelperRefreshCoordinator?.createRefreshCoordinator?.({
-    fetchSnapshot: () => consumeAlertsPayload(),
+    fetchSnapshot: (options) => consumeAlertsPayload(options),
     applySnapshot: (payload, metadata) => applyAlertsPayload(payload, metadata),
     isVisible: () => document.visibilityState !== 'hidden',
     shouldRun: () => isDashboardEnhancementsPage(),
@@ -318,6 +330,20 @@
     reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
     autoRefreshForceReenableMs: AUTO_REFRESH_FORCE_REENABLE_MS
   }) || null;
+
+  function setExtensionClass(element, className, enabled) {
+    if (!element?.classList || typeof className !== 'string' || !className) return;
+    const expected = Boolean(enabled);
+    if (element.classList.contains(className) === expected) return;
+    let states = expectedExtensionClassStates.get(element);
+    if (!states) {
+      states = new Map();
+      expectedExtensionClassStates.set(element, states);
+    }
+    states.set(className, expected);
+    expectedExtensionClassNodes.add(element);
+    element.classList.toggle(className, expected);
+  }
 
   function isActionPage() {
     return pageUtils?.isActionPage?.() ?? (window.location.pathname === '/action' && window.location.search.includes('type='));
@@ -425,17 +451,17 @@
   function markNoSelectElements() {
     document
       .querySelectorAll('.panel-title > a > span.pull-right.ng-binding')
-      .forEach((el) => el.classList.add(NO_SELECT_CLASS));
+      .forEach((el) => setExtensionClass(el, NO_SELECT_CLASS, true));
 
     document
       .querySelectorAll('.panel-title > span.pull-right[ts-since="child.Ago"]')
-      .forEach((el) => el.classList.add(NO_SELECT_CLASS));
+      .forEach((el) => setExtensionClass(el, NO_SELECT_CLASS, true));
 
     document
       .querySelectorAll('.panel-title > span[ng-show="state.Id"], .panel-title > span.ng-binding')
       .forEach((el) => {
         if (/^#\d+:$/.test((el.textContent || '').trim())) {
-          el.classList.add(NO_SELECT_CLASS);
+          setExtensionClass(el, NO_SELECT_CLASS, true);
         }
       });
   }
@@ -1019,7 +1045,13 @@
 
   function clearAlertDerivedState() {
     alertsPayloadApplyVersion += 1;
+    try { primedAlertsPayload?.controller?.abort?.(); } catch (_) {}
     primedAlertsPayload = null;
+    if (alertMarkerCachePersistTimer) {
+      clearTimeout(alertMarkerCachePersistTimer);
+      alertMarkerCachePersistTimer = null;
+      flushAlertMarkerCacheToSession();
+    }
     rebuildAlertDataIndex({ Groups: {} });
     singleAlertAgeApi?.clear?.();
     alertDataIndexReady = false;
@@ -1030,6 +1062,7 @@
 
   function runDomRefreshPass(options = {}) {
     const preserveExistingOnNone = options.preserveExistingOnNone === true;
+    const skipSingleAlertAge = options.skipSingleAlertAge === true;
 
     ensureToggleExists();
     applyVisibility();
@@ -1039,7 +1072,7 @@
     pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
     refreshSilencedBadges();
-    singleAlertAgeApi?.refresh?.();
+    if (!skipSingleAlertAge) singleAlertAgeApi?.refresh?.();
     applyActionPageTweaks();
     actionTemplatesApi?.refresh?.();
 
@@ -1065,6 +1098,7 @@
       actionTemplatesApi?.destroy?.();
     }
 
+    syncScopedDomObservers();
     runDomRefreshPass({ preserveExistingOnNone: true });
   }
 
@@ -1077,20 +1111,20 @@
       if (isSilencedPanel(panel)) {
         nextTotalSilencedCount++;
         if (!showSilenced) {
-          panel.classList.add(HIDDEN_CLASS);
+          setExtensionClass(panel, HIDDEN_CLASS, true);
           nextHiddenCount++;
         } else {
-          panel.classList.remove(HIDDEN_CLASS);
+          setExtensionClass(panel, HIDDEN_CLASS, false);
         }
       } else {
-        panel.classList.remove(HIDDEN_CLASS);
+        setExtensionClass(panel, HIDDEN_CLASS, false);
       }
     }
 
     // На всякий случай гарантируем, что в Needs Acknowledgement ничего не скрыто
     const needsAckRoot = getNeedsAckRoot();
     needsAckRoot?.querySelectorAll(`.${HIDDEN_CLASS}`).forEach((panel) => {
-      panel.classList.remove(HIDDEN_CLASS);
+      setExtensionClass(panel, HIDDEN_CLASS, false);
     });
 
     hiddenCount = nextTotalSilencedCount;
@@ -1100,8 +1134,8 @@
   function applyAcknowledgedCollapse() {
     const root = getAcknowledgedRoot();
     const heading = getAcknowledgedHeading();
-    root?.classList.toggle(ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
-    heading?.classList.toggle(ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
+    setExtensionClass(root, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
+    setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
   }
 
   function resolveChildHasUserComment(panel, parentGroupPanel = null) {
@@ -1156,7 +1190,7 @@
 
     if (!userCommentFilterEnabled || !alertDataIndexReady) {
       needsAckRoot.querySelectorAll(`.${USER_COMMENT_FILTER_HIDDEN_CLASS}`).forEach((panel) => {
-        panel.classList.remove(USER_COMMENT_FILTER_HIDDEN_CLASS);
+        setExtensionClass(panel, USER_COMMENT_FILTER_HIDDEN_CLASS, false);
       });
       return;
     }
@@ -1167,18 +1201,18 @@
 
       for (const childPanel of childPanels) {
         const shouldShow = shouldShowAlertByUserCommentFilter(childPanel, groupPanel);
-        childPanel.classList.toggle(USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShow);
+        setExtensionClass(childPanel, USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShow);
       }
 
       const hasVisibleChild = childPanels.some((childPanel) => {
         return !childPanel.classList.contains(USER_COMMENT_FILTER_HIDDEN_CLASS);
       });
       const shouldShowGroup = childPanels.length ? hasVisibleChild : !resolveGroupHasUserComment(groupPanel);
-      groupPanel.classList.toggle(USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShowGroup);
+      setExtensionClass(groupPanel, USER_COMMENT_FILTER_HIDDEN_CLASS, !shouldShowGroup);
     }
   }
 
-  function scheduleRefresh() {
+  function scheduleRefresh(options = {}) {
     if (refreshTimer) clearTimeout(refreshTimer);
 
     refreshTimer = setTimeout(() => {
@@ -1189,7 +1223,10 @@
       if (isDashboardEnhancementsPage() && !alertDataIndexReady) {
         restoreAlertMarkerCacheFromSession();
       }
-      runDomRefreshPass({ preserveExistingOnNone: true });
+      runDomRefreshPass({
+        preserveExistingOnNone: true,
+        skipSingleAlertAge: options.skipSingleAlertAge === true
+      });
     }, 120);
   }
 
@@ -1434,32 +1471,57 @@
   function serializeAlertMarkerMap(map) {
     return Array.from(map.entries())
       .filter(([key, value]) => (
-        (typeof key === 'string' || typeof key === 'number') &&
+        (typeof key === 'number' || (
+          typeof key === 'string' && key.length <= ALERT_MARKER_CACHE_MAX_KEY_LENGTH
+        )) &&
         (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)))
       ))
       .slice(0, ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP);
   }
 
-  function persistAlertMarkerCacheToSession() {
+  function flushAlertMarkerCacheToSession() {
     try {
+      lastAlertMarkerCachePersistAttemptAt = Date.now();
       const maps = {};
       for (const [name, map] of Object.entries(getAlertMarkerCacheMaps())) {
         maps[name] = serializeAlertMarkerMap(map);
       }
+      const serializedMaps = JSON.stringify(maps);
+      if (
+        serializedMaps === lastAlertMarkerCacheSerializedMaps &&
+        Date.now() - lastAlertMarkerCacheSavedAt < ALERT_MARKER_CACHE_MAX_UNCHANGED_AGE_MS
+      ) return;
+      const savedAt = Date.now();
       window.sessionStorage.setItem(ALERT_MARKER_CACHE_SESSION_KEY, JSON.stringify({
         version: 1,
-        savedAt: Date.now(),
+        savedAt,
         maps
       }));
+      lastAlertMarkerCacheSerializedMaps = serializedMaps;
+      lastAlertMarkerCacheSavedAt = savedAt;
     } catch (err) {
       reportDiagnostics('alert-marker-cache-save-failed', err?.message || 'unknown-error');
     }
+  }
+
+  function persistAlertMarkerCacheToSession() {
+    if (alertMarkerCachePersistTimer) return;
+    const elapsed = Date.now() - lastAlertMarkerCachePersistAttemptAt;
+    const throttleDelay = Math.max(0, ALERT_MARKER_CACHE_MIN_PERSIST_INTERVAL_MS - elapsed);
+    alertMarkerCachePersistTimer = setTimeout(() => {
+      alertMarkerCachePersistTimer = null;
+      flushAlertMarkerCacheToSession();
+    }, Math.max(ALERT_MARKER_CACHE_PERSIST_DELAY_MS, throttleDelay));
   }
 
   function restoreAlertMarkerCacheFromSession() {
     try {
       const raw = window.sessionStorage.getItem(ALERT_MARKER_CACHE_SESSION_KEY);
       if (!raw) return false;
+      if (raw.length > ALERT_MARKER_CACHE_MAX_RAW_LENGTH) {
+        window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+        return false;
+      }
       const cached = JSON.parse(raw);
       const ageMs = Date.now() - Number(cached?.savedAt);
       if (
@@ -1481,11 +1543,15 @@
         for (const entry of entries.slice(0, ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP)) {
           if (!Array.isArray(entry) || entry.length !== 2) continue;
           const [key, value] = entry;
-          const validKey = typeof key === 'string' || typeof key === 'number';
+          const validKey = typeof key === 'number' || (
+            typeof key === 'string' && key.length <= ALERT_MARKER_CACHE_MAX_KEY_LENGTH
+          );
           const validValue = typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value));
           if (validKey && validValue) map.set(key, value);
         }
       }
+      lastAlertMarkerCacheSerializedMaps = JSON.stringify(cached.maps);
+      lastAlertMarkerCacheSavedAt = Number(cached.savedAt);
       alertDataIndexReady = true;
       return true;
     } catch (err) {
@@ -2715,20 +2781,21 @@
     applyNeedsAckMarkersFromData({ preserveExistingOnNone: true });
   }
 
-  async function fetchAlertsPayload() {
+  async function fetchAlertsPayload(options = {}) {
     if (!alertsDataApi?.fetchAlertsDataWithRetry && (!alertsDataApi?.fetchAlertsDataViaFetch || !alertsDataApi?.fetchAlertsDataViaXHR)) {
       throw new Error('alerts-data module unavailable');
     }
     try {
       if (alertsDataApi?.fetchAlertsDataWithRetry) {
-        return await alertsDataApi.fetchAlertsDataWithRetry();
+        return await alertsDataApi.fetchAlertsDataWithRetry(options);
       }
       try {
-        return await alertsDataApi.fetchAlertsDataViaFetch();
+        return await alertsDataApi.fetchAlertsDataViaFetch(options);
       } catch (_) {
-        return await alertsDataApi.fetchAlertsDataViaXHR();
+        return await alertsDataApi.fetchAlertsDataViaXHR(options);
       }
     } catch (err) {
+      if (err?.name === 'AbortError') throw err;
       console.warn('[Bosun plugin] Failed to refresh alerts data:', err);
       reportDiagnostics('refresh-failed', err?.message || 'unknown-error');
       setToolbarStatus('refresh', 'Не удалось синхронизировать алерты', 'error', {
@@ -2741,10 +2808,12 @@
 
   function primeAlertsPayload() {
     if (primedAlertsPayload || !isDashboardEnhancementsPage()) return;
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const entry = {
       startedAt: Date.now(),
       applyVersion: alertsPayloadApplyVersion,
-      promise: fetchAlertsPayload()
+      controller,
+      promise: fetchAlertsPayload({ signal: controller?.signal })
     };
     primedAlertsPayload = entry;
     entry.promise.then((payload) => {
@@ -2755,11 +2824,17 @@
     }).catch(() => {});
   }
 
-  function consumeAlertsPayload() {
+  function consumeAlertsPayload(options = {}) {
     const entry = primedAlertsPayload;
     primedAlertsPayload = null;
-    if (entry && Date.now() - entry.startedAt <= DATA_REFRESH_MS) return entry.promise;
-    return fetchAlertsPayload();
+    if (entry && Date.now() - entry.startedAt <= DATA_REFRESH_MS) {
+      if (options.signal?.aborted) entry.controller?.abort?.();
+      const onAbort = () => entry.controller?.abort?.();
+      options.signal?.addEventListener?.('abort', onAbort, { once: true });
+      return entry.promise.finally(() => options.signal?.removeEventListener?.('abort', onAbort));
+    }
+    entry?.controller?.abort?.();
+    return fetchAlertsPayload(options);
   }
 
   function applyAlertsPayload(payload, metadata = {}) {
@@ -2851,6 +2926,8 @@
   function startObserver() {
     if (observerStarted || !document.body) return;
     observerStarted = true;
+    for (const node of expectedExtensionClassNodes) expectedExtensionClassStates.delete(node);
+    expectedExtensionClassNodes.clear();
 
     function isExtensionOwnedNode(node) {
       if (!node || node.nodeType !== 1) return false;
@@ -2867,6 +2944,22 @@
       );
     }
 
+    function isExtensionOwnedClassMutation(mutation) {
+      if (mutation?.type !== 'attributes' || mutation.attributeName !== 'class') return false;
+      const target = mutation.target;
+      if (!target || target.nodeType !== 1) return false;
+      const expectedStates = expectedExtensionClassStates.get(target);
+      if (!expectedStates?.size) return false;
+      const before = new Set(String(mutation.oldValue || '').split(/\s+/).filter(Boolean));
+      const after = new Set(Array.from(target.classList || []));
+      const changed = new Set([
+        ...Array.from(before).filter((name) => !after.has(name)),
+        ...Array.from(after).filter((name) => !before.has(name))
+      ]);
+      if (changed.size && Array.from(changed).some((name) => !expectedStates.has(name))) return false;
+      return Array.from(expectedStates).every(([name, expected]) => after.has(name) === expected);
+    }
+
     function isNeedsAckNode(node, needsAckRoot) {
       if (!node || node.nodeType !== 1 || isExtensionOwnedNode(node)) return false;
 
@@ -2879,6 +2972,17 @@
       }
 
       return !!node.querySelector?.('[ts-ack-group="schedule.Groups.NeedAck"]');
+    }
+
+    function mutationChangesNeedsAckGroups(mutation, changedChildren, needsAckRoot) {
+      if (mutation?.type !== 'childList' || !changedChildren.length) return false;
+      if (changedChildren.some((node) => (
+        node.matches?.('[ts-ack-group="schedule.Groups.NeedAck"]') ||
+        node.querySelector?.('[ts-ack-group="schedule.Groups.NeedAck"]')
+      ))) return true;
+      const target = mutation.target;
+      const groupList = needsAckRoot?.querySelector?.(':scope > .panel-group');
+      return target === groupList && changedChildren.some((node) => node.matches?.('.panel'));
     }
 
     function collectRelevantMutationNodes(mutation) {
@@ -2917,14 +3021,28 @@
       return false;
     }
 
-    const observer = new MutationObserver((mutations) => {
-      pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
+    const processMutations = (mutations) => {
+      if (isDashboardEnhancementsPage()) {
+        for (const mutation of mutations) {
+          if (mutation.type !== 'childList') continue;
+          for (const node of mutation.addedNodes || []) {
+            if (node?.nodeType === 1) {
+              pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(node);
+            }
+          }
+        }
+      }
       const currentUrl = window.location.href;
       if (currentUrl !== lastKnownUrl) {
         lastKnownUrl = currentUrl;
         markUserActivity();
         resetNeedAckSoundBaseline();
         handleRouteChange();
+      }
+      if (!isDashboardEnhancementsPage() && !isActionPage()) {
+        for (const node of expectedExtensionClassNodes) expectedExtensionClassStates.delete(node);
+        expectedExtensionClassNodes.clear();
+        return;
       }
 
       let shouldRefreshUi = false;
@@ -2934,6 +3052,7 @@
       const ageDebugEnabled = singleAlertAgeApi?.isDebugEnabled?.() === true;
 
       for (const mutation of mutations) {
+        if (isExtensionOwnedClassMutation(mutation)) continue;
         const changedNodes = collectRelevantMutationNodes(mutation);
         if (!changedNodes.length) continue;
         const changedChildren = mutation.type === 'childList'
@@ -2953,9 +3072,8 @@
           }
 
           const mutationCanChangeAlertData =
-            (mutation.type === 'childList' && !extensionOnlyChildChange) ||
-            mutation.attributeName === 'ts-ack-group' ||
-            mutation.attributeName === 'ts-ack-item';
+            (!extensionOnlyChildChange && mutationChangesNeedsAckGroups(mutation, changedChildren, needsAckRoot)) ||
+            mutation.attributeName === 'ts-ack-group';
           const agePresentationMutation = singleAlertAgeApi?.isManagedNode?.(node) === true;
           if (mutationCanChangeAlertData && !agePresentationMutation && isNeedsAckNode(node, needsAckRoot)) {
             shouldRefreshData = true;
@@ -2971,9 +3089,12 @@
         }
       }
 
+      for (const node of expectedExtensionClassNodes) expectedExtensionClassStates.delete(node);
+      expectedExtensionClassNodes.clear();
+
       if (shouldRefreshUi) {
-        singleAlertAgeApi?.refresh?.();
-        scheduleRefresh();
+        if (isDashboardEnhancementsPage()) singleAlertAgeApi?.refresh?.();
+        scheduleRefresh({ skipSingleAlertAge: true });
       }
 
       for (const problem of ageResetProblems) {
@@ -2983,14 +3104,67 @@
       if (shouldRefreshData) {
         scheduleAlertsDataRefresh();
       }
+    };
+
+    const scopedObservers = new Map();
+    syncScopedDomObservers = () => {
+      const desiredRoots = new Map();
+      if (isDashboardEnhancementsPage()) {
+        const needsAckRoot = getNeedsAckRoot();
+        const acknowledgedRoot = getAcknowledgedRoot();
+        if (needsAckRoot) desiredRoots.set('NeedAck', needsAckRoot);
+        if (acknowledgedRoot) desiredRoots.set('Acknowledged', acknowledgedRoot);
+      }
+
+      for (const [type, entry] of scopedObservers) {
+        if (desiredRoots.get(type) === entry.root) continue;
+        entry.observer.disconnect();
+        scopedObservers.delete(type);
+      }
+      for (const [type, root] of desiredRoots) {
+        if (scopedObservers.has(type)) continue;
+        const observer = new MutationObserver(processMutations);
+        observer.observe(root, {
+          childList: true,
+          subtree: true,
+          attributes: true,
+          attributeOldValue: true,
+          attributeFilter: ['class', 'ts-ack-group', 'ts-ack-item']
+        });
+        scopedObservers.set(type, { root, observer });
+        pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(root);
+      }
+    };
+
+    function mutationContainsDashboardRoot(mutation) {
+      const nodes = [...Array.from(mutation.addedNodes || []), ...Array.from(mutation.removedNodes || [])];
+      return nodes.some((node) => node?.nodeType === 1 && (
+        node.matches?.('[ts-ack-group="schedule.Groups.NeedAck"], [ts-ack-group="schedule.Groups.Acknowledged"]') ||
+        node.querySelector?.('[ts-ack-group="schedule.Groups.NeedAck"], [ts-ack-group="schedule.Groups.Acknowledged"]')
+      ));
+    }
+
+    const discoveryObserver = new MutationObserver((mutations) => {
+      const previousUrl = lastKnownUrl;
+      const currentUrl = window.location.href;
+      if (currentUrl !== previousUrl) {
+        lastKnownUrl = currentUrl;
+        markUserActivity();
+        resetNeedAckSoundBaseline();
+        handleRouteChange();
+      } else {
+        syncScopedDomObservers();
+      }
+      if (isActionPage()) {
+        processMutations(mutations);
+      } else if (isDashboardEnhancementsPage()) {
+        const rootMutations = mutations.filter(mutationContainsDashboardRoot);
+        if (rootMutations.length) processMutations(rootMutations);
+      }
     });
 
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['class', 'ts-ack-group', 'ts-ack-item']
-    });
+    discoveryObserver.observe(document.body, { childList: true, subtree: true });
+    syncScopedDomObservers();
   }
 
   function init() {
@@ -2998,7 +3172,7 @@
 
     grafanaHandoffApi?.cleanupExpired?.();
     newAlertTrackerApi?.start?.();
-    restoreDiagnosticsLogFromStorage();
+    if (DIAGNOSTICS_TOOLBAR_UI_ENABLED) restoreDiagnosticsLogFromStorage();
     injectStyles();
     pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     installSelectionGuard();
@@ -3010,6 +3184,12 @@
     scheduleTopBarMount();
     restoreNeedAckSoundBaselineFromSession();
     restoreAlertMarkerCacheFromSession();
+    window.addEventListener('pagehide', () => {
+      if (!alertMarkerCachePersistTimer) return;
+      clearTimeout(alertMarkerCachePersistTimer);
+      alertMarkerCachePersistTimer = null;
+      flushAlertMarkerCacheToSession();
+    });
     primeAlertsPayload();
 
     loadState(() => {
@@ -3022,7 +3202,6 @@
 
       setTimeout(() => {
         runDomRefreshPass();
-        refreshAlertsData();
       }, 1000);
     });
   }

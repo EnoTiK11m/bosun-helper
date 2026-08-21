@@ -611,6 +611,7 @@
         border-radius: 6px;
         background: #fafafa;
       }
+      .bosun-action-template-limit-hint { margin-bottom: 6px; color: #666; font-size: 11px; }
       .bosun-action-template-rows { display: grid; gap: 5px; }
       .bosun-action-template-row { display: flex; align-items: center; gap: 5px; }
       .bosun-action-template-input {

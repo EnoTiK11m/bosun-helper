@@ -146,6 +146,11 @@ if (failed.length) {
 
 {
   const fixedNow = Date.parse('2026-08-20T12:00:00Z');
+  assert.strictEqual(
+    context.BosunHelperSingleAlertAge.SINGLE_ALERT_AGE_DEBUG,
+    false,
+    'Production single-alert-age diagnostics must be disabled'
+  );
   const ageApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({ now: () => fixedNow });
   assert.strictEqual(ageApi.formatAge('2026-08-20T11:17:00Z'), '43m-ago');
   assert.strictEqual(ageApi.formatAge('2026-08-20T10:00:00Z'), '2h-ago');
@@ -226,12 +231,18 @@ if (failed.length) {
   assert.strictEqual(stable.countNode.textContent, '43m-ago');
   assert.strictEqual(history.api.getHistoryStats().entries, 1);
 
-  history.setNow(Date.parse('2026-08-20T12:01:00Z'));
+  history.setNow(Date.parse('2026-08-20T12:00:05Z'));
   history.apply([]);
-  assert.strictEqual(stable.countNode.textContent, '44m-ago', 'Missing candidate must use the cached timestamp');
+  assert.strictEqual(stable.countNode.textContent, '43m-ago', 'Missing candidate must use the cached timestamp during grace');
   assert.strictEqual(stable.countNode.dataset.bosunSingleAlertAgeDecision, 'preserve-last-valid-match');
   for (let index = 0; index < 25; index += 1) history.api.refresh();
   assert.strictEqual(history.api.getHistoryStats().entries, 1, 'Repeated missing snapshots must not grow history');
+
+  history.apply([]);
+  assert.strictEqual(stable.countNode.textContent, '43m-ago', 'Second missing snapshot must remain inside grace');
+  history.apply([]);
+  assert.strictEqual(stable.countNode.textContent, '1 alerts', 'Expired snapshot grace must restore the counter');
+  assert.strictEqual(history.api.getHistoryStats().entries, 0, 'Expired snapshot grace must clear history');
 
   history.apply([history.group('stable', '2026-08-20T10:00:00Z')]);
   assert.strictEqual(stable.countNode.textContent, '2h-ago', 'Recovered snapshot must replace cached age');
@@ -291,12 +302,22 @@ if (failed.length) {
   strongIdentityHistory.apply([]);
   assert.strictEqual(strongPanel.countNode.textContent, '1 alerts', 'Strong identity changes must invalidate history');
   assert.strictEqual(strongIdentityHistory.api.getHistoryStats().entries, 0);
+
+  const timedHistory = createAgeHistoryHarness();
+  const timedPanel = timedHistory.panel('timed grace');
+  timedHistory.roots.NeedAck.panels = [timedPanel];
+  timedHistory.apply([timedHistory.group('timed grace', '2026-08-20T11:17:00Z')]);
+  timedHistory.setNow(Date.parse('2026-08-20T12:00:16Z'));
+  timedHistory.apply([]);
+  assert.strictEqual(timedPanel.countNode.textContent, '1 alerts', 'Expired time grace must restore the counter');
 }
 
 assert.ok(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.note.length > 0);
 assert.ok(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.ack.length > 0);
 assert.strictEqual(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.note.at(-1), 'сдано в ');
 assert.deepStrictEqual(Array.from(context.BosunHelperActionTemplates.DEFAULT_TEMPLATES.close), []);
+assert.strictEqual(context.BosunHelperActionTemplates.MAX_TEMPLATES_PER_TYPE, 50);
+assert.strictEqual(context.BosunHelperActionTemplates.MAX_TEMPLATE_LENGTH, 500);
 
 {
   const originalSearch = context.window.location.search;
@@ -333,6 +354,71 @@ assert.deepStrictEqual(Array.from(context.BosunHelperActionTemplates.DEFAULT_TEM
   assert.strictEqual(detachedTextarea.value, '', 'Detached action textarea must not be updated');
   assert.strictEqual(currentTextarea.value, 'template', 'Template must target the current action textarea');
 
+  context.window.location.search = originalSearch;
+  documentStub.querySelector = originalQuerySelector;
+  documentStub.querySelectorAll = originalQuerySelectorAll;
+}
+
+{
+  const originalSearch = context.window.location.search;
+  const originalQuerySelector = documentStub.querySelector;
+  const originalQuerySelectorAll = documentStub.querySelectorAll;
+  let currentTextarea = documentStub.createElement('textarea');
+  let templateWrap = null;
+  let storageGets = 0;
+  let storedNoteTemplates = ['a|b', 'c'];
+  const textareaParent = {
+    insertBefore(node, textarea) {
+      templateWrap = node;
+      node.parentElement = this;
+      node.nextElementSibling = textarea;
+    }
+  };
+  currentTextarea.parentElement = textareaParent;
+  currentTextarea.offsetParent = {};
+  context.window.location.search = '?type=note';
+  documentStub.querySelector = (selector) => selector === '.bosun-action-templates' ? templateWrap : null;
+  documentStub.querySelectorAll = (selector) => selector === 'textarea' ? [currentTextarea] : [];
+
+  const templates = context.BosunHelperActionTemplates.createActionTemplates({
+    isActionPage: () => true,
+    getStorage: () => ({
+      get(_keys, callback) {
+        storageGets += 1;
+        callback({ bosunActionTemplatesV1: undefined, 'bosunActionTemplatesV1:note': storedNoteTemplates });
+      }
+    })
+  });
+  const normalized = templates.normalizeTemplates([
+    ...Array.from({ length: 55 }, (_, index) => `template-${index}`),
+    'template-0',
+    'x'.repeat(context.BosunHelperActionTemplates.MAX_TEMPLATE_LENGTH + 1)
+  ]);
+  assert.ok(normalized.length <= context.BosunHelperActionTemplates.MAX_TEMPLATES_PER_TYPE);
+  assert.ok(normalized.every((item) => item.length <= context.BosunHelperActionTemplates.MAX_TEMPLATE_LENGTH));
+  assert.ok(
+    normalized.reduce((total, item) => total + item.length, 0) <=
+      context.BosunHelperActionTemplates.MAX_TOTAL_TEMPLATE_TEXT_LENGTH
+  );
+  const totalLimited = templates.normalizeTemplates(
+    Array.from({ length: 30 }, (_, index) => `${String(index).padStart(3, '0')}${'x'.repeat(397)}`)
+  );
+  assert.ok(totalLimited.length < 30, 'Template normalization must enforce the total text limit');
+  assert.ok(
+    totalLimited.reduce((total, item) => total + item.length, 0) <=
+      context.BosunHelperActionTemplates.MAX_TOTAL_TEMPLATE_TEXT_LENGTH
+  );
+
+  templates.refresh();
+  const firstSignature = templateWrap.dataset.templateSignature;
+  templates.destroy();
+  storedNoteTemplates = ['a', 'b|c'];
+  templates.refresh();
+  const secondSignature = templateWrap.dataset.templateSignature;
+  assert.strictEqual(storageGets, 2, 'Action templates must reload storage after destroy/SPA return');
+  assert.notStrictEqual(firstSignature, secondSignature, 'Template signature must not collide on pipe characters');
+
+  templates.destroy();
   context.window.location.search = originalSearch;
   documentStub.querySelector = originalQuerySelector;
   documentStub.querySelectorAll = originalQuerySelectorAll;
@@ -647,6 +733,44 @@ function createBaselineHarness(options = {}) {
     }
   });
   return { api, events };
+}
+
+{
+  const originalSessionStorage = context.window.sessionStorage;
+  const writes = [];
+  context.window.sessionStorage = {
+    getItem() { return null; },
+    setItem(key, value) { writes.push({ key, value }); },
+    removeItem() {}
+  };
+  const { api } = createBaselineHarness();
+  const payload = { Groups: { NeedAck: [] }, ids: ['same-a', 'same-b'] };
+  api.process({ ...payload, ids: payload.ids.slice().reverse() });
+  api.process(payload);
+  assert.strictEqual(writes.length, 1, 'Unchanged NeedAck baseline must not be written twice');
+  context.window.sessionStorage = originalSessionStorage;
+}
+
+{
+  const originalSessionStorage = context.window.sessionStorage;
+  const maxIds = context.BosunSilenceHiderNeedAckBaseline.MAX_RESTORED_IDS;
+  const oversizedIds = Array.from({ length: maxIds + 1 }, (_, index) => `restored-${index}`);
+  const writes = [];
+  context.window.sessionStorage = {
+    getItem() {
+      return JSON.stringify({ ready: true, ids: oversizedIds, size: oversizedIds.length });
+    },
+    setItem(key, value) { writes.push({ key, value }); },
+    removeItem() {}
+  };
+  const { api, events } = createBaselineHarness();
+  api.restoreFromSession();
+  events.length = 0;
+  api.process({ Groups: { NeedAck: [] }, ids: oversizedIds });
+  assert.ok(!events.some((entry) => entry.event === 'chime'), 'Truncated restore must establish a fresh baseline silently');
+  const saved = JSON.parse(writes.at(-1).value);
+  assert.strictEqual(saved.ids.length, maxIds, 'Persisted baseline must respect the restore limit');
+  context.window.sessionStorage = originalSessionStorage;
 }
 
 {

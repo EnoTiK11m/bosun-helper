@@ -127,8 +127,11 @@
       if (!window?.localStorage) return true;
       try {
         const now = Date.now();
-        const current = JSON.parse(window.localStorage.getItem(crossTabStorageKey) || 'null');
-        if (current && now - Number(current.at || 0) < crossTabDedupMs) {
+        const rawCurrent = window.localStorage.getItem(crossTabStorageKey) || '';
+        if (rawCurrent.length > 1024) window.localStorage.removeItem(crossTabStorageKey);
+        const current = rawCurrent.length <= 1024 ? JSON.parse(rawCurrent || 'null') : null;
+        const currentAgeMs = now - Number(current?.at || 0);
+        if (current && currentAgeMs >= 0 && currentAgeMs < crossTabDedupMs) {
           reportDiagnostics('sound-cross-tab-suppressed', `kind=${kind}`);
           return false;
         }

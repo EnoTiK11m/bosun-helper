@@ -76,6 +76,8 @@ function createHarness(url) {
   const intervalCallbacks = [];
   let fetchCount = 0;
   let observerCount = 0;
+  let reloadCount = 0;
+  let storageGetCount = 0;
 
   const body = createElement('body');
   const head = createElement('head');
@@ -118,7 +120,7 @@ function createHarness(url) {
     origin: parsedUrl.origin,
     pathname: parsedUrl.pathname,
     search: parsedUrl.search,
-    reload() {}
+    reload() { reloadCount += 1; }
   };
 
   const window = {
@@ -168,6 +170,7 @@ function createHarness(url) {
     storage: {
       local: {
         get(keys, callback) {
+          storageGetCount += 1;
           if (keys === null) {
             callback({ ...storageData });
             return;
@@ -282,6 +285,8 @@ function createHarness(url) {
     timeoutCallbacks,
     intervalCallbacks,
     get fetchCount() { return fetchCount; },
+    get reloadCount() { return reloadCount; },
+    get storageGetCount() { return storageGetCount; },
     get observerCount() { return observerCount; }
   };
 }
@@ -316,6 +321,20 @@ async function testBosunInitialization() {
   assert.ok(harness.styleNodes.some((node) => node.id === 'bosun-silence-hider-styles'));
   assert.strictEqual(harness.intervalCallbacks.length, 1, 'Only the activity interval should be active');
 
+  const oneSecondFallback = harness.timeoutCallbacks.find((entry) => entry.delay === 1000);
+  const timeoutCountBeforeFallback = harness.timeoutCallbacks.length;
+  oneSecondFallback?.callback();
+  const queuedRefresh = harness.timeoutCallbacks
+    .slice(timeoutCountBeforeFallback)
+    .find((entry) => entry.delay === 100);
+  queuedRefresh?.callback();
+  await flushMicrotasks();
+  assert.strictEqual(
+    harness.fetchCount,
+    1,
+    'Successful initial snapshot must not be followed by an unconditional one-second fetch'
+  );
+
   const soundOptions = {
     alertFile: 'alert.wav',
     softFile: 'soft.wav',
@@ -327,6 +346,12 @@ async function testBosunInitialization() {
   const secondSound = harness.context.BosunSilenceHiderSound.createSound(soundOptions);
   assert.strictEqual(firstSound.claimCrossTabPlayback('alert'), true);
   assert.strictEqual(secondSound.claimCrossTabPlayback('alert'), false);
+  harness.window.localStorage.setItem(
+    soundOptions.crossTabStorageKey,
+    JSON.stringify({ at: Date.now() + 60_000, kind: 'alert', token: 'poisoned' })
+  );
+  const recoveredSound = harness.context.BosunSilenceHiderSound.createSound(soundOptions);
+  assert.strictEqual(recoveredSound.claimCrossTabPlayback('alert'), true, 'Future timestamp must not suppress sound');
 
   let autoRefreshEnabled = true;
   let activityAt = Date.now();
@@ -353,6 +378,15 @@ async function testBosunInitialization() {
   );
   activity.handleCountdownClick();
   assert.strictEqual(autoRefreshEnabled, true);
+  activityAt = Date.now() - 61_000;
+  activity.startAutoRefreshLoop(() => {});
+  const autoRefreshTick = harness.intervalCallbacks.at(-1).callback;
+  harness.document.visibilityState = 'hidden';
+  autoRefreshTick();
+  assert.strictEqual(harness.reloadCount, 0, 'Hidden dashboard must not auto-reload');
+  harness.document.visibilityState = 'visible';
+  autoRefreshTick();
+  assert.strictEqual(harness.reloadCount, 1, 'Visible idle dashboard must still auto-reload');
 }
 
 async function testGrafanaContentIsolation() {
@@ -371,6 +405,25 @@ async function testGrafanaContentIsolation() {
   assert.strictEqual(harness.observerCount, 0, 'Grafana page must not install Bosun observers');
   assert.strictEqual(harness.intervalCallbacks.length, 0, 'Grafana page must not start Bosun intervals');
   assert.strictEqual(harness.styleNodes.length, 0, 'Grafana page must not inject Bosun styles');
+}
+
+async function testGrafanaContentRequiresExactConfiguredPanel() {
+  const pathName = '/d/example/example';
+  const wrongPanel = createHarness(
+    `https://grafana.example.com${pathName}?orgId=1&editPanel=8&bosunHelperRequest=request-1`
+  );
+  runFiles(wrongPanel, ['config.js', 'grafana-content.js']);
+  wrongPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await flushMicrotasks();
+  assert.strictEqual(wrongPanel.storageGetCount, 0, 'Wrong Grafana panel must not read pending query storage');
+
+  const configuredPanel = createHarness(
+    `https://grafana.example.com${pathName}?orgId=1&editPanel=1&bosunHelperRequest=request-1`
+  );
+  runFiles(configuredPanel, ['config.js', 'grafana-content.js']);
+  configuredPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await flushMicrotasks();
+  assert.strictEqual(configuredPanel.storageGetCount, 1, 'Configured Grafana panel must load its pending query');
 }
 
 async function testGrafanaBridgeAuthenticationAndSingleton() {
@@ -743,6 +796,7 @@ async function testActionTemplatesFollowTextareaRemount() {
 (async () => {
   await testBosunInitialization();
   await testGrafanaContentIsolation();
+  await testGrafanaContentRequiresExactConfiguredPanel();
   await testGrafanaBridgeAuthenticationAndSingleton();
   await testActionTemplatesFollowTextareaRemount();
   console.log('Integration test passed');

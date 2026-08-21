@@ -2,8 +2,10 @@
   'use strict';
 
   // Temporary live-Bosun diagnostics. Set to false to disable all logs below.
-  const SINGLE_ALERT_AGE_DEBUG = true;
+  const SINGLE_ALERT_AGE_DEBUG = false;
   const SINGLE_ALERT_AGE_DEBUG_MAX_PROBLEMS = 20;
+  const MISSING_CANDIDATE_GRACE_SNAPSHOTS = 2;
+  const MISSING_CANDIDATE_GRACE_MS = 15000;
   const DEBUG_PREFIX = '[BosunHelper][single-alert-age-problem]';
 
   function createSingleAlertAge(options = {}) {
@@ -211,12 +213,20 @@
       const identity = getPanelIdentity(type, panel);
       const strongDomIdentity = hasStrongDomIdentity(panel);
       const currentStrongKey = strongDomIdentity ? buildGroupKeyFromDom(panel) : null;
+      const snapshotDistance = snapshotId - Number(cached?.snapshotId);
+      const elapsedSinceMatch = Number(now()) - Number(cached?.matchedAt);
       if (
         !cached ||
         cached.section !== type ||
         !identity ||
         cached.identity !== identity ||
         !Number.isFinite(cached.agoTimestamp) ||
+        !Number.isInteger(snapshotDistance) ||
+        snapshotDistance < 0 ||
+        snapshotDistance > MISSING_CANDIDATE_GRACE_SNAPSHOTS ||
+        !Number.isFinite(elapsedSinceMatch) ||
+        elapsedSinceMatch < 0 ||
+        elapsedSinceMatch > MISSING_CANDIDATE_GRACE_MS ||
         (strongDomIdentity && (
           !currentStrongKey ||
           (cached.snapshotGroupKey !== currentStrongKey && cached.strongDomKey !== currentStrongKey)
@@ -289,7 +299,8 @@
               agoTimestamp: record.agoTimestamp,
               snapshotGroupKey: record.groupKey || null,
               strongDomKey: hasStrongDomIdentity(panel) ? buildGroupKeyFromDom(panel) : null,
-              snapshotId
+              snapshotId,
+              matchedAt: Number(now())
             });
           } else {
             const preserved = getPreservedMapping(type, panel, { result, reason }, domChildCount);
@@ -501,6 +512,8 @@
   globalThis.BosunHelperSingleAlertAge = {
     SINGLE_ALERT_AGE_DEBUG,
     SINGLE_ALERT_AGE_DEBUG_MAX_PROBLEMS,
+    MISSING_CANDIDATE_GRACE_SNAPSHOTS,
+    MISSING_CANDIDATE_GRACE_MS,
     createSingleAlertAge
   };
 })();

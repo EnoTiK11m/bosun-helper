@@ -1,6 +1,9 @@
 (() => {
   'use strict';
 
+  const MAX_RESTORED_IDS = 5000;
+  const MAX_SESSION_RAW_LENGTH = 2 * 1024 * 1024;
+
   function createNeedAckBaseline(options) {
     const {
       sessionKey,
@@ -17,16 +20,48 @@
     let refreshAttempts = 0;
     let missingCount = 0;
     let emptySnapshotCount = 0;
+    let persistedState = null;
+
+    function collectPersistedIds() {
+      const ids = [];
+      for (const id of previousIds) {
+        if (typeof id !== 'string' || !id || id.length > 500) continue;
+        ids.push(id);
+        if (ids.length >= MAX_RESTORED_IDS) break;
+      }
+      return ids;
+    }
+
+    function samePersistedState(ids) {
+      if (
+        !persistedState ||
+        persistedState.ready !== ready ||
+        persistedState.size !== previousSnapshotSize ||
+        persistedState.ids.size !== ids.length
+      ) return false;
+      return ids.every((id) => persistedState.ids.has(id));
+    }
+
+    function rememberPersistedState(ids) {
+      persistedState = {
+        ready,
+        size: previousSnapshotSize,
+        ids: new Set(ids)
+      };
+    }
 
     function persistToSession() {
       if (!window?.sessionStorage) return;
       try {
+        const ids = collectPersistedIds();
+        if (samePersistedState(ids)) return;
         const payload = {
           ready,
-          ids: Array.from(previousIds),
+          ids,
           size: previousSnapshotSize
         };
         window.sessionStorage.setItem(sessionKey, JSON.stringify(payload));
+        rememberPersistedState(ids);
       } catch (err) {
         console.warn('[Bosun plugin] Failed to persist NeedAck baseline to sessionStorage:', err);
         reportDiagnostics('baseline-session-save-failed', err?.message || 'unknown-error');
@@ -38,13 +73,30 @@
       try {
         const raw = window.sessionStorage.getItem(sessionKey);
         if (!raw) return;
+        if (raw.length > MAX_SESSION_RAW_LENGTH) {
+          window.sessionStorage.removeItem(sessionKey);
+          return;
+        }
         const parsed = JSON.parse(raw);
         if (!parsed || parsed.ready !== true || !Array.isArray(parsed.ids)) return;
-        previousIds = new Set(parsed.ids.filter((id) => typeof id === 'string' && id));
-        ready = true;
-        previousSnapshotSize = Number.isFinite(Number(parsed.size))
-          ? Math.max(0, Math.round(Number(parsed.size)))
+        const ids = [];
+        const seen = new Set();
+        for (const rawId of parsed.ids) {
+          const id = typeof rawId === 'string' ? rawId.trim() : '';
+          if (!id || id.length > 500 || seen.has(id)) continue;
+          seen.add(id);
+          ids.push(id);
+          if (ids.length >= MAX_RESTORED_IDS) break;
+        }
+        const storedSize = Number(parsed.size);
+        const restoreTruncated = parsed.ids.length > MAX_RESTORED_IDS ||
+          (Number.isFinite(storedSize) && storedSize > ids.length);
+        previousIds = restoreTruncated ? new Set() : new Set(ids);
+        ready = !restoreTruncated;
+        previousSnapshotSize = ready && Number.isFinite(storedSize)
+          ? Math.max(0, Math.round(storedSize))
           : previousIds.size;
+        if (ready) rememberPersistedState(ids);
       } catch (err) {
         console.warn('[Bosun plugin] Failed to restore NeedAck baseline from sessionStorage:', err);
         reportDiagnostics('baseline-session-restore-failed', err?.message || 'unknown-error');
@@ -55,6 +107,7 @@
       if (!window?.sessionStorage) return;
       try {
         window.sessionStorage.removeItem(sessionKey);
+        persistedState = null;
       } catch (err) {
         console.warn('[Bosun plugin] Failed to clear NeedAck baseline from sessionStorage:', err);
         reportDiagnostics('baseline-session-clear-failed', err?.message || 'unknown-error');
@@ -183,6 +236,7 @@
   }
 
   globalThis.BosunSilenceHiderNeedAckBaseline = {
+    MAX_RESTORED_IDS,
     createNeedAckBaseline
   };
 })();

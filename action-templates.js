@@ -3,6 +3,9 @@
 
   const STORAGE_KEY = 'bosunActionTemplatesV1';
   const ACTION_TYPES = Object.freeze(['note', 'ack', 'close']);
+  const MAX_TEMPLATES_PER_TYPE = 50;
+  const MAX_TEMPLATE_LENGTH = 500;
+  const MAX_TOTAL_TEMPLATE_TEXT_LENGTH = 10000;
   const DEFAULT_TEMPLATES = Object.freeze({
     note: Object.freeze(['пройдет', 'пройдет через час', 'смотрю', 'в работе', 'норма', 'моргнуло', 'сдано в ']),
     ack: Object.freeze(['пройдет', 'пройдет через час', 'норма', 'моргнуло', 'сдано в ']),
@@ -35,6 +38,7 @@
     let storageChangeListener = null;
     let storageChangesApi = null;
     let storageWritePending = false;
+    let storageLoadGeneration = 0;
 
     function getActionType() {
       try {
@@ -52,12 +56,22 @@
       if (!Array.isArray(value)) return null;
       const result = [];
       const seen = new Set();
+      let totalLength = 0;
+      let scannedItems = 0;
       for (const item of value) {
+        scannedItems += 1;
+        if (scannedItems > MAX_TEMPLATES_PER_TYPE * 4 || result.length >= MAX_TEMPLATES_PER_TYPE) break;
         if (typeof item !== 'string') continue;
         const text = item.trim();
-        if (!text || seen.has(text)) continue;
+        if (
+          !text ||
+          text.length > MAX_TEMPLATE_LENGTH ||
+          seen.has(text) ||
+          totalLength + text.length > MAX_TOTAL_TEMPLATE_TEXT_LENGTH
+        ) continue;
         seen.add(text);
         result.push(text);
+        totalLength += text.length;
       }
       return result;
     }
@@ -105,8 +119,11 @@
           changed = true;
         }
         if (!changed) return;
+        if (storageWritePending) return;
+        const focusState = captureEditorFocus();
         renderVersion += 1;
         refresh();
+        restoreEditorFocus(focusState);
       };
       onChanged.addListener(storageChangeListener);
     }
@@ -115,15 +132,18 @@
       installStorageChangeTracking();
       if (storageLoadStarted) return;
       storageLoadStarted = true;
+      storageLoaded = false;
+      const loadGeneration = ++storageLoadGeneration;
       const storage = getStorage();
       if (!storage?.get) {
-        storageLoaded = true;
+        if (loadGeneration === storageLoadGeneration) storageLoaded = true;
         return;
       }
 
       try {
         const keys = ACTION_TYPES.map((type) => `${storageKey}:${type}`);
         storage.get(keys, (result) => {
+          if (loadGeneration !== storageLoadGeneration) return;
           const error = getLastError();
           if (error) {
             warnStorage('Failed to load action templates; using defaults.', error);
@@ -141,6 +161,7 @@
           refresh();
         });
       } catch (error) {
+        if (loadGeneration !== storageLoadGeneration) return;
         storageLoaded = true;
         warnStorage('Failed to load action templates; using defaults.', error);
       }
@@ -155,7 +176,9 @@
         return;
       }
       const key = `${storageKey}:${type}`;
+      const writeGeneration = storageLoadGeneration;
       const finishWithError = (error) => {
+        if (writeGeneration !== storageLoadGeneration) return;
         storageWritePending = false;
         warnStorage('Failed to save action templates.', error);
         setStorageStatus('Не удалось сохранить шаблоны', true);
@@ -164,6 +187,7 @@
       };
       try {
         const callback = () => {
+          if (writeGeneration !== storageLoadGeneration) return;
           const error = getLastError();
           if (error) {
             finishWithError(error);
@@ -251,9 +275,40 @@
       return button;
     }
 
-    function rerenderEditor() {
+    function captureEditorFocus() {
+      const editor = getEditorNode();
+      const active = document.activeElement;
+      if (!editor || !active || !editor.contains?.(active)) return null;
+      const focusable = Array.from(editor.querySelectorAll('input, button'));
+      const index = focusable.indexOf(active);
+      if (index < 0) return null;
+      return {
+        index,
+        selectionStart: Number.isInteger(active.selectionStart) ? active.selectionStart : null,
+        selectionEnd: Number.isInteger(active.selectionEnd) ? active.selectionEnd : null
+      };
+    }
+
+    function restoreEditorFocus(state) {
+      if (!state) return;
+      const editor = getEditorNode();
+      const focusable = Array.from(editor?.querySelectorAll?.('input, button') || []);
+      const target = focusable[Math.max(0, Math.min(state.index, focusable.length - 1))];
+      target?.focus?.();
+      if (state.selectionStart !== null && typeof target?.setSelectionRange === 'function') {
+        const length = String(target.value || '').length;
+        target.setSelectionRange(
+          Math.min(state.selectionStart, length),
+          Math.min(state.selectionEnd, length)
+        );
+      }
+    }
+
+    function rerenderEditor(options = {}) {
+      const focusState = options.preserveFocus === true ? captureEditorFocus() : null;
       renderVersion += 1;
       refresh();
+      restoreEditorFocus(focusState);
     }
 
     function getEditorNode() {
@@ -270,6 +325,19 @@
 
     function focusSettingsButton() {
       document.querySelector(`.${wrapClass} .bosun-action-templates-settings`)?.focus?.();
+    }
+
+    function setEditorBusy(isBusy) {
+      const editor = getEditorNode();
+      if (!editor) return;
+      editor.setAttribute('aria-busy', String(isBusy));
+      editor.querySelectorAll?.('.bosun-action-template-input').forEach((input) => {
+        input.readOnly = isBusy;
+        input.setAttribute('aria-disabled', String(isBusy));
+      });
+      editor.querySelectorAll?.('button').forEach((button) => {
+        button.setAttribute('aria-disabled', String(isBusy));
+      });
     }
 
     function openEditor(type) {
@@ -293,9 +361,22 @@
     function saveEditor() {
       if (!isSupportedType(editorType) || storageWritePending) return;
       const type = editorType;
+      const nonEmptyDrafts = draftTemplates.map((item) => String(item || '').trim()).filter(Boolean);
+      const duplicateCount = nonEmptyDrafts.length - new Set(nonEmptyDrafts).size;
+      const totalLength = nonEmptyDrafts.reduce((total, item) => total + item.length, 0);
+      if (duplicateCount > 0 || totalLength > MAX_TOTAL_TEMPLATE_TEXT_LENGTH) {
+        setStorageStatus(
+          duplicateCount > 0
+            ? 'Удалите одинаковые шаблоны перед сохранением'
+            : `Общий текст шаблонов не должен превышать ${MAX_TOTAL_TEMPLATE_TEXT_LENGTH} символов`,
+          true
+        );
+        rerenderEditor({ preserveFocus: true });
+        return;
+      }
       const templates = normalizeTemplates(draftTemplates) || [];
       storageWritePending = true;
-      rerenderEditor();
+      setEditorBusy(true);
       persistTemplates(type, templates, 'Шаблоны сохранены', () => {
         storedTemplates[type] = templates;
       });
@@ -305,7 +386,7 @@
       if (!isSupportedType(editorType) || storageWritePending) return;
       const type = editorType;
       storageWritePending = true;
-      rerenderEditor();
+      setEditorBusy(true);
       persistTemplates(type, null, 'Шаблоны сброшены', () => {
         delete storedTemplates[type];
       });
@@ -317,6 +398,13 @@
       editor.id = 'bosun-action-templates-editor';
       editor.setAttribute('role', 'group');
       editor.setAttribute('aria-label', 'Редактор частых комментариев');
+      editor.setAttribute('aria-busy', String(storageWritePending));
+
+      const hint = document.createElement('div');
+      hint.className = 'bosun-action-template-limit-hint';
+      hint.id = 'bosun-action-template-limit-hint';
+      hint.textContent = `До ${MAX_TEMPLATES_PER_TYPE} шаблонов, до ${MAX_TEMPLATE_LENGTH} символов каждый, без дубликатов, общий объём до ${MAX_TOTAL_TEMPLATE_TEXT_LENGTH} символов`;
+      editor.appendChild(hint);
 
       const rows = document.createElement('div');
       rows.className = 'bosun-action-template-rows';
@@ -327,14 +415,22 @@
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'bosun-action-template-input';
+        input.maxLength = MAX_TEMPLATE_LENGTH;
         input.value = template;
+        input.readOnly = storageWritePending;
         input.setAttribute('aria-label', `Текст шаблона ${index + 1}`);
-        input.addEventListener('input', () => { draftTemplates[index] = input.value; });
+        input.setAttribute('aria-describedby', hint.id);
+        input.setAttribute('aria-disabled', String(storageWritePending));
+        input.addEventListener('input', () => {
+          if (storageWritePending) return;
+          draftTemplates[index] = input.value;
+        });
         row.appendChild(input);
 
         const controls = document.createElement('div');
         controls.className = 'bosun-action-template-row-actions';
         const up = createButton('↑', 'bosun-action-template-icon-btn', `Переместить шаблон ${index + 1} выше`, () => {
+          if (storageWritePending) return;
           if (index < 1) return;
           [draftTemplates[index - 1], draftTemplates[index]] = [draftTemplates[index], draftTemplates[index - 1]];
           rerenderEditor();
@@ -344,6 +440,7 @@
         controls.appendChild(up);
 
         const down = createButton('↓', 'bosun-action-template-icon-btn', `Переместить шаблон ${index + 1} ниже`, () => {
+          if (storageWritePending) return;
           if (index >= draftTemplates.length - 1) return;
           [draftTemplates[index], draftTemplates[index + 1]] = [draftTemplates[index + 1], draftTemplates[index]];
           rerenderEditor();
@@ -352,6 +449,7 @@
         down.disabled = index === draftTemplates.length - 1;
         controls.appendChild(down);
         controls.appendChild(createButton('×', 'bosun-action-template-icon-btn is-danger', `Удалить шаблон ${index + 1}`, () => {
+          if (storageWritePending) return;
           draftTemplates.splice(index, 1);
           rerenderEditor();
           focusEditorInput(index);
@@ -363,18 +461,27 @@
 
       const actions = document.createElement('div');
       actions.className = 'bosun-action-template-editor-actions';
-      actions.appendChild(createButton('+ Добавить', 'bosun-action-template-editor-btn', '', () => {
+      const addButton = createButton('+ Добавить', 'bosun-action-template-editor-btn', '', () => {
+        if (storageWritePending) return;
+        if (draftTemplates.length >= MAX_TEMPLATES_PER_TYPE) return;
         draftTemplates.push('');
         rerenderEditor();
         focusEditorInput(draftTemplates.length - 1);
-      }));
+      });
+      addButton.disabled = storageWritePending || draftTemplates.length >= MAX_TEMPLATES_PER_TYPE;
+      if (draftTemplates.length >= MAX_TEMPLATES_PER_TYPE) {
+        addButton.title = `Достигнут лимит: ${MAX_TEMPLATES_PER_TYPE} шаблонов`;
+      }
+      actions.appendChild(addButton);
       const saveButton = createButton('Сохранить', 'bosun-action-template-editor-btn is-primary', '', saveEditor);
       saveButton.disabled = storageWritePending;
       actions.appendChild(saveButton);
       const resetButton = createButton('Сбросить', 'bosun-action-template-editor-btn', 'Сбросить шаблоны этого типа', resetEditor);
       resetButton.disabled = storageWritePending;
       actions.appendChild(resetButton);
-      actions.appendChild(createButton('Отмена', 'bosun-action-template-editor-btn', '', closeEditor));
+      actions.appendChild(createButton('Отмена', 'bosun-action-template-editor-btn', '', () => {
+        if (!storageWritePending) closeEditor();
+      }));
       editor.appendChild(actions);
       parent.appendChild(editor);
     }
@@ -404,7 +511,12 @@
       if (!textarea || !textarea.parentElement) return;
 
       let wrap = existing;
-      const signature = `${type}::${templates.join('|')}::${editorOpen ? renderVersion : 'closed'}::${storageLoaded}`;
+      const signature = JSON.stringify({
+        type,
+        templates,
+        editor: editorOpen ? renderVersion : 'closed',
+        storageLoaded
+      });
       const alreadyBuilt = wrap
         && wrap.dataset.templateSignature === signature
         && wrap.parentElement === textarea.parentElement
@@ -429,6 +541,7 @@
       title.textContent = 'Частые комментарии';
       titleRow.appendChild(title);
       const settingsButton = createButton('⚙', 'bosun-action-templates-settings', 'Настроить частые комментарии', () => {
+        if (storageWritePending) return;
         if (editorOpen) closeEditor();
         else openEditor(type);
       });
@@ -470,6 +583,9 @@
       editorType = '';
       draftTemplates = [];
       storageWritePending = false;
+      storageLoadGeneration += 1;
+      storageLoadStarted = false;
+      storageLoaded = false;
     }
 
     return {
@@ -483,6 +599,9 @@
   globalThis.BosunHelperActionTemplates = {
     STORAGE_KEY,
     DEFAULT_TEMPLATES,
+    MAX_TEMPLATES_PER_TYPE,
+    MAX_TEMPLATE_LENGTH,
+    MAX_TOTAL_TEMPLATE_TEXT_LENGTH,
     createActionTemplates
   };
 })();
