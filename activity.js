@@ -26,6 +26,14 @@
     let autoRefreshReEnableTimer = null;
     let lastHighFrequencyActivityAt = 0;
     let autoRefreshUpdateCountdown = null;
+    let activityTrackingInstalled = false;
+    let lifecycleGeneration = 0;
+    const activityListeners = [];
+
+    function addActivityListener(target, eventName, handler, options) {
+      target.addEventListener(eventName, handler, options);
+      activityListeners.push([target, eventName, handler, options]);
+    }
 
     function markUserActivity() {
       setLastUserActivityTs(Date.now());
@@ -101,7 +109,9 @@
       if (!Number.isFinite(autoRefreshForceReenableMs) || autoRefreshForceReenableMs <= 0) {
         return;
       }
+      const generation = lifecycleGeneration;
       autoRefreshReEnableTimer = setTimeout(() => {
+        if (generation !== lifecycleGeneration) return;
         autoRefreshReEnableTimer = null;
         if (getAutoRefreshEnabled()) return;
 
@@ -133,7 +143,11 @@
     }
 
     function installUserActivityTracking() {
+      if (activityTrackingInstalled) return;
+      activityTrackingInstalled = true;
+      const generation = lifecycleGeneration;
       const markHighFrequencyActivity = () => {
+        if (generation !== lifecycleGeneration) return;
         const now = Date.now();
         if (now - lastHighFrequencyActivityAt < 500) return;
         lastHighFrequencyActivityAt = now;
@@ -141,16 +155,17 @@
       };
 
       [
-        ['pointerdown', markUserActivity],
-        ['keydown', markUserActivity],
-        ['touchstart', markUserActivity],
+        ['pointerdown', () => { if (generation === lifecycleGeneration) markUserActivity(); }],
+        ['keydown', () => { if (generation === lifecycleGeneration) markUserActivity(); }],
+        ['touchstart', () => { if (generation === lifecycleGeneration) markUserActivity(); }],
         ['wheel', markHighFrequencyActivity],
         ['scroll', markHighFrequencyActivity]
       ].forEach(([eventName, handler]) => {
-        window.addEventListener(eventName, handler, { passive: true, capture: true });
+        addActivityListener(window, eventName, handler, { passive: true, capture: true });
       });
 
-      document.addEventListener('visibilitychange', () => {
+      const handleVisibilityChange = () => {
+        if (generation !== lifecycleGeneration) return;
         markUserActivity();
         if (document.visibilityState === 'hidden') {
           if (autoRefreshTimer) clearInterval(autoRefreshTimer);
@@ -158,7 +173,8 @@
         } else if (autoRefreshUpdateCountdown) {
           startAutoRefreshLoop(autoRefreshUpdateCountdown);
         }
-      }, { passive: true });
+      };
+      addActivityListener(document, 'visibilitychange', handleVisibilityChange, { passive: true });
     }
 
     function startAutoRefreshLoop(updateCountdown) {
@@ -166,7 +182,9 @@
       if (autoRefreshTimer) return;
       if (document.visibilityState === 'hidden') return;
 
+      const generation = lifecycleGeneration;
       autoRefreshTimer = setInterval(() => {
+        if (generation !== lifecycleGeneration) return;
         const currentUrl = window.location.href;
         if (currentUrl !== getLastKnownUrl()) {
           setLastKnownUrl(currentUrl);
@@ -179,6 +197,28 @@
       }, 1000);
     }
 
+    function stopAutoRefreshLoop() {
+      if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+      clearAutoRefreshReEnableTimer();
+    }
+
+    function uninstallUserActivityTracking() {
+      if (!activityTrackingInstalled) return;
+      activityTrackingInstalled = false;
+      for (const [target, eventName, handler, listenerOptions] of activityListeners.splice(0)) {
+        target.removeEventListener(eventName, handler, listenerOptions);
+      }
+      lastHighFrequencyActivityAt = 0;
+    }
+
+    function destroy() {
+      lifecycleGeneration += 1;
+      stopAutoRefreshLoop();
+      uninstallUserActivityTracking();
+      autoRefreshUpdateCountdown = null;
+    }
+
     return {
       markUserActivity,
       getAutoRefreshRemainingSeconds,
@@ -188,7 +228,10 @@
       handleAutoRefreshToggleChange,
       handleCountdownClick,
       installUserActivityTracking,
-      startAutoRefreshLoop
+      uninstallUserActivityTracking,
+      startAutoRefreshLoop,
+      stopAutoRefreshLoop,
+      destroy
     };
   }
 

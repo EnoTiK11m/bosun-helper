@@ -114,6 +114,7 @@
   const AUTO_REFRESH_MIN_IDLE_SECONDS = 10;
   const AUTO_REFRESH_MAX_IDLE_SECONDS = 3600;
   const AUTO_REFRESH_FORCE_REENABLE_MS = 0;
+  const CHECKBOX_IMPROVEMENTS_DISABLED_BODY_CLASS = 'bosun-checkbox-improvements-disabled';
 
   let showSilenced = false;
   let refreshTimer = null;
@@ -141,6 +142,32 @@
   let acknowledgedCollapseEnabled = false;
   let soundAlertsEnabled = true;
   let diagnosticsEnabled = false;
+  const settingsApi = globalThis.BosunHelperSettings || null;
+  const settingsStore = settingsApi?.createSettingsStore?.({
+    storage: globalThis.chrome?.storage?.local || null,
+    storageChanges: globalThis.chrome?.storage?.onChanged || null,
+    getLastError: () => globalThis.chrome?.runtime?.lastError || null,
+    warn: (message, error) => console.warn(`[Bosun plugin] ${message}`, error || '')
+  }) || null;
+  let settingsSnapshot = settingsApi?.DEFAULTS
+    ? JSON.parse(JSON.stringify(settingsApi.DEFAULTS))
+    : {
+        schemaVersion: 1,
+        features: {
+          singleAlertAge: true,
+          checkboxImprovements: true,
+          copyButtons: true,
+          lastActionEnhancements: true,
+          silencedFilter: true,
+          noCommentFilter: true,
+          acknowledgedCollapse: true,
+          soundNotifications: true,
+          visualNewAlertNotifications: true,
+          autoRefresh: true,
+          actionTemplates: true,
+          grafanaIntegration: true
+        }
+      };
   let toolbarStatusSource = '';
   let toolbarStatusLevel = '';
   let toolbarStatusMessage = '';
@@ -149,6 +176,9 @@
   let alertDataIndexReady = false;
   let newAlertNoticeCounts = { warning: 0, critical: 0, unknown: 0 };
   let newAlertTrackerMutationAllowed = true;
+  let latestAlertsPayload = null;
+  let visualTrackerLifecycleGeneration = 0;
+  let ruleGraphLifecycleGeneration = 0;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
   // child maps
@@ -169,10 +199,16 @@
   const groupCountBySubject = new Map();
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
+  const ambiguousGrafanaIds = new Set();
+  const ambiguousGrafanaKeys = new Set();
   const expectedExtensionClassStates = new WeakMap();
   const expectedExtensionClassNodes = new Set();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
   const promqlApi = globalThis.BosunHelperPromQL || null;
+  const ruleGraphApi = globalThis.BosunHelperRuleGraph || null;
+  const ruleGraphResolver = ruleGraphApi?.createRuleGraphResolver?.({
+    onInvalidate: () => handleRuleGraphInvalidation()
+  }) || null;
   const diagnosticsApi = globalThis.BosunSilenceHiderDiagnostics?.createDiagnostics?.({
     modalId: DIAGNOSTICS_MODAL_ID,
     logListId: DIAGNOSTICS_LOG_LIST_ID,
@@ -183,7 +219,7 @@
   const soundApi = globalThis.BosunSilenceHiderSound?.createSound?.({
     alertFile: SOUND_FILE_ALERT,
     softFile: SOUND_FILE_SOFT,
-    getEnabled: () => soundAlertsEnabled,
+    getEnabled: () => isFeatureEnabled('soundNotifications') && soundAlertsEnabled,
     reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
     crossTabStorageKey: 'bosunNeedAckSoundClaimV1'
   }) || null;
@@ -219,17 +255,19 @@
     hasNoteFromActions: (actions) => alertsDataApi?.hasNoteFromActions?.(actions) === true,
     onChange: ({ counts }) => {
       newAlertNoticeCounts = counts;
-      updateNewAlertNotice();
+      if (isFeatureEnabled('visualNewAlertNotifications')) updateNewAlertNotice();
     },
     reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details)
   }) || null;
   const needAckBaselineApi = globalThis.BosunSilenceHiderNeedAckBaseline?.createNeedAckBaseline?.({
     sessionKey: NEED_ACK_SOUND_BASELINE_SESSION_KEY,
-    isSoundEnabled: () => soundAlertsEnabled,
+    isSoundEnabled: () => isFeatureEnabled('soundNotifications') && soundAlertsEnabled,
     reportDiagnostics: (eventName, details = '') => reportDiagnostics(eventName, details),
     playNeedAckChime: (kind) => soundApi?.playNeedAckChime?.(kind),
     onNewAlerts: ({ newIds, idToSeverity }) => {
-      if (newAlertTrackerMutationAllowed) newAlertTrackerApi?.add?.(newIds, idToSeverity);
+      if (newAlertTrackerMutationAllowed && isFeatureEnabled('visualNewAlertNotifications')) {
+        newAlertTrackerApi?.add?.(newIds, idToSeverity);
+      }
     },
     collectCurrentIdsAndSeverity: (payload) =>
       needAckSeverityApi?.collectCurrentIdsAndSeverity?.(payload) ?? {
@@ -299,7 +337,8 @@
     }
   }) || null;
   const actionTemplatesApi = globalThis.BosunHelperActionTemplates?.createActionTemplates?.({
-    isActionPage: () => isActionPage()
+    isActionPage: () => isActionPage(),
+    settingsStore
   }) || null;
   const grafanaHandoffApi = globalThis.BosunHelperGrafanaHandoff?.createGrafanaHandoff?.({
     config: extensionConfig,
@@ -313,7 +352,7 @@
       isDashboardHome: () => window.location.pathname === '/',
       isActionPage: () => window.location.pathname === '/action'
     },
-    getAutoRefreshEnabled: () => autoRefreshEnabled,
+    getAutoRefreshEnabled: () => isFeatureEnabled('autoRefresh') && autoRefreshEnabled,
     setAutoRefreshEnabled: (value) => { autoRefreshEnabled = Boolean(value); },
     getAutoRefreshIdleSeconds: () => autoRefreshIdleSeconds,
     getLastUserActivityTs: () => lastUserActivityTs,
@@ -358,7 +397,12 @@
     return pageUtils?.isDashboardHome?.() ?? window.location.pathname === '/';
   }
 
+  function isFeatureEnabled(name) {
+    return settingsSnapshot?.features?.[name] !== false;
+  }
+
   function applyActionPageTweaks() {
+    if (!isFeatureEnabled('checkboxImprovements')) return;
     if (pageUtils?.applyActionPageTweaks) {
       pageUtils.applyActionPageTweaks();
       return;
@@ -391,7 +435,8 @@
       diagnosticsToggleId: DIAGNOSTICS_TOGGLE_ID,
       diagnosticsOpenButtonId: DIAGNOSTICS_OPEN_BUTTON_ID,
       diagnosticsModalId: DIAGNOSTICS_MODAL_ID,
-      diagnosticsLogListId: DIAGNOSTICS_LOG_LIST_ID
+      diagnosticsLogListId: DIAGNOSTICS_LOG_LIST_ID,
+      checkboxImprovementsDisabledClass: CHECKBOX_IMPROVEMENTS_DISABLED_BODY_CLASS
     });
   }
 
@@ -556,7 +601,8 @@
   }
 
   function applyAlertTagsToPromQuery(query, rawTags, alertKey = '') {
-    return promqlApi?.applyAlertTagsToPromQuery?.(query, rawTags, alertKey) || query;
+    const result = promqlApi?.applyAlertTagsToPromQuery?.(query, rawTags, alertKey);
+    return typeof result === 'string' ? result : '';
   }
 
   function getGrafanaQueryForPanel(panel) {
@@ -564,16 +610,19 @@
     if (!heading) return '';
 
     const panelId = getPanelIdFromHeading(heading);
+    if (panelId && ambiguousGrafanaIds.has(panelId)) return '';
     if (panelId && grafanaQueryById.has(panelId)) {
       return grafanaQueryById.get(panelId) || '';
     }
 
     const groupPanel = findParentGroupPanelForChild(panel);
     const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
+    if (childKey && ambiguousGrafanaKeys.has(childKey)) return '';
     return childKey ? (grafanaQueryByKey.get(childKey) || '') : '';
   }
 
   function ensureGrafanaQueryButton(panel) {
+    if (!isFeatureEnabled('grafanaIntegration')) return;
     if (!grafanaHandoffApi?.openQuery) return;
     if (!getChildSubjectNode(panel)) return;
 
@@ -594,6 +643,7 @@
       event.preventDefault();
       event.stopPropagation();
       const currentQuery = getGrafanaQueryForPanel(panel);
+      if (!currentQuery) return;
       await grafanaHandoffApi.openQuery(currentQuery, btn);
     });
 
@@ -606,6 +656,7 @@
   }
 
   function ensureCopyButton(panel) {
+    if (!isFeatureEnabled('copyButtons')) return;
     const subjectNode = getGroupSubjectNode(panel) || getChildSubjectNode(panel);
     if (!subjectNode) return;
 
@@ -631,6 +682,7 @@
   }
 
   function ensureCopyAllButton(panel) {
+    if (!isFeatureEnabled('copyButtons')) return;
     if (!isGroupPanel(panel)) return;
 
     const title = getPanelTitle(panel);
@@ -775,6 +827,7 @@
   }
 
   function ensureLastActionCopyButtons() {
+    if (!isFeatureEnabled('lastActionEnhancements')) return;
     disableLastActionTimeLinks();
     document
       .querySelectorAll(`.${COPY_LAST_ACTION_BUTTON_CLASS}[data-bosun-message-copy]`)
@@ -819,10 +872,10 @@
   }
 
   function ensureCopyButtons() {
+    if (!isFeatureEnabled('copyButtons')) return;
     getAcknowledgedPanels().forEach((panel) => {
       ensureCopyButton(panel);
       ensureCopyAllButton(panel);
-      ensureGrafanaQueryButton(panel);
     });
 
     getGroupPanels().forEach((panel) => {
@@ -832,10 +885,22 @@
 
     getChildAlertPanels().forEach((panel) => {
       ensureCopyButton(panel);
-      ensureGrafanaQueryButton(panel);
     });
+  }
 
-    ensureLastActionCopyButtons();
+  function ensureGrafanaQueryButtons() {
+    document.querySelectorAll(`.${GRAFANA_QUERY_BUTTON_CLASS}`).forEach((button) => {
+      const panel = button.closest?.('.panel');
+      if (
+        !isFeatureEnabled('grafanaIntegration') ||
+        !panel ||
+        !getGrafanaQueryForPanel(panel)
+      ) button.remove();
+    });
+    if (isFeatureEnabled('grafanaIntegration')) {
+      getAcknowledgedPanels().forEach(ensureGrafanaQueryButton);
+      getChildAlertPanels().forEach(ensureGrafanaQueryButton);
+    }
   }
 
   function getPanelHeading(panel) {
@@ -999,6 +1064,7 @@
   }
 
   function refreshSilencedBadges() {
+    if (!isFeatureEnabled('silencedFilter')) return;
     const roots = [getNeedsAckRoot(), getAcknowledgedRoot()].filter(Boolean);
     const panels = uniqueNodes(
       roots.flatMap((root) => Array.from(root.querySelectorAll('.panel')))
@@ -1045,6 +1111,9 @@
 
   function clearAlertDerivedState() {
     alertsPayloadApplyVersion += 1;
+    ruleGraphLifecycleGeneration += 1;
+    ruleGraphResolver?.stop?.();
+    latestAlertsPayload = null;
     try { primedAlertsPayload?.controller?.abort?.(); } catch (_) {}
     primedAlertsPayload = null;
     if (alertMarkerCachePersistTimer) {
@@ -1065,16 +1134,18 @@
     const skipSingleAlertAge = options.skipSingleAlertAge === true;
 
     ensureToggleExists();
-    applyVisibility();
-    applyAcknowledgedCollapse();
-    applyUserCommentFilter();
+    if (isFeatureEnabled('silencedFilter')) applyVisibility();
+    if (isFeatureEnabled('acknowledgedCollapse')) applyAcknowledgedCollapse();
+    if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();
     ensureCopyButtons();
-    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
+    ensureGrafanaQueryButtons();
+    if (isFeatureEnabled('lastActionEnhancements')) ensureLastActionCopyButtons();
+    if (isFeatureEnabled('checkboxImprovements')) pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
     refreshSilencedBadges();
-    if (!skipSingleAlertAge) singleAlertAgeApi?.refresh?.();
+    if (!skipSingleAlertAge && isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
     applyActionPageTweaks();
-    actionTemplatesApi?.refresh?.();
+    if (isFeatureEnabled('actionTemplates')) actionTemplatesApi?.refresh?.();
 
     if (preserveExistingOnNone) {
       repaintNeedsAckMarkersFast();
@@ -1309,6 +1380,7 @@
   }
 
   function updateNewAlertNotice() {
+    if (!isFeatureEnabled('visualNewAlertNotifications')) return;
     const notice = document.getElementById(NEW_ALERT_NOTICE_ID);
     if (!notice) return;
     const warning = Math.max(0, Number(newAlertNoticeCounts.warning) || 0);
@@ -1331,6 +1403,7 @@
   }
 
   function ensureNewAlertNotice() {
+    if (!isFeatureEnabled('visualNewAlertNotifications')) return null;
     const bar = ensureTopBarExists();
     if (!bar) return null;
     let notice = bar.querySelector(`#${NEW_ALERT_NOTICE_ID}`);
@@ -1372,19 +1445,25 @@
         console.warn(`[Bosun plugin] Failed to save ${context}:`, err.message || err);
         reportDiagnostics('storage-save-failed', `${context}: ${err.message || err}`);
         setToolbarStatus('storage-write', 'Settings were not saved', 'warn', {
-          title: `${context}: ${err.message || err}`
+          title: `${context}: ${err.message || err}`,
+          sticky: true
         });
       });
     } catch (err) {
       console.warn(`[Bosun plugin] Failed to save ${context}:`, err);
       reportDiagnostics('storage-save-failed', `${context}: ${err?.message || 'unknown-error'}`);
       setToolbarStatus('storage-write', 'Settings were not saved', 'warn', {
-        title: `${context}: ${err?.message || 'unknown-error'}`
+        title: `${context}: ${err?.message || 'unknown-error'}`,
+        sticky: true
       });
     }
   }
 
   function saveState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate({ 'preferences.showSilenced': showSilenced }, STORAGE_KEY);
+      return;
+    }
     saveToLocalStorage({ [STORAGE_KEY]: showSilenced }, STORAGE_KEY);
   }
 
@@ -1419,6 +1498,13 @@
   }
 
   function saveAutoRefreshState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate({
+        'preferences.autoRefreshEnabled': autoRefreshEnabled,
+        'preferences.autoRefreshIdleSeconds': autoRefreshIdleSeconds
+      }, 'auto-refresh');
+      return;
+    }
     saveToLocalStorage({
       [AUTO_REFRESH_ENABLED_KEY]: autoRefreshEnabled,
       [AUTO_REFRESH_IDLE_SECONDS_KEY]: autoRefreshIdleSeconds
@@ -1426,20 +1512,66 @@
   }
 
   function saveUserCommentFilterState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate(
+        { 'preferences.noCommentFilterActive': userCommentFilterEnabled },
+        USER_COMMENT_FILTER_ENABLED_KEY
+      );
+      return;
+    }
     saveToLocalStorage({ [USER_COMMENT_FILTER_ENABLED_KEY]: userCommentFilterEnabled }, USER_COMMENT_FILTER_ENABLED_KEY);
   }
 
   function saveAcknowledgedCollapseState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate(
+        { 'preferences.acknowledgedCollapsed': acknowledgedCollapseEnabled },
+        ACKNOWLEDGED_COLLAPSE_ENABLED_KEY
+      );
+      return;
+    }
     saveToLocalStorage({ [ACKNOWLEDGED_COLLAPSE_ENABLED_KEY]: acknowledgedCollapseEnabled }, ACKNOWLEDGED_COLLAPSE_ENABLED_KEY);
   }
 
   function saveSoundAlertsState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate({ 'preferences.soundEnabled': soundAlertsEnabled }, SOUND_ALERTS_ENABLED_KEY);
+      return;
+    }
     saveToLocalStorage({ [SOUND_ALERTS_ENABLED_KEY]: soundAlertsEnabled }, SOUND_ALERTS_ENABLED_KEY);
   }
 
 
   function saveDiagnosticsState() {
+    if (settingsStore?.update) {
+      persistSettingsUpdate({ 'internal.diagnosticsEnabled': diagnosticsEnabled }, DIAGNOSTICS_ENABLED_KEY);
+      return;
+    }
     saveToLocalStorage({ [DIAGNOSTICS_ENABLED_KEY]: diagnosticsEnabled }, DIAGNOSTICS_ENABLED_KEY);
+  }
+
+  function persistSettingsUpdate(values, context) {
+    settingsStore.update(values).then(() => {
+      clearToolbarStatus('storage-write');
+    }).catch((error) => {
+      const persisted = settingsStore.getSnapshot?.();
+      if (persisted) {
+        applySettingsSnapshot(persisted, {
+          previous: settingsSnapshot,
+          changedPaths: Object.keys(values),
+          initial: false
+        });
+      }
+      handleSettingsWriteError(context, error);
+    });
+  }
+
+  function handleSettingsWriteError(context, error) {
+    console.warn(`[Bosun plugin] Failed to save ${context}:`, error);
+    setToolbarStatus('storage-write', 'Settings were not saved', 'warn', {
+      title: `${context}: ${error?.message || error || 'unknown-error'}`,
+      sticky: true
+    });
   }
 
   function resetNeedAckSoundBaseline() {
@@ -1575,7 +1707,179 @@
     diagnosticsApi?.report?.(eventName, details);
   }
 
+  function clearOwnedElements(selector) {
+    document.querySelectorAll(selector).forEach((element) => {
+      if (element.dataset?.flashTimer) clearTimeout(Number(element.dataset.flashTimer));
+      element.remove();
+    });
+  }
+
+  function clearOwnedClass(className) {
+    document.querySelectorAll(`.${className}`).forEach((element) => {
+      setExtensionClass(element, className, false);
+    });
+  }
+
+  function applyFeatureLifecycle(name, enabled, initial) {
+    if (name === 'lastActionEnhancements') return;
+
+    if (!enabled) {
+      if (name === 'singleAlertAge') singleAlertAgeApi?.clear?.();
+      if (name === 'checkboxImprovements') {
+        document.body?.classList?.add(CHECKBOX_IMPROVEMENTS_DISABLED_BODY_CLASS);
+        pageUtils?.clearDashboardGroupCheckboxHitAreaGuards?.();
+      }
+      if (name === 'copyButtons') {
+        clearOwnedElements(`.${COPY_BUTTON_CLASS}, .${COPY_ALL_BUTTON_CLASS}`);
+      }
+      if (name === 'silencedFilter') {
+        clearOwnedClass(HIDDEN_CLASS);
+        clearOwnedElements(`.${SILENCED_BADGE_CLASS}, #${TOGGLE_ID}`);
+        hiddenCount = 0;
+      }
+      if (name === 'noCommentFilter') {
+        clearOwnedClass(USER_COMMENT_FILTER_HIDDEN_CLASS);
+        clearOwnedElements('.bosun-user-comment-filter-wrap');
+      }
+      if (name === 'acknowledgedCollapse') {
+        clearOwnedClass(ACKNOWLEDGED_COLLAPSED_CLASS);
+        clearOwnedElements('.bosun-acknowledged-collapse-wrap');
+      }
+      if (name === 'soundNotifications') {
+        soundApi?.destroy?.();
+        clearOwnedElements('.bosun-sound-alerts-wrap');
+      }
+      if (name === 'visualNewAlertNotifications') {
+        visualTrackerLifecycleGeneration += 1;
+        newAlertTrackerApi?.destroy?.();
+        clearOwnedElements(`#${NEW_ALERT_NOTICE_ID}`);
+      }
+      if (name === 'autoRefresh') {
+        activityApi?.destroy?.();
+        clearOwnedElements('.bosun-auto-refresh-group');
+      }
+      if (name === 'actionTemplates') actionTemplatesApi?.destroy?.();
+      if (name === 'grafanaIntegration') {
+        ruleGraphLifecycleGeneration += 1;
+        ruleGraphResolver?.stop?.();
+        clearOwnedElements(`.${GRAFANA_QUERY_BUTTON_CLASS}`);
+        grafanaHandoffApi?.destroy?.();
+      }
+      return;
+    }
+
+    if (name === 'checkboxImprovements') {
+      document.body?.classList?.remove(CHECKBOX_IMPROVEMENTS_DISABLED_BODY_CLASS);
+      pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
+    }
+    if (name === 'singleAlertAge') singleAlertAgeApi?.refresh?.();
+    if (name === 'soundNotifications' && soundAlertsEnabled) {
+      soundApi?.installAudioUnlockTracking?.();
+      soundApi?.ensureAudioObjects?.();
+    }
+    if (name === 'visualNewAlertNotifications') {
+      const generation = ++visualTrackerLifecycleGeneration;
+      Promise.resolve(newAlertTrackerApi?.start?.()).then(() => {
+        if (
+          generation !== visualTrackerLifecycleGeneration ||
+          !isFeatureEnabled('visualNewAlertNotifications') ||
+          !latestAlertsPayload
+        ) return;
+        return newAlertTrackerApi?.reconcile?.(latestAlertsPayload);
+      }).catch((error) => {
+        reportDiagnostics('new-alert-tracker-start-failed', error?.message || 'unknown-error');
+      });
+      ensureNewAlertNotice();
+    }
+    if (name === 'autoRefresh') {
+      installUserActivityTracking();
+      startAutoRefreshLoop();
+    }
+    if (name === 'actionTemplates') actionTemplatesApi?.refresh?.();
+    if (name === 'grafanaIntegration' && latestAlertsPayload) {
+      rebuildGrafanaQueryIndex(latestAlertsPayload);
+      ensureGrafanaQueryButtons();
+      refreshRuleGraphDefinitions(latestAlertsPayload);
+    }
+    if (!initial) {
+      scheduleTopBarMount();
+      scheduleRefresh({ skipSingleAlertAge: name !== 'singleAlertAge' });
+    }
+  }
+
+  function applySettingsSnapshot(next, options = {}) {
+    if (!next || typeof next !== 'object') return;
+    const previous = options.previous || settingsSnapshot;
+    const initial = options.initial === true;
+    const changedPaths = Array.isArray(options.changedPaths) ? options.changedPaths : [];
+    settingsSnapshot = next;
+
+    showSilenced = next.preferences?.showSilenced === true;
+    autoRefreshEnabled = next.preferences?.autoRefreshEnabled !== false;
+    autoRefreshIdleSeconds = normalizeAutoRefreshIdleSeconds(next.preferences?.autoRefreshIdleSeconds);
+    userCommentFilterEnabled = next.preferences?.noCommentFilterActive === true;
+    acknowledgedCollapseEnabled = next.preferences?.acknowledgedCollapsed === true;
+    soundAlertsEnabled = next.preferences?.soundEnabled !== false;
+    diagnosticsEnabled = DIAGNOSTICS_TOOLBAR_UI_ENABLED && next.internal?.diagnosticsEnabled === true;
+
+    const featureNames = Object.keys(next.features || {});
+    for (const name of featureNames) {
+      const changed = initial || changedPaths.includes(`features.${name}`) ||
+        previous?.features?.[name] !== next.features[name];
+      if (changed) applyFeatureLifecycle(name, next.features[name] !== false, initial);
+    }
+
+    if (initial || changedPaths.includes('preferences.showSilenced')) {
+      if (isFeatureEnabled('silencedFilter')) applyVisibility();
+    }
+    if (initial || changedPaths.includes('preferences.noCommentFilterActive')) {
+      if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();
+      updateUserCommentFilterControl();
+    }
+    if (initial || changedPaths.includes('preferences.acknowledgedCollapsed')) {
+      if (isFeatureEnabled('acknowledgedCollapse')) applyAcknowledgedCollapse();
+      updateAcknowledgedCollapseControl();
+    }
+    if (initial || changedPaths.includes('preferences.soundEnabled')) {
+      if (isFeatureEnabled('soundNotifications')) {
+        if (soundAlertsEnabled) {
+          soundApi?.installAudioUnlockTracking?.();
+          soundApi?.ensureAudioObjects?.();
+        } else {
+          soundApi?.destroy?.();
+        }
+      }
+      updateSoundAlertsControl();
+    }
+    if (
+      initial ||
+      changedPaths.includes('preferences.autoRefreshEnabled') ||
+      changedPaths.includes('preferences.autoRefreshIdleSeconds')
+    ) {
+      if (autoRefreshEnabled) clearAutoRefreshReEnableTimer();
+      else if (isFeatureEnabled('autoRefresh')) scheduleAutoRefreshReEnable();
+      updateAutoRefreshControls();
+    }
+    if (initial || changedPaths.includes('internal.diagnosticsEnabled')) updateDiagnosticsControl();
+  }
+
   function loadState(callback) {
+    if (settingsStore?.start) {
+      settingsStore.start().then(() => {
+        clearToolbarStatus('storage-read');
+        applySettingsSnapshot(settingsStore.getSnapshot(), { initial: true });
+        callback();
+      }).catch((error) => {
+        console.warn('[Bosun plugin] Failed to load saved settings:', error);
+        setToolbarStatus('storage-read', 'Saved settings were not loaded', 'warn', {
+          title: error?.message || String(error),
+          sticky: true
+        });
+        applySettingsSnapshot(settingsSnapshot, { initial: true });
+        callback();
+      });
+      return;
+    }
     const storage = getChromeLocalStorage();
     if (!storage) {
       console.warn('[Bosun plugin] chrome.storage.local unavailable; using defaults');
@@ -1648,6 +1952,12 @@
   }
 
   function installStorageChangeTracking() {
+    if (settingsStore?.subscribe) {
+      settingsStore.subscribe((next, previous, changedPaths) => {
+        applySettingsSnapshot(next, { previous, changedPaths, initial: false });
+      });
+      return;
+    }
     const onChanged = globalThis.chrome?.storage?.onChanged;
     if (!onChanged?.addListener) return;
 
@@ -1683,7 +1993,6 @@
       }
       if (SOUND_ALERTS_ENABLED_KEY in changes) {
         soundAlertsEnabled = changes[SOUND_ALERTS_ENABLED_KEY].newValue !== false;
-        resetNeedAckSoundBaseline();
         updateSoundAlertsControl();
       }
       if (DIAGNOSTICS_ENABLED_KEY in changes) {
@@ -1941,7 +2250,6 @@
     soundAlertsEnabled = !soundAlertsEnabled;
     markUserActivity();
     saveSoundAlertsState();
-    resetNeedAckSoundBaseline();
     updateSoundAlertsControl();
   }
 
@@ -1990,6 +2298,10 @@
   }
 
   function ensureSoundAlertsControls(actions) {
+    if (!isFeatureEnabled('soundNotifications')) {
+      actions.querySelector('.bosun-sound-alerts-wrap')?.remove();
+      return;
+    }
     let wrap = actions.querySelector('.bosun-sound-alerts-wrap');
     if (!wrap) {
       wrap = document.createElement('div');
@@ -2014,6 +2326,10 @@
 
 
   function ensureUserCommentFilterControls(actions) {
+    if (!isFeatureEnabled('noCommentFilter')) {
+      actions.querySelector('.bosun-user-comment-filter-wrap')?.remove();
+      return;
+    }
     let wrap = actions.querySelector('.bosun-user-comment-filter-wrap');
     if (!wrap) {
       wrap = document.createElement('div');
@@ -2036,6 +2352,10 @@
   }
 
   function ensureAcknowledgedCollapseControls(actions) {
+    if (!isFeatureEnabled('acknowledgedCollapse')) {
+      actions.querySelector('.bosun-acknowledged-collapse-wrap')?.remove();
+      return;
+    }
     let wrap = actions.querySelector('.bosun-acknowledged-collapse-wrap');
     if (!wrap) {
       wrap = document.createElement('div');
@@ -2101,6 +2421,10 @@
   }
 
   function ensureAutoRefreshControls(actions) {
+    if (!isFeatureEnabled('autoRefresh')) {
+      actions.querySelector('.bosun-auto-refresh-group')?.remove();
+      return;
+    }
     let group = actions.querySelector('.bosun-auto-refresh-group');
     if (!group) {
       group = document.createElement('div');
@@ -2167,6 +2491,7 @@
   }
 
   function startAutoRefreshLoop() {
+    if (!isFeatureEnabled('autoRefresh')) return;
     if (activityApi?.startAutoRefreshLoop) {
       activityApi.startAutoRefreshLoop(updateAutoRefreshCountdown);
       return;
@@ -2175,6 +2500,7 @@
   }
 
   function installUserActivityTracking() {
+    if (!isFeatureEnabled('autoRefresh')) return;
     if (activityApi?.installUserActivityTracking) {
       activityApi.installUserActivityTracking();
       return;
@@ -2277,6 +2603,12 @@
 
     let btn = document.getElementById(TOGGLE_ID);
     let counter = document.getElementById(TOGGLE_COUNTER_ID);
+
+    if (!isFeatureEnabled('silencedFilter')) {
+      btn?.remove();
+      ensureDiagnosticsControls(actions);
+      return;
+    }
 
     if (!btn) {
       btn = document.createElement('button');
@@ -2455,9 +2787,122 @@
     return result;
   }
 
+  function getExactAlertName(child) {
+    const candidates = [child?.Alert, child?.State?.Alert]
+      .filter((value) => typeof value === 'string' && value.trim())
+      .map((value) => value.trim());
+    const unique = Array.from(new Set(candidates));
+    return unique.length === 1 ? unique[0] : '';
+  }
+
+  function getRuleGraphAlertNames(payload) {
+    const names = new Set();
+    for (const group of getAlertGroupsFromPayload(payload)) {
+      const children = sharedUtils?.normalizeNeedAckChildren
+        ? sharedUtils.normalizeNeedAckChildren(group?.Children)
+        : (Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []));
+      for (const child of children) {
+        const name = getExactAlertName(child);
+        if (name) names.add(name);
+      }
+    }
+    return Array.from(names);
+  }
+
+  function getRuleGraphRawQuery(child) {
+    const expr = child?.State?.Expr || child?.Expr || '';
+    if (!ruleGraphResolver) return extractPromrasQuery(expr);
+
+    const sourceState = ruleGraphResolver.getSnapshot?.() || { available: false };
+    const alertName = getExactAlertName(child);
+    if (!alertName) return '';
+    const resolution = alertName ? ruleGraphResolver.getResolution?.(alertName) : null;
+    if (resolution?.ok && typeof resolution.query === 'string') {
+      return resolution.query;
+    }
+    if (resolution && resolution.reason !== 'no_usage_graph') return '';
+    if (sourceState.available && !resolution) return '';
+    const fallbackAllowed = resolution?.reason === 'no_usage_graph' ||
+      sourceState.reason === 'config_unavailable' ||
+      sourceState.reason === 'hash_unavailable';
+    return fallbackAllowed ? extractPromrasQuery(expr) : '';
+  }
+
+  function reportRuleGraphRejections(alertNames) {
+    const allowedReasons = new Set([
+      'no_usage_graph',
+      'multi_query_graph',
+      'computed_graph',
+      'legacy_prom',
+      'unresolved_variable',
+      'cyclic_variable',
+      'invalid_promras',
+      'invalid_rule_source'
+    ]);
+    const counts = new Map();
+    for (const alertName of alertNames) {
+      const resolution = ruleGraphResolver?.getResolution?.(alertName);
+      const reason = resolution?.ok ? '' : resolution?.reason;
+      if (!allowedReasons.has(reason)) continue;
+      counts.set(reason, (counts.get(reason) || 0) + 1);
+    }
+    if (counts.size) {
+      const summary = Array.from(counts.entries())
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([reason, count]) => `${reason}=${count}`)
+        .join(',');
+      reportDiagnostics('grafana-rule-graph-rejected', summary);
+    }
+  }
+
+  function handleRuleGraphInvalidation() {
+    if (
+      !latestAlertsPayload ||
+      !isDashboardEnhancementsPage() ||
+      !isFeatureEnabled('grafanaIntegration')
+    ) return;
+    rebuildGrafanaQueryIndex(latestAlertsPayload);
+    ensureGrafanaQueryButtons();
+  }
+
+  function refreshRuleGraphDefinitions(payload) {
+    if (
+      !ruleGraphResolver?.refresh ||
+      !isFeatureEnabled('grafanaIntegration') ||
+      !isDashboardEnhancementsPage()
+    ) return;
+    const names = getRuleGraphAlertNames(payload);
+    if (!names.length) return;
+    const generation = ++ruleGraphLifecycleGeneration;
+    ruleGraphResolver.refresh(names).then((sourceState) => {
+      if (
+        generation !== ruleGraphLifecycleGeneration ||
+        !latestAlertsPayload ||
+        !isDashboardEnhancementsPage() ||
+        !isFeatureEnabled('grafanaIntegration')
+      ) return;
+      rebuildGrafanaQueryIndex(latestAlertsPayload);
+      ensureGrafanaQueryButtons();
+      if (sourceState?.available) reportRuleGraphRejections(names);
+      if (!sourceState?.available) {
+        reportDiagnostics('grafana-rule-source-unavailable', sourceState?.reason || 'config_unavailable');
+      }
+    }).catch(() => {
+      if (generation !== ruleGraphLifecycleGeneration) return;
+      rebuildGrafanaQueryIndex(latestAlertsPayload);
+      ensureGrafanaQueryButtons();
+      reportDiagnostics('grafana-rule-source-unavailable', 'config_unavailable');
+    });
+  }
+
   function rebuildGrafanaQueryIndex(payload) {
     grafanaQueryById.clear();
     grafanaQueryByKey.clear();
+    ambiguousGrafanaIds.clear();
+    ambiguousGrafanaKeys.clear();
+    const entries = [];
+    const idCounts = new Map();
+    const keyCounts = new Map();
 
     for (const group of getAlertGroupsFromPayload(payload)) {
       const children = sharedUtils?.normalizeNeedAckChildren
@@ -2465,21 +2910,37 @@
         : (Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []));
 
       for (const child of children) {
-        const expr = child?.State?.Expr || child?.Expr || '';
-        const rawQuery = extractPromrasQuery(expr);
+        const rawQuery = getRuleGraphRawQuery(child);
+        const rawTags = child?.State?.Tags || child?.Tags || '';
+        const alertKey = child?.State?.AlertKey || child?.AlertKey || '';
         const query = applyAlertTagsToPromQuery(
           rawQuery,
-          child?.State?.Tags || child?.Tags || '',
-          child?.State?.AlertKey || child?.AlertKey || ''
+          rawTags,
+          alertKey
         );
-        if (!query) continue;
-
         const childId = child?.State?.Id != null ? String(child.State.Id) : null;
         const childKey = buildChildMarkerKeyFromData(child, group);
-
-        if (childId) grafanaQueryById.set(childId, query);
-        if (childKey) grafanaQueryByKey.set(childKey, query);
+        entries.push({
+          childId,
+          childKey,
+          query
+        });
+        if (childId) idCounts.set(childId, (idCounts.get(childId) || 0) + 1);
+        if (childKey) keyCounts.set(childKey, (keyCounts.get(childKey) || 0) + 1);
       }
+    }
+
+    for (const entry of entries) {
+      const unsafe = (entry.childId && idCounts.get(entry.childId) > 1) ||
+        (entry.childKey && keyCounts.get(entry.childKey) > 1);
+      if (unsafe) {
+        if (entry.childId) ambiguousGrafanaIds.add(entry.childId);
+        if (entry.childKey) ambiguousGrafanaKeys.add(entry.childKey);
+        continue;
+      }
+      if (!entry.query) continue;
+      if (entry.childId) grafanaQueryById.set(entry.childId, entry.query);
+      if (entry.childKey) grafanaQueryByKey.set(entry.childKey, entry.query);
     }
   }
 
@@ -2819,7 +3280,7 @@
     entry.promise.then((payload) => {
       if (isDashboardEnhancementsPage() && alertsPayloadApplyVersion === entry.applyVersion) {
         singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now() });
-        singleAlertAgeApi?.refresh?.();
+        if (isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
       }
     }).catch(() => {});
   }
@@ -2839,11 +3300,13 @@
 
   function applyAlertsPayload(payload, metadata = {}) {
     if (!isDashboardEnhancementsPage()) return;
+    latestAlertsPayload = payload;
     alertsPayloadApplyVersion += 1;
     singleAlertAgeApi?.update?.(payload, {
       source: metadata?.source || 'direct',
       fetchedAt: metadata?.fetchedAt || Date.now()
     });
+    refreshRuleGraphDefinitions(payload);
     rebuildAlertDataIndex(payload);
     persistAlertMarkerCacheToSession();
     const trackerOwner = metadata?.source !== 'follower';
@@ -2854,14 +3317,18 @@
     } finally {
       newAlertTrackerMutationAllowed = previousTrackerPermission;
     }
-    if (trackerOwner) newAlertTrackerApi?.reconcile?.(payload);
+    if (trackerOwner && isFeatureEnabled('visualNewAlertNotifications')) {
+      newAlertTrackerApi?.reconcile?.(payload);
+    }
     applyNeedsAckMarkersFromData();
-    applyUserCommentFilter();
+    if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();
     ensureCopyButtons();
-    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
+    ensureGrafanaQueryButtons();
+    if (isFeatureEnabled('lastActionEnhancements')) ensureLastActionCopyButtons();
+    if (isFeatureEnabled('checkboxImprovements')) pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
     refreshSilencedBadges();
-    singleAlertAgeApi?.refresh?.();
+    if (isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
     reportDiagnostics('refresh-ok', 'alerts payload received');
     clearToolbarStatus('refresh');
   }
@@ -3027,7 +3494,9 @@
           if (mutation.type !== 'childList') continue;
           for (const node of mutation.addedNodes || []) {
             if (node?.nodeType === 1) {
-              pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(node);
+              if (isFeatureEnabled('checkboxImprovements')) {
+                pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(node);
+              }
             }
           }
         }
@@ -3049,7 +3518,7 @@
       let shouldRefreshData = false;
       const needsAckRoot = getNeedsAckRoot();
       const ageResetProblems = [];
-      const ageDebugEnabled = singleAlertAgeApi?.isDebugEnabled?.() === true;
+      const ageDebugEnabled = isFeatureEnabled('singleAlertAge') && singleAlertAgeApi?.isDebugEnabled?.() === true;
 
       for (const mutation of mutations) {
         if (isExtensionOwnedClassMutation(mutation)) continue;
@@ -3074,7 +3543,7 @@
           const mutationCanChangeAlertData =
             (!extensionOnlyChildChange && mutationChangesNeedsAckGroups(mutation, changedChildren, needsAckRoot)) ||
             mutation.attributeName === 'ts-ack-group';
-          const agePresentationMutation = singleAlertAgeApi?.isManagedNode?.(node) === true;
+          const agePresentationMutation = isFeatureEnabled('singleAlertAge') && singleAlertAgeApi?.isManagedNode?.(node) === true;
           if (mutationCanChangeAlertData && !agePresentationMutation && isNeedsAckNode(node, needsAckRoot)) {
             shouldRefreshData = true;
             break;
@@ -3093,7 +3562,7 @@
       expectedExtensionClassNodes.clear();
 
       if (shouldRefreshUi) {
-        if (isDashboardEnhancementsPage()) singleAlertAgeApi?.refresh?.();
+        if (isDashboardEnhancementsPage() && isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
         scheduleRefresh({ skipSingleAlertAge: true });
       }
 
@@ -3132,7 +3601,9 @@
           attributeFilter: ['class', 'ts-ack-group', 'ts-ack-item']
         });
         scopedObservers.set(type, { root, observer });
-        pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(root);
+        if (isFeatureEnabled('checkboxImprovements')) {
+          pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.(root);
+        }
       }
     };
 
@@ -3171,24 +3642,21 @@
     if (!isConfiguredBosunHost()) return;
 
     grafanaHandoffApi?.cleanupExpired?.();
-    newAlertTrackerApi?.start?.();
     if (DIAGNOSTICS_TOOLBAR_UI_ENABLED) restoreDiagnosticsLogFromStorage();
     injectStyles();
-    pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     installSelectionGuard();
     installSelectionCopySanitizer();
-    installUserActivityTracking();
     installStorageChangeTracking();
-    soundApi?.installAudioUnlockTracking?.();
-    soundApi?.ensureAudioObjects?.();
-    scheduleTopBarMount();
     restoreNeedAckSoundBaselineFromSession();
     restoreAlertMarkerCacheFromSession();
     window.addEventListener('pagehide', () => {
-      if (!alertMarkerCachePersistTimer) return;
-      clearTimeout(alertMarkerCachePersistTimer);
-      alertMarkerCachePersistTimer = null;
-      flushAlertMarkerCacheToSession();
+      ruleGraphLifecycleGeneration += 1;
+      ruleGraphResolver?.stop?.();
+      if (alertMarkerCachePersistTimer) {
+        clearTimeout(alertMarkerCachePersistTimer);
+        alertMarkerCachePersistTimer = null;
+        flushAlertMarkerCacheToSession();
+      }
     });
     primeAlertsPayload();
 

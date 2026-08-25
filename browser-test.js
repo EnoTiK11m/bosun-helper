@@ -256,12 +256,56 @@ function instrumentContentSource(source) {
     ensureParentStateIcon,
     ensureAutoRefreshControls,
     ensureLastActionCopyButtons,
+    ensureGrafanaQueryButtons,
+    runDomRefreshPass,
     getLastActionMessageText,
     applyAlertsPayload,
+    rebuildGrafanaQueryIndex,
+    refreshRuleGraphDefinitions,
+    ruleGraphResolver,
+    getGrafanaQueryForPanel,
     flashCopyButtonState,
     handleRouteChange,
     startObserver,
     setExtensionClass,
+    isFeatureEnabled,
+    setFeature(name, enabled) {
+      const previous = JSON.parse(JSON.stringify(settingsSnapshot));
+      const next = JSON.parse(JSON.stringify(settingsSnapshot));
+      next.features[name] = Boolean(enabled);
+      applySettingsSnapshot(next, {
+        previous,
+        changedPaths: ['features.' + name],
+        initial: false
+      });
+    },
+    setPreference(name, value) {
+      const previous = JSON.parse(JSON.stringify(settingsSnapshot));
+      const next = JSON.parse(JSON.stringify(settingsSnapshot));
+      next.preferences ||= {};
+      next.preferences[name] = value;
+      applySettingsSnapshot(next, {
+        previous,
+        changedPaths: ['preferences.' + name],
+        initial: false
+      });
+    },
+    handleSoundAlertsToggle,
+    applyActionPageTweaks,
+    loadState,
+    runtimeSettings() {
+      return {
+        soundAlertsEnabled,
+        showSilenced,
+        autoRefreshEnabled,
+        autoRefreshIdleSeconds,
+        userCommentFilterEnabled,
+        acknowledgedCollapseEnabled,
+        toolbarStatusSource,
+        toolbarStatusMessage,
+        toolbarStatusTimer
+      };
+    },
     singleAlertAge: singleAlertAgeApi,
     refreshIntervals: { visible: DATA_REFRESH_MS, hidden: DATA_REFRESH_HIDDEN_MS },
     resetLifecycleCounters() {
@@ -309,10 +353,14 @@ ${source.slice(closing)}`;
 
 async function runBrowserAssertions(client) {
   const actionSource = fs.readFileSync(path.join(root, 'action-templates.js'), 'utf8');
+  const needAckBaselineSource = fs.readFileSync(path.join(root, 'needack-baseline.js'), 'utf8');
   const singleAlertAgeSource = fs.readFileSync(path.join(root, 'single-alert-age.js'), 'utf8');
   const pageUtilsSource = fs.readFileSync(path.join(root, 'page-utils.js'), 'utf8');
   const stylesSource = fs.readFileSync(path.join(root, 'styles.js'), 'utf8');
   const handoffSource = fs.readFileSync(path.join(root, 'grafana-handoff.js'), 'utf8');
+  const grafanaPageSource = JSON.stringify(fs.readFileSync(path.join(root, 'grafana-page.js'), 'utf8'));
+  const promqlSource = fs.readFileSync(path.join(root, 'promql.js'), 'utf8');
+  const ruleGraphSource = fs.readFileSync(path.join(root, 'bosun-rule-graph.js'), 'utf8');
   const contentSource = instrumentContentSource(fs.readFileSync(path.join(root, 'content.js'), 'utf8'));
 
   const actionResult = await evaluate(client, `(() => {
@@ -980,6 +1028,11 @@ async function runBrowserAssertions(client) {
       grafanaHost: 'grafana.example.test',
       grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
     };
+    globalThis.BosunHelperGrafanaHandoff = {
+      createGrafanaHandoff() {
+        return { openQuery() {}, cleanupExpired() {}, destroy() {} };
+      }
+    };
     const createSingleAlertAgeForDiagnostics = BosunHelperSingleAlertAge.createSingleAlertAge;
     BosunHelperSingleAlertAge.createSingleAlertAge = (options) =>
       createSingleAlertAgeForDiagnostics({ ...options, debug: true });
@@ -1238,6 +1291,739 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(singleAlertLifecycleResult.primitiveLogsOnly, true);
   assert.strictEqual(singleAlertLifecycleResult.forbiddenKeysAbsent, true);
 
+  const ambiguousGrafanaIdentityResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${promqlSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+
+    function childPanel(id, subject, ago) {
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      if (id) {
+        const idNode = document.createElement('span');
+        idNode.setAttribute('ng-show', 'state.Id');
+        idNode.textContent = '#' + id;
+        heading.appendChild(idNode);
+      }
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+      subjectNode.textContent = subject;
+      heading.appendChild(subjectNode);
+      const agoNode = document.createElement('span');
+      agoNode.setAttribute('ts-since', 'child.Ago');
+      agoNode.textContent = ago;
+      heading.appendChild(agoNode);
+      panel.appendChild(heading);
+      return panel;
+    }
+
+    hooks.rebuildGrafanaQueryIndex({ Groups: { NeedAck: [{
+      Subject: 'id group',
+      Children: [
+        { Subject: 'first', Ago: '1m', State: { Id: 42, Expr: "promras('''first_metric''')" } },
+        { Subject: 'second', Ago: '2m', State: { Id: 42, Expr: "promras('''second_metric''')" } }
+      ]
+    }] } });
+    const duplicateIdQuery = hooks.getGrafanaQueryForPanel(childPanel('42', 'first', '1m'));
+
+    hooks.rebuildGrafanaQueryIndex({ Groups: { NeedAck: [{
+      Subject: 'same group',
+      Children: [
+        { Subject: 'same child', Ago: '1m', Expr: "promras('''first_metric''')" },
+        { Subject: 'same child', Ago: '1m', Expr: "promras('''second_metric''')" }
+      ]
+    }] } });
+    const groupPanel = document.createElement('div');
+    groupPanel.className = 'panel';
+    const groupHeading = document.createElement('div');
+    groupHeading.className = 'panel-heading';
+    const groupSubject = document.createElement('span');
+    groupSubject.setAttribute('ng-bind', 'group.Subject');
+    groupSubject.textContent = 'same group';
+    groupHeading.appendChild(groupSubject);
+    groupPanel.appendChild(groupHeading);
+    const duplicateKeyPanel = childPanel('', 'same child', '1m');
+    groupPanel.appendChild(duplicateKeyPanel);
+    const duplicateKeyQuery = hooks.getGrafanaQueryForPanel(duplicateKeyPanel);
+
+    hooks.rebuildGrafanaQueryIndex({ Groups: { NeedAck: [{
+      Subject: 'unique group',
+      Children: [{
+        Subject: 'unique child',
+        AlertKey: 'unique.alert{host=web-1}',
+        Ago: '3m',
+        State: {
+          Id: 77,
+          AlertKey: 'unique.alert{host=web-1}',
+          Tags: 'host=web-1',
+          Expr: "promras('''unique_metric''', '2m', '2h', '')"
+        }
+      }]
+    }] } });
+    const root = document.createElement('div');
+    root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+    const uniquePanel = childPanel('77', 'unique child', '3m');
+    uniquePanel.querySelector('.panel-heading').setAttribute('ng-click', 'toggle()');
+    root.appendChild(uniquePanel);
+    document.body.appendChild(root);
+    hooks.ensureGrafanaQueryButtons();
+    return {
+      duplicateIdQuery,
+      duplicateKeyQuery,
+      grafanaDefaultEnabled: hooks.isFeatureEnabled('grafanaIntegration'),
+      uniqueButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
+    };
+  })()`);
+  assert.deepStrictEqual(ambiguousGrafanaIdentityResult, {
+    duplicateIdQuery: '',
+    duplicateKeyQuery: '',
+    grafanaDefaultEnabled: true,
+    uniqueButtonCount: 1
+  });
+
+  const usageGraphResolverResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunHelperGrafanaHandoff = {
+      createGrafanaHandoff() {
+        return { openQuery() {}, cleanupExpired() {}, destroy() {} };
+      }
+    };
+    const directConfig = ${JSON.stringify(`alert imsi.channel.success.response.percent.low {
+  $q_pct = promras(''' sum by(zone,name)(rr_imsi_success_response_percent) ''', '5m', '2h', '')
+  $usage_graph = $q_pct
+  warn = $q_pct < 90
+}`)};
+    let activeHash = 'DIRECT-H1';
+    let activeConfig = directConfig;
+    let configFails = false;
+    let configNetworkFails = false;
+    let releaseDirectConfig;
+    const directConfigGate = new Promise((resolve) => { releaseDirectConfig = resolve; });
+    let waitForDirectConfig = true;
+    let configFetchCount = 0;
+    let hashFetchCount = 0;
+    let releaseScheduledHash;
+    const scheduledHashGate = new Promise((resolve) => { releaseScheduledHash = resolve; });
+    let waitForScheduledHash = false;
+    let syntheticNowOffset = 0;
+    const nativeDateNow = Date.now;
+    Date.now = () => nativeDateNow() + syntheticNowOffset;
+    globalThis.fetch = async (url) => {
+      if (url === '/api/config/running_hash') {
+        hashFetchCount += 1;
+        if (waitForScheduledHash) await scheduledHashGate;
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => JSON.stringify({ Hash: activeHash }),
+          json: async () => ({ Hash: activeHash })
+        };
+      }
+      if (url === '/api/config?hash=') {
+        configFetchCount += 1;
+        if (waitForDirectConfig) await directConfigGate;
+        if (configNetworkFails) throw new Error('synthetic config network failure');
+        if (configFails) {
+          return { ok: false, status: 500, headers: { get() { return null; } } };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => activeConfig
+        };
+      }
+      throw new Error('unexpected synthetic URL: ' + url);
+    };
+    ${promqlSource}
+    ${ruleGraphSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+
+    const root = document.createElement('div');
+    root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+    const panel = document.createElement('div');
+    panel.className = 'panel';
+    const heading = document.createElement('div');
+    heading.className = 'panel-heading';
+    heading.setAttribute('ng-click', 'toggle()');
+    const idNode = document.createElement('span');
+    idNode.setAttribute('ng-show', 'state.Id');
+    idNode.textContent = '#701';
+    heading.appendChild(idNode);
+    const subjectNode = document.createElement('span');
+    subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+    subjectNode.textContent = 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}';
+    heading.appendChild(subjectNode);
+    const agoNode = document.createElement('span');
+    agoNode.setAttribute('ts-since', 'child.Ago');
+    agoNode.textContent = '3m';
+    heading.appendChild(agoNode);
+    panel.appendChild(heading);
+    root.appendChild(panel);
+    document.body.appendChild(root);
+
+    const payload = { Groups: { NeedAck: [{
+      Subject: 'synthetic group',
+      Children: [{
+        Alert: 'imsi.channel.success.response.percent.low',
+        AlertKey: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
+        Subject: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
+        Ago: '3m',
+        State: {
+          Id: 701,
+          Alert: 'imsi.channel.success.response.percent.low',
+          AlertKey: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
+          Tags: 'name=bercut1,zone=smssrv28',
+          Expr: "promras('''sum(rate(non_authoritative_total[5m]))''', '5m', '2h', '')"
+        }
+      }]
+    }] } };
+    hooks.applyAlertsPayload(payload);
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    const pendingQuery = hooks.getGrafanaQueryForPanel(panel);
+    const buttonsWhileConfigPending = root.querySelectorAll('.bosun-grafana-query-btn').length;
+    hooks.applyAlertsPayload(payload);
+    waitForDirectConfig = false;
+    releaseDirectConfig();
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    const directQuery = hooks.getGrafanaQueryForPanel(panel);
+    const directButtons = root.querySelectorAll('.bosun-grafana-query-btn').length;
+    const directConfigFetchCount = configFetchCount;
+    const directHashFetchCount = hashFetchCount;
+    hooks.applyAlertsPayload(payload);
+    const cachedQueryDuringFreshInterval = hooks.getGrafanaQueryForPanel(panel);
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    const cachedHashFetchCount = hashFetchCount;
+    syntheticNowOffset = 16000;
+    waitForScheduledHash = true;
+    hooks.applyAlertsPayload(payload);
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
+    const queryDuringUnchangedHashCheck = hooks.getGrafanaQueryForPanel(panel);
+    waitForScheduledHash = false;
+    releaseScheduledHash();
+    for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    const queryAfterUnchangedHashCheck = hooks.getGrafanaQueryForPanel(panel);
+    const unchangedHashFetchCount = hashFetchCount;
+
+    activeHash = 'MULTI-H2';
+    activeConfig = ${JSON.stringify(`alert imsi.channel.success.response.percent.low {
+  $q1 = promras('''sum(rate(first_total[5m]))''', '5m', '2h', '')
+  $q2 = promras('''sum(rate(second_total[5m]))''', '5m', '2h', '')
+  $usage_graph = merge(addtags($q1, "side=first"), addtags($q2, "side=second"))
+  warn = $q1 > 0
+}`)};
+    const multiRefresh = hooks.ruleGraphResolver.refresh(
+      ['imsi.channel.success.response.percent.low'],
+      { force: true }
+    );
+    const queryDuringHashCheck = hooks.getGrafanaQueryForPanel(panel);
+    await multiRefresh;
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    const rejectedQuery = hooks.getGrafanaQueryForPanel(panel);
+    const buttonsAfterUnsupportedHash = root.querySelectorAll('.bosun-grafana-query-btn').length;
+
+    activeHash = 'FAIL-H3';
+    configFails = true;
+    payload.Groups.NeedAck[0].Children[0].State.Expr =
+      "promras('''sum(rate(fallback_total[5m]))''', '5m', '2h', '')";
+    await hooks.ruleGraphResolver.refresh(['imsi.channel.success.response.percent.low'], { force: true });
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    const safeFailureFallback = hooks.getGrafanaQueryForPanel(panel);
+    const buttonsAfterSafeFallback = root.querySelectorAll('.bosun-grafana-query-btn').length;
+
+    activeHash = 'NETWORK-H4';
+    configFails = false;
+    configNetworkFails = true;
+    await hooks.ruleGraphResolver.refresh(['imsi.channel.success.response.percent.low'], { force: true });
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    const safeNetworkFailureFallback = hooks.getGrafanaQueryForPanel(panel);
+    const buttonsAfterNetworkFallback = root.querySelectorAll('.bosun-grafana-query-btn').length;
+
+    activeHash = 'MALFORMED-H5';
+    configNetworkFails = false;
+    activeConfig = 'alert imsi.channel.success.response.percent.low {\\n  $usage_graph = promras(';
+    const malformedSnapshot = await hooks.ruleGraphResolver.refresh(
+      ['imsi.channel.success.response.percent.low'],
+      { force: true }
+    );
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    const malformedRuleFallback = hooks.getGrafanaQueryForPanel(panel);
+    const buttonsAfterMalformedRule = root.querySelectorAll('.bosun-grafana-query-btn').length;
+
+    payload.Groups.NeedAck[0].Children[0].State.Alert = 'synthetic.conflicting.identity';
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    return {
+      pendingQuery,
+      buttonsWhileConfigPending,
+      directQuery,
+      directButtons,
+      directConfigFetchCount,
+      directHashFetchCount,
+      cachedQueryDuringFreshInterval,
+      cachedHashFetchCount,
+      queryDuringUnchangedHashCheck,
+      queryAfterUnchangedHashCheck,
+      unchangedHashFetchCount,
+      queryDuringHashCheck,
+      rejectedQuery,
+      buttonsAfterUnsupportedHash,
+      safeFailureFallback,
+      buttonsAfterSafeFallback,
+      safeNetworkFailureFallback,
+      buttonsAfterNetworkFallback,
+      malformedSnapshotReason: malformedSnapshot.reason,
+      malformedRuleFallback,
+      buttonsAfterMalformedRule,
+      conflictingIdentityQuery: hooks.getGrafanaQueryForPanel(panel),
+      buttonsAfterConflictingIdentity: root.querySelectorAll('.bosun-grafana-query-btn').length
+    };
+  })()`);
+  assert.deepStrictEqual(usageGraphResolverResult, {
+    pendingQuery: '',
+    buttonsWhileConfigPending: 0,
+    directQuery: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    directButtons: 1,
+    directConfigFetchCount: 1,
+    directHashFetchCount: 2,
+    cachedQueryDuringFreshInterval: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    cachedHashFetchCount: 2,
+    queryDuringUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    queryAfterUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    unchangedHashFetchCount: 3,
+    queryDuringHashCheck: '',
+    rejectedQuery: '',
+    buttonsAfterUnsupportedHash: 0,
+    safeFailureFallback: 'sum(rate(fallback_total{name="bercut1", zone="smssrv28"}[5m]))',
+    buttonsAfterSafeFallback: 1,
+    safeNetworkFailureFallback: 'sum(rate(fallback_total{name="bercut1", zone="smssrv28"}[5m]))',
+    buttonsAfterNetworkFallback: 1,
+    malformedSnapshotReason: 'rule_index_unavailable',
+    malformedRuleFallback: '',
+    buttonsAfterMalformedRule: 0,
+    conflictingIdentityQuery: '',
+    buttonsAfterConflictingIdentity: 0
+  });
+
+  const concurrentRuleSnapshotResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunHelperGrafanaHandoff = {
+      createGrafanaHandoff() {
+        return { openQuery() {}, cleanupExpired() {}, destroy() {} };
+      }
+    };
+    const names = Array.from({ length: 20 }, (_unused, index) => 'synthetic.browser.concurrent.' + index);
+    const configText = names.map((name, index) => [
+      'alert ' + name + ' {',
+      "  $usage_graph = promras('''browser_concurrent_metric_" + index + "''', '5m', '2h', '')",
+      '  warn = 1',
+      '}'
+    ].join('\\n')).join('\\n\\n');
+    let configFetchCount = 0;
+    let hashFetchCount = 0;
+    globalThis.fetch = async (url) => {
+      if (url === '/api/config/running_hash') {
+        hashFetchCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => JSON.stringify({ Hash: 'BROWSER-CONCURRENT-H1' })
+        };
+      }
+      if (url === '/api/config?hash=') {
+        configFetchCount += 1;
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => configText
+        };
+      }
+      throw new Error('unexpected synthetic URL: ' + url);
+    };
+    ${promqlSource}
+    ${ruleGraphSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+
+    await Promise.all(names.map((name) => hooks.ruleGraphResolver.refresh([name])));
+
+    const root = document.createElement('div');
+    root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+    const children = names.map((name, index) => {
+      const alertKey = name + '{zone=z' + index + '}';
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      heading.setAttribute('ng-click', 'toggle()');
+      const idNode = document.createElement('span');
+      idNode.setAttribute('ng-show', 'state.Id');
+      idNode.textContent = '#' + (800 + index);
+      heading.appendChild(idNode);
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+      subjectNode.textContent = alertKey;
+      heading.appendChild(subjectNode);
+      const agoNode = document.createElement('span');
+      agoNode.setAttribute('ts-since', 'child.Ago');
+      agoNode.textContent = '1m';
+      heading.appendChild(agoNode);
+      panel.appendChild(heading);
+      root.appendChild(panel);
+      return {
+        Alert: name,
+        AlertKey: alertKey,
+        Subject: alertKey,
+        Ago: '1m',
+        State: {
+          Id: 800 + index,
+          Alert: name,
+          AlertKey: alertKey,
+          Tags: 'zone=z' + index,
+          Expr: ''
+        }
+      };
+    });
+    document.body.appendChild(root);
+    const payload = { Groups: { NeedAck: [{ Subject: 'concurrent group', Children: children }] } };
+    hooks.applyAlertsPayload(payload);
+    hooks.rebuildGrafanaQueryIndex(payload);
+    hooks.ensureGrafanaQueryButtons();
+    return {
+      configFetchCount,
+      hashFetchCount,
+      actionCount: root.querySelectorAll('.bosun-grafana-query-btn').length,
+      allQueriesPresent: Array.from(root.querySelectorAll('.panel')).every((panel, index) => {
+        return hooks.getGrafanaQueryForPanel(panel) ===
+          'browser_concurrent_metric_' + index + '{zone="z' + index + '"}';
+      })
+    };
+  })()`);
+  assert.deepStrictEqual(concurrentRuleSnapshotResult, {
+    configFetchCount: 1,
+    hashFetchCount: 2,
+    actionCount: 20,
+    allQueriesPresent: true
+  });
+
+  const settingsLifecycleResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML =
+      '<button class="bosun-copy-alert-btn"></button>' +
+      '<button class="bosun-copy-all-alerts-btn"></button>' +
+      '<button class="bosun-copy-last-action-btn"></button>' +
+      '<button class="bosun-grafana-query-btn"></button>' +
+      '<div class="bosun-silence-hidden"><span class="bosun-silenced-badge"></span></div>' +
+      '<div class="bosun-user-comment-hidden"></div>' +
+      '<div class="bosun-acknowledged-collapsed"></div>' +
+      '<div id="bosun-new-alerts-notice"></div>' +
+      '<div class="bosun-sound-alerts-wrap"></div>' +
+      '<div class="bosun-auto-refresh-group"></div>' +
+      '<div class="bosun-action-templates"></div>';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    hooks.setFeature('copyButtons', false);
+    const independentAfterCopyDisable = {
+      copy: document.querySelectorAll('.bosun-copy-alert-btn, .bosun-copy-all-alerts-btn').length,
+      lastAction: document.querySelectorAll('.bosun-copy-last-action-btn').length,
+      grafana: document.querySelectorAll('.bosun-grafana-query-btn').length
+    };
+    hooks.setFeature('grafanaIntegration', false);
+    hooks.setFeature('silencedFilter', false);
+    hooks.setFeature('noCommentFilter', false);
+    hooks.setFeature('acknowledgedCollapse', false);
+    hooks.setFeature('soundNotifications', false);
+    hooks.setFeature('visualNewAlertNotifications', false);
+    hooks.setFeature('autoRefresh', false);
+    hooks.setFeature('actionTemplates', false);
+    hooks.setFeature('checkboxImprovements', false);
+    const disabled = {
+      grafana: document.querySelectorAll('.bosun-grafana-query-btn').length,
+      hidden: document.querySelectorAll('.bosun-silence-hidden').length,
+      silencedBadge: document.querySelectorAll('.bosun-silenced-badge').length,
+      noComment: document.querySelectorAll('.bosun-user-comment-hidden').length,
+      acknowledged: document.querySelectorAll('.bosun-acknowledged-collapsed').length,
+      sound: document.querySelectorAll('.bosun-sound-alerts-wrap').length,
+      visual: document.querySelectorAll('#bosun-new-alerts-notice').length,
+      autoRefresh: document.querySelectorAll('.bosun-auto-refresh-group').length,
+      actionTemplates: document.querySelectorAll('.bosun-action-templates').length,
+      checkboxStyleDisabled: document.body.classList.contains('bosun-checkbox-improvements-disabled')
+    };
+    hooks.setFeature('checkboxImprovements', true);
+    hooks.setFeature('lastActionEnhancements', false);
+    return {
+      independentAfterCopyDisable,
+      disabled,
+      checkboxStyleReenabled: !document.body.classList.contains('bosun-checkbox-improvements-disabled'),
+      lastActionRequiresReload: document.querySelectorAll('.bosun-copy-last-action-btn').length === 1
+    };
+  })()`);
+  assert.deepStrictEqual(settingsLifecycleResult, {
+    independentAfterCopyDisable: { copy: 0, lastAction: 1, grafana: 1 },
+    disabled: {
+      grafana: 0,
+      hidden: 0,
+      silencedBadge: 0,
+      noComment: 0,
+      acknowledged: 0,
+      sound: 0,
+      visual: 0,
+      autoRefresh: 0,
+      actionTemplates: 0,
+      checkboxStyleDisabled: true
+    },
+    checkboxStyleReenabled: true,
+    lastActionRequiresReload: true
+  });
+
+  const soundVisualIndependence = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    const trackerAdds = [];
+    const played = [];
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunSilenceHiderNeedAckSeverity = {
+      createNeedAckSeverity() {
+        return {
+          collectCurrentIdsAndSeverity(payload) {
+            const currentIds = new Set();
+            const idToSeverity = new Map();
+            for (const group of payload?.Groups?.NeedAck || []) {
+              for (const child of group.Children || []) {
+                const id = String(child.State.Id);
+                currentIds.add(id);
+                idToSeverity.set(id, 'warning');
+              }
+            }
+            return { currentIds, idToSeverity };
+          },
+          needAckStableKey(child) { return String(child?.State?.Id || ''); },
+          needAckGroupStableKey() { return ''; }
+        };
+      }
+    };
+    globalThis.BosunSilenceHiderSound = {
+      createSound() {
+        return {
+          playNeedAckChime(kind) { played.push(kind); },
+          destroy() {}, installAudioUnlockTracking() {}, ensureAudioObjects() {}
+        };
+      }
+    };
+    globalThis.BosunHelperNewAlertTracker = {
+      createNewAlertTracker() {
+        return {
+          start() {}, destroy() {}, reconcile() {},
+          add(ids) { trackerAdds.push(ids.slice()); }
+        };
+      }
+    };
+    ${needAckBaselineSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    const payload = (ids) => ({ Groups: { NeedAck: [{
+      Subject: 'group',
+      Children: ids.map((id) => ({ Subject: 'alert-' + id, State: { Id: id } }))
+    }] } });
+    hooks.applyAlertsPayload(payload(['A']), { source: 'leader' });
+    hooks.setPreference('soundEnabled', false);
+    hooks.applyAlertsPayload(payload(['A', 'B']), { source: 'leader' });
+    await Promise.resolve();
+    return { trackerAdds, played };
+  })()`);
+  assert.deepStrictEqual(soundVisualIndependence, { trackerAdds: [['B']], played: [] });
+
+  const visualTrackerLifecycle = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    const calls = { start: 0, destroy: 0, add: 0, reconcile: [] };
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunHelperNewAlertTracker = {
+      createNewAlertTracker() {
+        return {
+          start() { calls.start += 1; return Promise.resolve(); },
+          destroy() { calls.destroy += 1; },
+          add() { calls.add += 1; },
+          reconcile(payload) { calls.reconcile.push(payload.marker); }
+        };
+      }
+    };
+    globalThis.BosunSilenceHiderNeedAckBaseline = {
+      createNeedAckBaseline() { return { process() {}, reset() {}, restoreFromSession() {} }; }
+    };
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    hooks.setFeature('visualNewAlertNotifications', false);
+    hooks.applyAlertsPayload({ marker: 'latest', Groups: { NeedAck: [] } }, { source: 'leader' });
+    hooks.setFeature('visualNewAlertNotifications', true);
+    await Promise.resolve();
+    await Promise.resolve();
+    return calls;
+  })()`);
+  assert.deepStrictEqual(visualTrackerLifecycle, {
+    start: 1,
+    destroy: 1,
+    add: 0,
+    reconcile: ['latest']
+  });
+
+  const checkboxActionGate = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/action?type=note');
+    document.body.innerHTML = '<input id="notify" type="checkbox" ng-model="state.Notify" checked>';
+    const notify = document.querySelector('#notify');
+    let clicks = 0;
+    notify.addEventListener('click', () => { clicks += 1; });
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${pageUtilsSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    hooks.setFeature('checkboxImprovements', false);
+    hooks.applyActionPageTweaks();
+    return { checked: notify.checked, clicks };
+  })()`);
+  assert.deepStrictEqual(checkboxActionGate, { checked: true, clicks: 0 });
+
+  const preferenceWriteRollback = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    const defaults = {
+      schemaVersion: 1,
+      features: {
+        singleAlertAge: true, checkboxImprovements: true, copyButtons: true,
+        lastActionEnhancements: true, silencedFilter: true, noCommentFilter: true,
+        acknowledgedCollapse: true, soundNotifications: true,
+        visualNewAlertNotifications: true, autoRefresh: true,
+        actionTemplates: true, grafanaIntegration: true
+      },
+      preferences: {
+        showSilenced: false, noCommentFilterActive: false, acknowledgedCollapsed: false,
+        soundEnabled: true, autoRefreshEnabled: true, autoRefreshIdleSeconds: 60
+      },
+      actionTemplates: { note: null, ack: null, close: null },
+      internal: { diagnosticsEnabled: false }
+    };
+    globalThis.BosunHelperSettings = {
+      DEFAULTS: defaults,
+      createSettingsStore() {
+        return {
+          start: async () => defaults,
+          subscribe() { return () => {}; },
+          getSnapshot() { return JSON.parse(JSON.stringify(defaults)); },
+          update() { return Promise.reject(new Error('synthetic preference write failure')); }
+        };
+      }
+    };
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    hooks.handleSoundAlertsToggle();
+    await Promise.resolve();
+    await Promise.resolve();
+    return hooks.runtimeSettings();
+  })()`);
+  assert.strictEqual(preferenceWriteRollback.soundAlertsEnabled, true);
+  assert.strictEqual(preferenceWriteRollback.toolbarStatusSource, 'storage-write');
+  assert.strictEqual(preferenceWriteRollback.toolbarStatusTimer, null, 'storage failure warning must be sticky');
+
+  const settingsLoadRecovery = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    let failLoad = true;
+    const defaults = {
+      schemaVersion: 1,
+      features: {
+        singleAlertAge: true, checkboxImprovements: true, copyButtons: true,
+        lastActionEnhancements: true, silencedFilter: true, noCommentFilter: true,
+        acknowledgedCollapse: true, soundNotifications: true,
+        visualNewAlertNotifications: true, autoRefresh: true,
+        actionTemplates: true, grafanaIntegration: true
+      },
+      preferences: {
+        showSilenced: false, noCommentFilterActive: false, acknowledgedCollapsed: false,
+        soundEnabled: true, autoRefreshEnabled: true, autoRefreshIdleSeconds: 60
+      },
+      actionTemplates: { note: null, ack: null, close: null },
+      internal: { diagnosticsEnabled: false }
+    };
+    globalThis.BosunHelperSettings = {
+      DEFAULTS: defaults,
+      createSettingsStore() {
+        return {
+          start() { return failLoad ? Promise.reject(new Error('synthetic initial get failure')) : Promise.resolve(defaults); },
+          subscribe() { return () => {}; },
+          getSnapshot() { return JSON.parse(JSON.stringify(defaults)); },
+          update: async () => defaults
+        };
+      }
+    };
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    await new Promise((resolve) => hooks.loadState(resolve));
+    const failed = hooks.runtimeSettings();
+    failLoad = false;
+    await new Promise((resolve) => hooks.loadState(resolve));
+    const recovered = hooks.runtimeSettings();
+    return { failed, recovered };
+  })()`);
+  assert.strictEqual(settingsLoadRecovery.failed.toolbarStatusSource, 'storage-read');
+  assert.strictEqual(settingsLoadRecovery.failed.toolbarStatusTimer, null);
+  assert.strictEqual(settingsLoadRecovery.recovered.toolbarStatusSource, '');
+
   const accessibilityResult = await evaluate(client, `(() => {
     document.body.innerHTML = '<div id="actions"></div><div id="child-title"></div>' +
       '<div id="last-action">Note by operator at <span ts-time="state.LastAction.Time">' +
@@ -1448,6 +2234,107 @@ async function runBrowserAssertions(client) {
   });
   assert.deepStrictEqual(accessibilityResult.markerOnActionRoute, { ready: false, note: false });
   assert.deepStrictEqual(accessibilityResult.markerAfterDashboardReturn, { ready: true, note: true });
+
+  const ambiguousGrafanaEditorResult = await evaluate(client, `(async () => {
+    document.body.innerHTML =
+      '<div class="query-row">' +
+        '<button id="grafana-code-toggle" type="button">Code</button>' +
+        '<div id="grafana-editor-one" class="cm-editor" style="min-height:24px">' +
+          '<div class="cm-content" contenteditable="true" style="min-height:20px">first query</div>' +
+        '</div>' +
+        '<div id="grafana-editor-two" class="cm-editor" style="min-height:24px">' +
+          '<div class="cm-content" contenteditable="true" style="min-height:20px">second query</div>' +
+        '</div>' +
+        '<button id="grafana-run" type="button">Run queries</button>' +
+      '</div>';
+
+    function createView(initialText) {
+      let text = initialText;
+      let dispatchCount = 0;
+      const view = {
+        state: { doc: { toString: () => text } },
+        dispatch(transaction) {
+          dispatchCount += 1;
+          text = transaction.changes.insert;
+          this.state.doc = { toString: () => text };
+        }
+      };
+      return {
+        view,
+        getText: () => text,
+        getDispatchCount: () => dispatchCount
+      };
+    }
+
+    const first = createView('first query');
+    const second = createView('second query');
+    document.getElementById('grafana-editor-one').cmView = first.view;
+    document.getElementById('grafana-editor-two').cmView = second.view;
+    const secondContent = document.querySelector('#grafana-editor-two .cm-content');
+    secondContent.focus();
+
+    let runClicks = 0;
+    document.getElementById('grafana-run').addEventListener('click', () => { runClicks += 1; });
+    const channelToken = 'browser-ambiguous-editor-token';
+    const requestId = 'browser-ambiguous-editor-request';
+    const operationId = 'browser-ambiguous-editor-operation';
+    const response = new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        window.removeEventListener('message', onMessage);
+        reject(new Error('Timed out waiting for the Grafana page bridge result'));
+      }, 1000);
+      function onMessage(event) {
+        if (
+          event.source !== window ||
+          event.origin !== window.location.origin ||
+          event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT' ||
+          event.data?.requestId !== requestId
+        ) return;
+        clearTimeout(timeoutId);
+        window.removeEventListener('message', onMessage);
+        resolve(event.data.result);
+      }
+      window.addEventListener('message', onMessage);
+    });
+
+    const bridgeScript = document.createElement('script');
+    bridgeScript.dataset.channelToken = channelToken;
+    bridgeScript.textContent = ${grafanaPageSource};
+    document.documentElement.appendChild(bridgeScript);
+    window.postMessage({
+      type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
+      channelToken,
+      requestId,
+      operationId,
+      query: 'replacement query',
+      run: true,
+      deadlineAt: Date.now() + 5000
+    }, window.location.origin);
+
+    const result = await response;
+    return {
+      result,
+      runClicks,
+      firstText: first.getText(),
+      secondText: second.getText(),
+      firstDispatches: first.getDispatchCount(),
+      secondDispatches: second.getDispatchCount(),
+      firstDomText: document.querySelector('#grafana-editor-one .cm-content').textContent,
+      secondDomText: secondContent.textContent,
+      activeEditorPreserved: document.activeElement === secondContent
+    };
+  })()`);
+  assert.deepStrictEqual(ambiguousGrafanaEditorResult, {
+    result: { ok: false, reason: 'ambiguous-editor-dom', terminal: true },
+    runClicks: 0,
+    firstText: 'first query',
+    secondText: 'second query',
+    firstDispatches: 0,
+    secondDispatches: 0,
+    firstDomText: 'first query',
+    secondDomText: 'second query',
+    activeEditorPreserved: true
+  });
 
   const handoffResult = await evaluate(client, `(async () => {
     ${handoffSource}

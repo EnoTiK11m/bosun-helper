@@ -16,6 +16,9 @@
     let pendingNeedAckRetryAttached = false;
     let alertChimeAudio = null;
     let softChimeAudio = null;
+    let unlockTrackingHandler = null;
+    let retryTrackingHandler = null;
+    let lifecycleGeneration = 0;
     const crossTabDedupMs = 2000;
 
     function ensureAudioObjects() {
@@ -36,6 +39,7 @@
 
     function unlockAudioOnce() {
       if (audioUnlocked) return;
+      const generation = lifecycleGeneration;
       ensureAudioObjects();
 
       const candidates = [alertChimeAudio, softChimeAudio].filter(Boolean);
@@ -65,17 +69,21 @@
       });
 
       Promise.all(unlockPromises).then((results) => {
+        if (generation !== lifecycleGeneration) return;
         audioUnlocked = results.some(Boolean);
       });
     }
 
     function installAudioUnlockTracking() {
+      if (unlockTrackingHandler) return;
       const onceHandler = () => {
         unlockAudioOnce();
         window.removeEventListener('pointerdown', onceHandler, true);
         window.removeEventListener('keydown', onceHandler, true);
+        if (unlockTrackingHandler === onceHandler) unlockTrackingHandler = null;
       };
 
+      unlockTrackingHandler = onceHandler;
       window.addEventListener('pointerdown', onceHandler, true);
       window.addEventListener('keydown', onceHandler, true);
     }
@@ -104,9 +112,11 @@
       pendingNeedAckRetryAttached = true;
 
       const retryHandler = () => {
+        const generation = lifecycleGeneration;
         window.removeEventListener('pointerdown', retryHandler, true);
         window.removeEventListener('keydown', retryHandler, true);
         pendingNeedAckRetryAttached = false;
+        if (retryTrackingHandler === retryHandler) retryTrackingHandler = null;
 
         const retryKind = pendingNeedAckChimeKind;
         pendingNeedAckChimeKind = null;
@@ -114,10 +124,12 @@
 
         unlockAudioOnce();
         setTimeout(() => {
+          if (generation !== lifecycleGeneration) return;
           playNeedAckChimeUnlocked(retryKind);
         }, 0);
       };
 
+      retryTrackingHandler = retryHandler;
       window.addEventListener('pointerdown', retryHandler, true);
       window.addEventListener('keydown', retryHandler, true);
       reportDiagnostics('sound-retry-armed', `kind=${kind}`);
@@ -147,6 +159,7 @@
 
     function playNeedAckChimeUnlocked(kind) {
       if (!getEnabled()) return;
+      const generation = lifecycleGeneration;
 
       const now = Date.now();
       if (now - lastNeedAckChimeAt < 450) {
@@ -169,10 +182,12 @@
         if (playPromise && typeof playPromise.then === 'function') {
           return playPromise
             .then(() => {
+              if (generation !== lifecycleGeneration) return false;
               reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
               return true;
             })
             .catch((err) => {
+              if (generation !== lifecycleGeneration) return false;
               const reason = err?.name || err?.message || 'play-error';
               if (!isAutoplayBlockReason(reason)) {
                 console.warn('[Bosun plugin] Sound play blocked or failed:', formatPlayError(err), err);
@@ -186,6 +201,7 @@
         reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
         return Promise.resolve(true);
       } catch (err) {
+        if (generation !== lifecycleGeneration) return Promise.resolve(false);
         const reason = err?.name || err?.message || 'play-error';
         if (!isAutoplayBlockReason(reason)) {
           console.warn('[Bosun plugin] Sound play failed:', formatPlayError(err), err);
@@ -199,6 +215,7 @@
 
     function playNeedAckChime(kind) {
       if (!getEnabled()) return;
+      const generation = lifecycleGeneration;
 
       const lockManager = globalThis.navigator?.locks;
       if (lockManager?.request) {
@@ -206,6 +223,7 @@
           'bosun-helper-needack-sound',
           { ifAvailable: true, mode: 'exclusive' },
           (lock) => {
+            if (generation !== lifecycleGeneration) return false;
             if (!lock) {
               reportDiagnostics('sound-cross-tab-suppressed', `kind=${kind}, via=lock`);
               return false;
@@ -214,6 +232,7 @@
             return playNeedAckChimeUnlocked(kind);
           }
         ).catch((err) => {
+          if (generation !== lifecycleGeneration) return;
           reportDiagnostics('sound-lock-failed', err?.message || 'unknown-error');
           if (claimCrossTabPlayback(kind)) playNeedAckChimeUnlocked(kind);
         });
@@ -221,6 +240,29 @@
       }
 
       if (claimCrossTabPlayback(kind)) playNeedAckChimeUnlocked(kind);
+    }
+
+    function destroy() {
+      lifecycleGeneration += 1;
+      if (unlockTrackingHandler) {
+        window.removeEventListener('pointerdown', unlockTrackingHandler, true);
+        window.removeEventListener('keydown', unlockTrackingHandler, true);
+        unlockTrackingHandler = null;
+      }
+      if (retryTrackingHandler) {
+        window.removeEventListener('pointerdown', retryTrackingHandler, true);
+        window.removeEventListener('keydown', retryTrackingHandler, true);
+        retryTrackingHandler = null;
+      }
+      pendingNeedAckRetryAttached = false;
+      pendingNeedAckChimeKind = null;
+      for (const audio of [alertChimeAudio, softChimeAudio]) {
+        try { audio?.pause?.(); } catch (_) {}
+      }
+      alertChimeAudio = null;
+      softChimeAudio = null;
+      audioUnlocked = false;
+      lastNeedAckChimeAt = 0;
     }
 
     return {
@@ -232,7 +274,8 @@
       scheduleNeedAckChimeRetry,
       claimCrossTabPlayback,
       playNeedAckChimeUnlocked,
-      playNeedAckChime
+      playNeedAckChime,
+      destroy
     };
   }
 

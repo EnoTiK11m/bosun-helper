@@ -46,7 +46,9 @@ const bosunScripts = manifest.content_scripts[0].js;
 const contentIndex = bosunScripts.indexOf('content.js');
 assert.ok(contentIndex >= 0, 'Bosun entry must include content.js');
 for (const provider of [
+  'settings.js',
   'promql.js',
+  'bosun-rule-graph.js',
   'single-alert-age.js',
   'action-templates.js',
   'grafana-handoff.js',
@@ -57,6 +59,14 @@ for (const provider of [
   assert.ok(providerIndex >= 0, `Bosun entry must include ${provider}`);
   assert.ok(providerIndex < contentIndex, `${provider} must load before content.js`);
 }
+assert.ok(
+  bosunScripts.indexOf('settings.js') < bosunScripts.indexOf('action-templates.js'),
+  'settings.js must load before action-templates.js'
+);
+assert.ok(
+  bosunScripts.indexOf('promql.js') < bosunScripts.indexOf('bosun-rule-graph.js'),
+  'promql.js must load before bosun-rule-graph.js'
+);
 assert.deepStrictEqual(
   manifest.content_scripts[1].js,
   ['config.js', 'grafana-content.js'],
@@ -95,6 +105,20 @@ const smoke = spawnSync(process.execPath, ['smoke-test.js'], {
   stdio: 'inherit'
 });
 assert.strictEqual(smoke.status, 0, 'Smoke test failed');
+
+const settings = spawnSync(process.execPath, ['settings-test.js'], {
+  cwd: root,
+  encoding: 'utf8',
+  stdio: 'inherit'
+});
+assert.strictEqual(settings.status, 0, 'Settings test failed');
+
+const ruleGraph = spawnSync(process.execPath, ['rule-graph-test.js'], {
+  cwd: root,
+  encoding: 'utf8',
+  stdio: 'inherit'
+});
+assert.strictEqual(ruleGraph.status, 0, 'Rule graph test failed');
 
 const integration = spawnSync(process.execPath, ['integration-test.js'], {
   cwd: root,

@@ -750,7 +750,13 @@ function createGrafanaPageContext(overrides = {}) {
   return { context, window, messageListeners, postedMessages };
 }
 
-async function dispatchGrafanaApply(harness, operationId, query, run = true) {
+async function dispatchGrafanaApply(
+  harness,
+  operationId,
+  query,
+  run = true,
+  deadlineAt = Date.now() + 10_000
+) {
   const listener = harness.messageListeners[0];
   assert.ok(listener, 'Grafana bridge message listener was not installed');
   await listener({
@@ -762,10 +768,290 @@ async function dispatchGrafanaApply(harness, operationId, query, run = true) {
       requestId: `request-${operationId}`,
       operationId,
       query,
-      run
+      run,
+      deadlineAt
     }
   });
   return harness.postedMessages.at(-1)?.message?.result;
+}
+
+async function testGrafanaRejectsAmbiguousMonacoModels() {
+  const values = ['old query', 'old query'];
+  const models = values.map((_value, index) => ({
+    getValue: () => values[index],
+    getVersionId: () => 1,
+    setValue(next) { values[index] = next; }
+  }));
+  const textarea = {
+    value: 'old query',
+    focus() {}, click() {}, blur() {}, dispatchEvent() {}
+  };
+  const harness = createGrafanaPageContext({
+    monaco: { editor: { getModels: () => models } },
+    querySelector(selector) {
+      return selector.includes('textarea.inputarea') ? textarea : null;
+    },
+    querySelectorAll(selector) {
+      return selector.includes('textarea.inputarea') ? [textarea] : [];
+    }
+  });
+
+  const result = await dispatchGrafanaApply(harness, 'ambiguous-models', 'new query', false);
+  assert.deepStrictEqual(values, ['old query', 'old query'], 'Ambiguous Monaco models were mutated');
+  assert.strictEqual(result?.ok, false);
+
+  let modelValue = 'old query';
+  const singleModel = {
+    getValue: () => modelValue,
+    getVersionId: () => 1,
+    setValue(next) { modelValue = next; }
+  };
+  const editors = [
+    { innerText: 'first', textContent: 'first', closest: () => null },
+    { innerText: 'second', textContent: 'second', closest: () => null }
+  ];
+  const ambiguousDom = createGrafanaPageContext({
+    monaco: { editor: { getModels: () => [singleModel] } },
+    querySelectorAll(selector) {
+      if (selector.includes('textarea.inputarea')) return [textarea];
+      if (selector.includes('.cm-content')) return editors;
+      return [];
+    }
+  });
+  const domResult = await dispatchGrafanaApply(
+    ambiguousDom,
+    'ambiguous-editor-dom',
+    'new query',
+    false
+  );
+  assert.strictEqual(modelValue, 'old query', 'Ambiguous editor DOM still mutated a Monaco model');
+  assert.strictEqual(domResult?.ok, false);
+}
+
+async function testGrafanaRejectsMixedAdaptersAndIgnoresHiddenAncestorDecoy() {
+  let cmText = 'old cm query';
+  let modelText = 'old monaco query';
+  const view = {
+    state: { doc: { toString: () => cmText } },
+    dispatch(transaction) { cmText = transaction.changes.insert; }
+  };
+  const editorRoot = { cmView: view, querySelectorAll: () => [] };
+  const content = { innerText: '', textContent: '', closest: () => editorRoot };
+  const textarea = { value: 'old monaco query', focus() {}, click() {}, blur() {}, dispatchEvent() {} };
+  const model = {
+    getValue: () => modelText,
+    getVersionId: () => 1,
+    setValue(next) { modelText = next; }
+  };
+  const mixed = createGrafanaPageContext({
+    monaco: { editor: { getModels: () => [model] } },
+    querySelectorAll(selector) {
+      if (selector.includes('textarea.inputarea')) return [textarea];
+      if (selector.includes('.cm-content')) return [content];
+      return [];
+    }
+  });
+  const mixedResult = await dispatchGrafanaApply(mixed, 'mixed-adapters', 'new query', false);
+  assert.strictEqual(cmText, 'old cm query', 'Mixed editor adapters mutated CodeMirror');
+  assert.strictEqual(modelText, 'old monaco query', 'Mixed editor adapters mutated Monaco');
+  assert.strictEqual(mixedResult?.ok, false);
+
+  let visibleText = 'old visible query';
+  const visibleView = {
+    state: { doc: { toString: () => visibleText } },
+    dispatch(transaction) { visibleText = transaction.changes.insert; }
+  };
+  const visibleRoot = { cmView: visibleView, querySelectorAll: () => [] };
+  const hiddenAncestor = { hidden: true, parentElement: null };
+  const hiddenContent = {
+    innerText: 'hidden query',
+    textContent: 'hidden query',
+    parentElement: hiddenAncestor,
+    closest: () => ({ cmView: null, querySelectorAll: () => [] })
+  };
+  const visibleContent = {
+    innerText: '', textContent: '', parentElement: null, closest: () => visibleRoot
+  };
+  const zeroRectContent = {
+    innerText: 'layout-hidden query',
+    textContent: 'layout-hidden query',
+    parentElement: null,
+    getClientRects: () => [],
+    closest: () => ({ cmView: null, querySelectorAll: () => [] })
+  };
+  const hiddenDecoy = createGrafanaPageContext({
+    querySelectorAll(selector) {
+      return selector.includes('.cm-content')
+        ? [visibleContent, hiddenContent, zeroRectContent]
+        : [];
+    }
+  });
+  const hiddenResult = await dispatchGrafanaApply(
+    hiddenDecoy,
+    'hidden-ancestor-decoy',
+    'new visible query',
+    false
+  );
+  assert.strictEqual(hiddenResult?.ok, true, 'Hidden ancestor decoy blocked unique visible editor');
+  assert.strictEqual(visibleText, 'new visible query');
+}
+
+async function testGrafanaRequiresUniqueVisibleEnabledRunButton() {
+  async function runCase(operationId, buttons) {
+    let docText = 'old query';
+    let clicks = 0;
+    for (const button of buttons) {
+      button.textContent = 'Run queries';
+      button.click = () => { clicks += 1; };
+    }
+    const view = {
+      state: { doc: { toString: () => docText } },
+      dispatch(transaction) { docText = transaction.changes.insert; }
+    };
+    const editorRoot = { cmView: view, querySelectorAll: () => [] };
+    const content = { innerText: '', textContent: '', closest: () => editorRoot };
+    const queryArea = { querySelectorAll: () => [content] };
+    const codeButton = { textContent: 'Code', closest: () => ({ parentElement: queryArea }) };
+    const harness = createGrafanaPageContext({
+      querySelectorAll(selector) {
+        if (selector === 'button') return [codeButton, ...buttons];
+        if (selector.includes('.cm-content')) return [content];
+        return [];
+      }
+    });
+    const result = await dispatchGrafanaApply(harness, operationId, 'new query');
+    return { result, clicks };
+  }
+
+  for (const [name, buttons] of [
+    ['missing', []],
+    ['duplicate', [{}, {}]],
+    ['hidden', [{ hidden: true }]],
+    ['disabled', [{ disabled: true }]],
+    ['aria-disabled', [{ getAttribute: (name) => name === 'aria-disabled' ? 'true' : null }]]
+  ]) {
+    const outcome = await runCase(`run-${name}`, buttons);
+    assert.strictEqual(outcome.result?.ok, false, `${name} Run button produced success`);
+    assert.strictEqual(outcome.clicks, 0, `${name} Run button was clicked`);
+  }
+}
+
+async function testGrafanaFocusedFallbackNeverRuns() {
+  const editor = {
+    innerText: 'old query', textContent: 'old query',
+    focus() {}, click() {}, closest: () => null
+  };
+  const queryArea = { querySelectorAll: () => [editor] };
+  const codeButton = { textContent: 'Code', closest: () => ({ parentElement: queryArea }) };
+  let runCount = 0;
+  let commandCount = 0;
+  let backingText = 'old backing query';
+  const runButton = { textContent: 'Run queries', click() { runCount += 1; } };
+  const harness = createGrafanaPageContext({
+    querySelectorAll(selector) {
+      if (selector === 'button') return [codeButton, runButton];
+      if (selector.includes('.cm-content')) return [editor];
+      return [];
+    },
+    execCommand(command, _showUi, value) {
+      commandCount += 1;
+      backingText = command === 'delete' ? '' : String(value || '');
+      editor.innerText = command === 'delete' ? '' : String(value || '');
+      editor.textContent = editor.innerText;
+      return true;
+    }
+  });
+  const result = await dispatchGrafanaApply(harness, 'focused-run', 'new query');
+  assert.strictEqual(editor.innerText, 'old query', 'Focused fallback mutated DOM editor state');
+  assert.strictEqual(backingText, 'old backing query', 'Focused fallback mutated backing state');
+  assert.strictEqual(commandCount, 0, 'Focused fallback invoked execCommand');
+  assert.strictEqual(runCount, 0, 'Focused DOM fallback clicked Run queries');
+  assert.strictEqual(result?.ok, false, 'Focused DOM fallback reported automatic Run success');
+}
+
+async function testGrafanaHardDeadlinePreventsMutation() {
+  let value = 'old query';
+  let setCount = 0;
+  const model = {
+    getValue: () => value,
+    getVersionId: () => setCount,
+    setValue(next) { setCount += 1; value = next; }
+  };
+  const textarea = { value: 'old query', focus() {}, click() {}, blur() {}, dispatchEvent() {} };
+  const harness = createGrafanaPageContext({
+    monaco: { editor: { getModels: () => [model] } },
+    querySelector(selector) {
+      return selector.includes('textarea.inputarea') ? textarea : null;
+    },
+    querySelectorAll(selector) {
+      return selector.includes('textarea.inputarea') ? [textarea] : [];
+    }
+  });
+  const result = await dispatchGrafanaApply(
+    harness,
+    'expired-before-write',
+    'new query',
+    false,
+    Date.now() - 1
+  );
+  assert.strictEqual(setCount, 0, 'Expired operation mutated a Monaco model');
+  assert.strictEqual(value, 'old query');
+  assert.strictEqual(result?.ok, false);
+}
+
+async function testGrafanaCodeMirrorRejectsRemountAndEditAwayBack() {
+  async function runCase(kind) {
+    const timers = [];
+    let runCount = 0;
+    let docText = 'old query';
+    const view = {
+      state: { doc: { toString: () => docText } },
+      dispatch(transaction) {
+        docText = transaction.changes.insert;
+        this.state.doc = { toString: () => docText };
+      }
+    };
+    const replacementView = {
+      state: { doc: { toString: () => 'replacement' } },
+      dispatch() {}
+    };
+    const editorRoot = { cmView: view, isConnected: true, querySelectorAll: () => [] };
+    const replacementRoot = { cmView: replacementView, isConnected: true, querySelectorAll: () => [] };
+    const content = { innerText: '', textContent: '', isConnected: true, closest: () => editorRoot };
+    const replacementContent = {
+      innerText: '', textContent: '', isConnected: true, closest: () => replacementRoot
+    };
+    let activeContent = content;
+    const queryArea = { querySelectorAll: () => [activeContent] };
+    const codeButton = { textContent: 'Code', closest: () => ({ parentElement: queryArea }) };
+    const runButton = { textContent: 'Run queries', click() { runCount += 1; } };
+    const harness = createGrafanaPageContext({
+      setTimeout(callback) { timers.push(callback); return timers.length; },
+      querySelectorAll(selector) {
+        if (selector === 'button') return [codeButton, runButton];
+        if (selector.includes('.cm-content')) return [activeContent];
+        return [];
+      }
+    });
+
+    const pending = dispatchGrafanaApply(harness, `cm-${kind}`, 'new query');
+    await flushMicrotasks();
+    if (kind === 'remount') {
+      content.isConnected = false;
+      editorRoot.isConnected = false;
+      activeContent = replacementContent;
+    } else {
+      view.dispatch({ changes: { insert: 'user query' } });
+      view.dispatch({ changes: { insert: 'new query' } });
+    }
+    timers.shift()();
+    const result = await pending;
+    assert.strictEqual(runCount, 0, `CodeMirror ${kind} still ran`);
+    assert.strictEqual(result?.ok, false, `CodeMirror ${kind} reported success`);
+  }
+
+  await runCase('remount');
+  await runCase('edit-away-back');
 }
 
 async function testGrafanaMonacoConditionalRollback() {
@@ -800,6 +1086,7 @@ async function testGrafanaMonacoConditionalRollback() {
         return selector.includes('textarea.inputarea') ? textarea : null;
       },
       querySelectorAll(selector) {
+        if (selector.includes('textarea.inputarea')) return [textarea];
         return selector === 'button' ? [runButton] : [];
       }
     });
@@ -841,6 +1128,11 @@ async function testGrafanaMonacoConditionalRollback() {
       return selector.includes('textarea.inputarea')
         ? { focus() {}, click() {}, blur() {}, dispatchEvent() {} }
         : null;
+    },
+    querySelectorAll(selector) {
+      return selector.includes('textarea.inputarea')
+        ? [{ focus() {}, click() {}, blur() {}, dispatchEvent() {} }]
+        : [];
     }
   });
   await dispatchGrafanaApply(normalizedHarness, 'normalized-owned', 'new query', false);
@@ -938,9 +1230,10 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   const result = await dispatchGrafanaApply(harness, 'partial-delete', 'new query');
   assert.strictEqual(
     editor.innerText,
-    'part',
-    'Focused-editor fallback overwrote a synchronous framework change'
+    'old query',
+    'Insert-only focused-editor fallback mutated DOM state'
   );
+  assert.strictEqual(deleteCount, 0, 'Insert-only focused-editor fallback invoked execCommand');
   assert.strictEqual(result?.ok, false);
   assert.strictEqual(result?.rolledBack, undefined);
 }
@@ -955,6 +1248,12 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   await testVisibleFollowerImmediatelyTakesLeadership();
   await testNewAlertTrackerPersistsUntilNote();
   await testNewAlertTrackerRestoreRaceAndSaveRetry();
+  await testGrafanaRejectsAmbiguousMonacoModels();
+  await testGrafanaRejectsMixedAdaptersAndIgnoresHiddenAncestorDecoy();
+  await testGrafanaRequiresUniqueVisibleEnabledRunButton();
+  await testGrafanaFocusedFallbackNeverRuns();
+  await testGrafanaHardDeadlinePreventsMutation();
+  await testGrafanaCodeMirrorRejectsRemountAndEditAwayBack();
   await testGrafanaMonacoConditionalRollback();
   await testGrafanaCodeMirrorAwaitsRun();
   await testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete();

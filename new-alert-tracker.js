@@ -27,6 +27,7 @@
     let storageRevision = 0;
     let writeInFlight = false;
     let queuedSerialized = '';
+    let lifecycleGeneration = 0;
 
     function normalizeSeverity(value) {
       const severity = String(value || '').toLowerCase();
@@ -70,7 +71,7 @@
       notify();
     }
 
-    function restore(expectedRevision) {
+    function restore(expectedRevision, generation) {
       return new Promise((resolve) => {
         const storage = getStorage();
         if (!storage?.get) {
@@ -80,6 +81,10 @@
         }
         try {
           storage.get([storageKey], (items) => {
+            if (!started || generation !== lifecycleGeneration) {
+              resolve();
+              return;
+            }
             const error = getLastError();
             if (error) {
               reportDiagnostics('new-alert-tracker-restore-failed', error.message || 'unknown-error');
@@ -90,6 +95,10 @@
             resolve();
           });
         } catch (error) {
+          if (!started || generation !== lifecycleGeneration) {
+            resolve();
+            return;
+          }
           reportDiagnostics('new-alert-tracker-restore-failed', error?.message || 'unknown-error');
           if (storageRevision === expectedRevision) applyStoredValue(null);
           resolve();
@@ -98,6 +107,7 @@
     }
 
     function flushPersistQueue() {
+      if (!started) return;
       if (writeInFlight || !queuedSerialized) return;
       const storage = getStorage();
       if (!storage?.set) {
@@ -105,10 +115,12 @@
         return;
       }
       const serialized = queuedSerialized;
+      const generation = lifecycleGeneration;
       queuedSerialized = '';
       writeInFlight = true;
       try {
         storage.set({ [storageKey]: JSON.parse(serialized) }, () => {
+          if (!started || generation !== lifecycleGeneration) return;
           const error = getLastError();
           writeInFlight = false;
           if (error) {
@@ -127,6 +139,7 @@
     }
 
     function persist() {
+      if (!started) return;
       const serialized = serialize();
       if (serialized === lastSerialized || serialized === queuedSerialized) return;
       queuedSerialized = serialized;
@@ -183,7 +196,9 @@
     }
 
     async function add(newIds, idToSeverity) {
+      const generation = lifecycleGeneration;
       await (readyPromise || Promise.resolve());
+      if (!started || generation !== lifecycleGeneration) return;
       let changed = false;
       for (const rawId of Array.isArray(newIds) ? newIds : []) {
         const id = typeof rawId === 'string' ? rawId.trim() : '';
@@ -199,7 +214,9 @@
     }
 
     async function reconcile(payload) {
+      const generation = lifecycleGeneration;
       await (readyPromise || Promise.resolve());
+      if (!started || generation !== lifecycleGeneration) return;
       const { currentIds, idToSeverity } = collectCurrentIdsAndSeverity(payload);
       const notedIds = collectIdsWithNote(payload);
       let changed = false;
@@ -223,7 +240,9 @@
     function start() {
       if (started) return readyPromise;
       started = true;
+      const generation = ++lifecycleGeneration;
       storageListener = (changes, areaName) => {
+        if (!started || generation !== lifecycleGeneration) return;
         if (areaName !== 'local' || !changes?.[storageKey]) return;
         storageRevision += 1;
         const next = changes[storageKey].newValue;
@@ -236,14 +255,18 @@
         applyStoredValue(next);
       };
       storageChanges?.addListener?.(storageListener);
-      readyPromise = restore(storageRevision);
+      readyPromise = restore(storageRevision, generation);
       return readyPromise;
     }
 
     function destroy() {
+      lifecycleGeneration += 1;
       storageChanges?.removeListener?.(storageListener);
       storageListener = null;
       started = false;
+      readyPromise = null;
+      writeInFlight = false;
+      queuedSerialized = '';
     }
 
     return { start, destroy, add, reconcile };

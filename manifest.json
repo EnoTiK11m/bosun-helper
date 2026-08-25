@@ -31,6 +31,7 @@
       "js": [
         "config.js",
         "shared-utils.js",
+        "settings.js",
         "diagnostics.js",
         "sound.js",
         "alerts-data.js",
@@ -38,6 +39,7 @@
         "needack-baseline.js",
         "needack-severity.js",
         "promql.js",
+        "bosun-rule-graph.js",
         "page-utils.js",
         "styles.js",
         "activity.js",
