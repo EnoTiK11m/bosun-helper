@@ -3,7 +3,9 @@
   "name": "Bosun Helper",
   "version": "1.1",
   "description": "Браузерный плагин для дашборда Bosun, который снижает визуальный шум и ускоряет работу дежурного с алертами",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "web_accessible_resources": [
     {
       "resources": [
@@ -16,7 +18,9 @@
       ]
     },
     {
-      "resources": ["grafana-page.js"],
+      "resources": [
+        "grafana-page.js"
+      ],
       "matches": [
         "https://grafana.example.com/*"
       ]

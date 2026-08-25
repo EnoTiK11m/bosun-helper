@@ -173,14 +173,30 @@ globalThis.BosunHelperLocalConfig = {
 должен использовать HTTPS, соответствовать `grafanaHost` и вести на нужную
 панель редактирования.
 
-Синхронизируйте конфигурацию:
+Синхронизируйте локальную рабочую конфигурацию:
 
 ```bash
 npm run sync-config
 ```
 
 Скрипт проверяет hosts и URL, затем обновляет `config.js` и разрешённые адреса
-в `manifest.json`. После выполнения просмотрите оба файла перед коммитом.
+в `manifest.json` значениями из `config.local.js`.
+
+Перед публичным коммитом временно подготовьте безопасные example-значения:
+
+```bash
+npm run prepare-commit
+```
+
+Команда использует `config.example.js`, заменяет только host-dependent массивы
+`matches` и сохраняет остальные изменения `manifest.json`. Она проверяет
+получившиеся `config.js` и `manifest.json`, но ничего не добавляет в index и не
+создаёт commit. После commit восстановите локальную рабочую конфигурацию командой
+`npm run sync-config`.
+
+Если `config.js` или `manifest.json` уже staged, `prepare-commit` завершится с
+ошибкой до изменения файлов. Сначала уберите их из index, снова выполните
+`prepare-commit`, проверьте diff и только затем stage безопасные версии.
 
 `config.local.js` находится в `.gitignore` и не должен попадать в репозиторий.
 Не публикуйте внутренние hosts, URL панелей и данные алертов в issues, тестах или
@@ -303,6 +319,7 @@ same-window сообщения. Bridge не создаёт дополнител�
 | `npm run test:browser` | Headless DOM, interaction и layout-тесты в реальном Chromium engine |
 | `npm run check` | Проверка manifest/config, синтаксиса всех JS и повторный запуск Node-набора |
 | `npm run sync-config` | Валидация локальной конфигурации и синхронизация hosts |
+| `npm run prepare-commit` | Подготовка безопасных example-hosts перед публичным commit |
 
 Node-тесты используют `vm` и лёгкие DOM/Chrome stubs, а не jsdom. Browser-suite
 требует Node.js с глобальным `WebSocket` (рекомендуется Node.js 22+) и запускает
@@ -363,7 +380,8 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `content.js` | Основной UI и lifecycle страницы Bosun |
 | `grafana-content.js` | TTL/consume-once проверка pending-запроса и isolated-world bridge |
 | `grafana-page.js` | Однозначная model-backed работа с редактором Grafana в page context |
-| `scripts/sync-config.js` | Генерация `config.js` и обновление разрешённых hosts |
+| `scripts/config-sync.js` | Общая валидация и генерация config/manifest для local и public режимов |
+| `scripts/sync-config.js` | CLI выбора local или public source config |
 | `scripts/check.js` | Проверки manifest/config, синтаксиса и Node-набора |
 | `.github/workflows/checks.yml` | CI для push и pull request |
 

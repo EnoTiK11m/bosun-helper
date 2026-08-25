@@ -5,9 +5,10 @@
   "description": "Browser extension that improves the Bosun alert dashboard workflow",
   "scripts": {
     "check": "node scripts/check.js",
-    "test": "node settings-test.js && node rule-graph-test.js && node smoke-test.js && node integration-test.js && node regression-test.js",
+    "test": "node config-sync-test.js && node settings-test.js && node rule-graph-test.js && node smoke-test.js && node integration-test.js && node regression-test.js",
     "test:browser": "node browser-test.js",
-    "sync-config": "node scripts/sync-config.js"
+    "sync-config": "node scripts/sync-config.js local",
+    "prepare-commit": "node scripts/sync-config.js public"
   },
   "engines": {
     "node": ">=20"

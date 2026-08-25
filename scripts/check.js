@@ -3,8 +3,8 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
 const { spawnSync } = require('child_process');
+const { loadConfigFile } = require('./config-sync');
 
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
@@ -12,23 +12,27 @@ assert.strictEqual(manifest.manifest_version, 3, 'manifest_version must be 3');
 assert.ok(Array.isArray(manifest.content_scripts), 'content_scripts must be an array');
 assert.strictEqual(manifest.content_scripts.length, 2, 'Expected separate Bosun and Grafana scripts');
 
-const configContext = { globalThis: null };
-configContext.globalThis = configContext;
-vm.runInNewContext(fs.readFileSync(path.join(root, 'config.js'), 'utf8'), configContext, {
-  filename: 'config.js'
-});
-const config = configContext.BosunHelperLocalConfig;
-assert.ok(config && typeof config === 'object', 'config.js did not define BosunHelperLocalConfig');
-const expectedBosunMatches = Array.from(
-  config.bosunHosts,
-  (host) => `https://${new URL(`https://${host}`).hostname}/*`
-).sort();
+const config = loadConfigFile(path.join(root, 'config.js'));
+const expectedBosunMatches = Array.from(new Set(
+  Array.from(config.bosunHosts, (host) => `https://${new URL(`https://${host}`).hostname}/*`)
+)).sort();
 const actualBosunMatches = manifest.content_scripts[0].matches.slice().sort();
-assert.deepStrictEqual(actualBosunMatches, expectedBosunMatches, 'Bosun config/manifest mismatch');
-assert.deepStrictEqual(
-  manifest.content_scripts[1].matches,
-  [`https://${new URL(`https://${config.grafanaHost}`).hostname}/*`],
+const expectedGrafanaMatches = [`https://${new URL(`https://${config.grafanaHost}`).hostname}/*`];
+const sameStrings = (actual, expected) => Array.isArray(actual) &&
+  actual.length === expected.length &&
+  actual.every((value, index) => value === expected[index]);
+assert.ok(sameStrings(actualBosunMatches, expectedBosunMatches), 'Bosun config/manifest mismatch');
+assert.ok(
+  sameStrings(manifest.content_scripts[1].matches, expectedGrafanaMatches),
   'Grafana config/manifest mismatch'
+);
+assert.ok(
+  sameStrings(manifest.web_accessible_resources[0].matches.slice().sort(), expectedBosunMatches),
+  'Bosun config/resource manifest mismatch'
+);
+assert.ok(
+  sameStrings(manifest.web_accessible_resources[1].matches, expectedGrafanaMatches),
+  'Grafana config/resource manifest mismatch'
 );
 
 const referencedFiles = new Set();
@@ -133,5 +137,12 @@ const regression = spawnSync(process.execPath, ['regression-test.js'], {
   stdio: 'inherit'
 });
 assert.strictEqual(regression.status, 0, 'Regression test failed');
+
+const configSync = spawnSync(process.execPath, ['config-sync-test.js'], {
+  cwd: root,
+  encoding: 'utf8',
+  stdio: 'inherit'
+});
+assert.strictEqual(configSync.status, 0, 'Config synchronization test failed');
 
 console.log(`Checks passed: ${javascriptFiles.length} JavaScript files and manifest.json`);

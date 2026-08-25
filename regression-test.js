@@ -651,6 +651,10 @@ function testPortConfigurationSynchronization() {
       path.join(root, 'scripts', 'sync-config.js'),
       path.join(temporaryRoot, 'scripts', 'sync-config.js')
     );
+    fs.copyFileSync(
+      path.join(root, 'scripts', 'config-sync.js'),
+      path.join(temporaryRoot, 'scripts', 'config-sync.js')
+    );
     fs.writeFileSync(path.join(temporaryRoot, 'config.local.js'), `
       globalThis.BosunHelperLocalConfig = {
         bosunHosts: ['bosun.example.test:7443'],
@@ -660,8 +664,14 @@ function testPortConfigurationSynchronization() {
     `);
     fs.writeFileSync(path.join(temporaryRoot, 'manifest.json'), JSON.stringify({
       manifest_version: 3,
-      content_scripts: [{ matches: [] }, { matches: [] }],
-      web_accessible_resources: [{ matches: [] }, { matches: [] }]
+      content_scripts: [
+        { matches: [], js: ['config.js', 'content.js'] },
+        { matches: [], js: ['config.js', 'grafana-content.js'] }
+      ],
+      web_accessible_resources: [
+        { matches: [], resources: ['bosun_notification_alert_chime.wav'] },
+        { matches: [], resources: ['grafana-page.js'] }
+      ]
     }));
 
     const result = spawnSync(process.execPath, ['scripts/sync-config.js'], {
