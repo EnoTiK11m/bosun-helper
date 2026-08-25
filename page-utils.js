@@ -2,7 +2,7 @@
   'use strict';
 
   function createPageUtils() {
-    const guardedGroupCheckboxTitles = new WeakSet();
+    const guardedGroupCheckboxTitles = new Map();
     const groupCheckboxTitleSelector =
       ':is(' +
         '[ts-ack-group="schedule.Groups.NeedAck"], ' +
@@ -36,6 +36,11 @@
     }
 
     function ensureDashboardGroupCheckboxHitAreaGuards(root = document) {
+      for (const [title, handler] of guardedGroupCheckboxTitles) {
+        if (title.isConnected !== false) continue;
+        title.removeEventListener('click', handler);
+        guardedGroupCheckboxTitles.delete(title);
+      }
       const titles = [];
       if (root.matches?.(groupCheckboxTitleSelector)) titles.push(root);
       for (const title of root.querySelectorAll?.(groupCheckboxTitleSelector) || []) {
@@ -43,11 +48,19 @@
       }
       for (const title of titles) {
         if (guardedGroupCheckboxTitles.has(title)) continue;
-        guardedGroupCheckboxTitles.add(title);
-        title.addEventListener('click', (event) => {
+        const handler = (event) => {
           if (isDashboardGroupCheckboxLabelHitArea(event.target)) event.stopPropagation();
-        });
+        };
+        guardedGroupCheckboxTitles.set(title, handler);
+        title.addEventListener('click', handler);
       }
+    }
+
+    function clearDashboardGroupCheckboxHitAreaGuards() {
+      for (const [title, handler] of guardedGroupCheckboxTitles) {
+        title.removeEventListener('click', handler);
+      }
+      guardedGroupCheckboxTitles.clear();
     }
 
     function uncheckActionNotificationCheckbox() {
@@ -87,6 +100,7 @@
       isDashboardHome,
       isDashboardGroupCheckboxLabelHitArea,
       ensureDashboardGroupCheckboxHitAreaGuards,
+      clearDashboardGroupCheckboxHitAreaGuards,
       uncheckActionNotificationCheckbox,
       applyActionPageTweaks
     };

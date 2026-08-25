@@ -11,6 +11,7 @@
   const MAX_OPERATION_CACHE = 20;
   const OPERATION_CACHE_TTL_MS = 30000;
   const MAX_QUERY_LENGTH = 100000;
+  const MAX_DEADLINE_AHEAD_MS = 2 * 60 * 1000;
   const operations = new Map();
   let operationQueue = Promise.resolve();
   document.currentScript?.removeAttribute?.('data-channel-token');
@@ -31,6 +32,37 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function isBeforeDeadline(deadlineAt) {
+    return Number.isFinite(deadlineAt) && Date.now() < deadlineAt;
+  }
+
+  function isElementVisible(element) {
+    if (!element || element.isConnected === false) return false;
+    let current = element;
+    while (current) {
+      if (current.hidden === true || current.getAttribute?.('aria-hidden') === 'true') return false;
+      try {
+        const style = window.getComputedStyle?.(current);
+        if (style?.display === 'none' || style?.visibility === 'hidden') return false;
+      } catch (_) {}
+      current = current.parentElement || null;
+    }
+    try {
+      if (typeof element.getClientRects === 'function' && element.getClientRects().length === 0) {
+        return false;
+      }
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
+  function isEnabledButton(button) {
+    return isElementVisible(button) &&
+      button.disabled !== true &&
+      button.getAttribute?.('aria-disabled') !== 'true';
+  }
+
   function getVisibleEditorText() {
     const activeEditor = findQueryEditorContent();
     if (activeEditor) {
@@ -48,16 +80,20 @@
   }
 
   function findQueryEditorContent() {
-    const codeToggle = Array.from(document.querySelectorAll('button')).find((button) => {
+    const codeToggles = Array.from(document.querySelectorAll('button')).filter((button) => {
       return button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() === 'code';
-    });
+    }).filter(isEnabledButton);
+    if (codeToggles.length > 1) return null;
+    const codeToggle = codeToggles[0] || null;
     const queryRow = codeToggle?.closest?.('[class*="query"], [data-testid*="query"], div') || null;
     const queryArea = queryRow?.parentElement || document;
 
-    const editors = Array.from(queryArea.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'));
+    const editors = Array.from(queryArea.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'))
+      .filter(isElementVisible);
     if (editors.length === 1) return editors[0];
 
-    const allEditors = Array.from(document.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'));
+    const allEditors = Array.from(document.querySelectorAll('.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'))
+      .filter(isElementVisible);
     return allEditors.length === 1 ? allEditors[0] : null;
   }
 
@@ -131,6 +167,7 @@
       deadline: Date.now() + MAX_TRAVERSAL_MS
     };
 
+    const matches = new Set();
     for (const node of nodes.slice(0, 20)) {
       if (budget.visited >= MAX_TRAVERSAL_OBJECTS || Date.now() > budget.deadline) break;
       const keys = [];
@@ -143,7 +180,7 @@
 
       const direct = getCodeMirrorViewFromObject(node, budget) ||
         getCodeMirrorViewFromObject(node.cmView, budget);
-      if (direct) return direct;
+      if (direct) matches.add(direct);
 
       for (const key of Array.from(new Set(keys)).slice(0, 80)) {
         if (budget.visited >= MAX_TRAVERSAL_OBJECTS || Date.now() > budget.deadline) break;
@@ -154,11 +191,12 @@
           continue;
         }
         const view = getCodeMirrorViewFromObject(value, budget);
-        if (view) return view;
+        if (view) matches.add(view);
       }
     }
 
-    return null;
+    if (matches.size !== 1) return null;
+    return { view: Array.from(matches)[0], content, editorRoot };
   }
 
   function findButtonByText(text) {
@@ -166,7 +204,7 @@
     const matches = Array.from(document.querySelectorAll('button')).filter((button) => {
       const label = button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() || '';
       return label === needle || label.includes(needle);
-    });
+    }).filter(isEnabledButton);
     const exact = matches.filter((button) => {
       return button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() === needle;
     });
@@ -174,24 +212,54 @@
     return matches.length === 1 ? matches[0] : null;
   }
 
-  function findPrometheusMonacoModel() {
+  function getUniqueMonacoTextarea() {
+    const textareas = Array.from(document.querySelectorAll(
+      'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
+    )).filter(isElementVisible);
+    return textareas.length === 1 ? textareas[0] : null;
+  }
+
+  function hasAmbiguousEditorDom() {
+    const codeToggles = Array.from(document.querySelectorAll('button')).filter((button) => {
+      return button.textContent?.replace(/\s+/g, ' ').trim().toLowerCase() === 'code';
+    }).filter(isEnabledButton);
+    const codeMirrorEditors = Array.from(document.querySelectorAll(
+      '.cm-editor .cm-content[contenteditable="true"], .cm-content[contenteditable="true"]'
+    )).filter(isElementVisible);
+    const monacoTextareas = Array.from(document.querySelectorAll(
+      'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
+    )).filter(isElementVisible);
+    const roots = new Set();
+    for (const editor of codeMirrorEditors) {
+      roots.add(editor.closest?.('.cm-editor') || editor);
+    }
+    for (const textarea of monacoTextareas) {
+      roots.add(textarea.closest?.('.monaco-editor') || textarea);
+    }
+    return codeToggles.length > 1 || roots.size > 1;
+  }
+
+  function findPrometheusMonacoBinding() {
     const monacoApi = window.monaco;
     const models = monacoApi?.editor?.getModels?.();
     if (!Array.isArray(models) || !models.length) return null;
 
-    const textarea = document.querySelector('textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]');
+    const textarea = getUniqueMonacoTextarea();
+    if (!textarea) return null;
     const visibleText = textarea?.value || '';
 
     if (visibleText) {
-      const exact = models.find((model) => model?.getValue?.() === visibleText);
-      if (exact) return exact;
+      const exact = models.filter((model) => model?.getValue?.() === visibleText);
+      if (exact.length === 1) return { model: exact[0], textarea };
+      if (exact.length > 1) return null;
 
       const prefix = visibleText.slice(0, 40);
-      const partial = models.find((model) => {
+      const partial = models.filter((model) => {
         const value = model?.getValue?.() || '';
         return prefix && value.includes(prefix);
       });
-      if (partial) return partial;
+      if (partial.length === 1) return { model: partial[0], textarea };
+      if (partial.length > 1) return null;
     }
 
     const promModels = models.filter((model) => {
@@ -200,14 +268,14 @@
         /[a-zA-Z_:][a-zA-Z0-9_:]*\s*\{/.test(value);
     });
 
-    if (promModels.length === 1) return promModels[0];
-    if (models.length === 1) return models[0];
+    if (promModels.length === 1) return { model: promModels[0], textarea };
+    if (promModels.length > 1) return null;
+    if (models.length === 1) return { model: models[0], textarea };
     return null;
   }
 
-  function commitMonacoTextarea() {
-    const textarea = document.querySelector('textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]');
-    if (!textarea) return false;
+  function commitMonacoTextarea(textarea) {
+    if (!isElementVisible(textarea)) return false;
 
     textarea.focus();
     textarea.click();
@@ -217,7 +285,7 @@
     return true;
   }
 
-  function rollbackMonacoIfUnchanged(model, oldText, writtenText, writtenVersion) {
+  function rollbackMonacoIfUnchanged(model, textarea, oldText, writtenText, writtenVersion) {
     let currentText;
     let currentVersion;
     try {
@@ -236,29 +304,34 @@
 
     try {
       model.setValue(oldText);
-      commitMonacoTextarea();
+      commitMonacoTextarea(textarea);
       return true;
     } catch (_) {
       return false;
     }
   }
 
-  function rollbackMonacoIfOwnedVersion(model, oldText, writtenVersion) {
+  function rollbackMonacoIfOwnedVersion(model, textarea, oldText, writtenVersion) {
     if (!Number.isFinite(writtenVersion)) return false;
     try {
       if (model.getVersionId?.() !== writtenVersion) return false;
       model.setValue(oldText);
-      commitMonacoTextarea();
+      commitMonacoTextarea(textarea);
       return true;
     } catch (_) {
       return false;
     }
   }
 
-  async function applyQueryViaMonaco(query, run) {
-    const model = findPrometheusMonacoModel();
+  async function applyQueryViaMonaco(query, run, deadlineAt) {
+    const binding = findPrometheusMonacoBinding();
+    const model = binding?.model;
+    const textarea = binding?.textarea;
     if (!model?.setValue || !model?.getValue) {
       return { ok: false, reason: 'monaco-model-not-found' };
+    }
+    if (!isBeforeDeadline(deadlineAt)) {
+      return { ok: false, reason: 'operation-deadline-expired', terminal: true };
     }
 
     const oldText = model.getValue();
@@ -266,11 +339,11 @@
     try {
       model.setValue(query);
       writtenVersion = model.getVersionId?.();
-      commitMonacoTextarea();
+      commitMonacoTextarea(textarea);
       await wait(500);
       const nextText = model.getValue();
       if (normalizeText(nextText) !== normalizeText(query)) {
-        const rolledBack = rollbackMonacoIfOwnedVersion(model, oldText, writtenVersion);
+        const rolledBack = rollbackMonacoIfOwnedVersion(model, textarea, oldText, writtenVersion);
         return {
           ok: false,
           reason: 'monaco-setvalue-not-applied',
@@ -289,17 +362,29 @@
           nextLength: nextText.length
         };
       }
-      commitMonacoTextarea();
+      commitMonacoTextarea(textarea);
       await wait(500);
       const beforeRunText = model.getValue();
       const beforeRunVersion = model.getVersionId?.();
+      const currentBinding = findPrometheusMonacoBinding();
       if (
+        !isBeforeDeadline(deadlineAt) ||
+        hasAmbiguousEditorDom() ||
+        currentBinding?.model !== model ||
+        currentBinding?.textarea !== textarea ||
         normalizeText(beforeRunText) !== normalizeText(query) ||
-        (Number.isFinite(writtenVersion) && Number.isFinite(beforeRunVersion) && beforeRunVersion !== writtenVersion)
+        !Number.isFinite(writtenVersion) ||
+        !Number.isFinite(beforeRunVersion) ||
+        beforeRunVersion !== writtenVersion
       ) {
         return { ok: false, reason: 'monaco-concurrent-change-before-run', terminal: true };
       }
-      findButtonByText('Run queries')?.click();
+      const runButton = findButtonByText('Run queries');
+      if (!runButton) return { ok: false, reason: 'run-button-not-found', terminal: true };
+      if (!isBeforeDeadline(deadlineAt)) {
+        return { ok: false, reason: 'operation-deadline-expired', terminal: true };
+      }
+      runButton.click();
 
       return {
         ok: true,
@@ -314,6 +399,7 @@
       } catch (_) {}
       const rolledBack = rollbackMonacoIfUnchanged(
         model,
+        textarea,
         oldText,
         query,
         writtenVersion
@@ -328,138 +414,24 @@
     }
   }
 
-  function getEditorText(editor) {
-    if (!editor) return '';
-    if (typeof editor.innerText === 'string') return editor.innerText;
-    return editor.textContent || '';
+  function applyQueryViaFocusedEditor() {
+    return { ok: false, reason: 'focused-editor-mutation-unsupported', terminal: true };
   }
 
-  function selectEditorContents(editor) {
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(editor);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  function replaceEditorTextIfUnchanged(editor, expectedText, replacementText) {
-    if (getEditorText(editor) !== expectedText) return false;
-
-    try {
-      selectEditorContents(editor);
-      document.execCommand('delete', false, null);
-      if (normalizeText(getEditorText(editor))) return false;
-      if (replacementText) {
-        document.execCommand('insertText', false, replacementText);
-      }
-      return normalizeText(getEditorText(editor)) === normalizeText(replacementText);
-    } catch (_) {
-      return false;
+  async function applyQuery(query, run, deadlineAt) {
+    if (!isBeforeDeadline(deadlineAt)) {
+      return { ok: false, reason: 'operation-deadline-expired', terminal: true };
     }
-  }
-
-  async function applyQueryViaFocusedEditor(query, run) {
-    const editor = findQueryEditorContent();
-    if (!editor) return { ok: false, reason: 'query-editor-not-found' };
-    const originalText = getEditorText(editor);
-
-    editor.focus();
-    editor.click();
-    await wait(50);
-
-    try {
-      selectEditorContents(editor);
-      document.execCommand('delete', false, null);
-    } catch (err) {
-      const currentText = getEditorText(editor);
-      const rolledBack = currentText === originalText || (
-        currentText === '' &&
-        replaceEditorTextIfUnchanged(editor, currentText, originalText)
-      );
-      return {
-        ok: false,
-        reason: 'query-editor-delete-error',
-        rolledBack,
-        message: err?.message || String(err)
-      };
+    if (hasAmbiguousEditorDom()) {
+      return { ok: false, reason: 'ambiguous-editor-dom', terminal: true };
     }
-    const immediateTextAfterDelete = getEditorText(editor);
-    if (normalizeText(immediateTextAfterDelete)) {
-      const rolledBack = immediateTextAfterDelete === originalText;
-      return {
-        ok: false,
-        reason: 'query-editor-delete-failed',
-        rolledBack,
-        visibleText: normalizeText(getEditorText(editor)).slice(0, 120)
-      };
-    }
-    await wait(100);
-
-    const textAfterDelete = getEditorText(editor);
-    if (normalizeText(textAfterDelete)) {
-      return {
-        ok: false,
-        reason: 'query-editor-changed-after-delete',
-        rolledBack: false,
-        visibleText: normalizeText(textAfterDelete).slice(0, 120)
-      };
-    }
-
-    try {
-      document.execCommand('insertText', false, query);
-    } catch (err) {
-      const currentText = getEditorText(editor);
-      const rolledBack = currentText === originalText || (
-        (currentText === '' || currentText === query) &&
-        replaceEditorTextIfUnchanged(editor, currentText, originalText)
-      );
-      return {
-        ok: false,
-        reason: 'query-editor-insert-error',
-        rolledBack,
-        message: err?.message || String(err)
-      };
-    }
-    await wait(150);
-
-    const textAfterInsert = getEditorText(editor);
-    if (normalizeText(textAfterInsert) !== normalizeText(query)) {
-      const rolledBack = textAfterInsert === originalText || (
-        textAfterInsert === '' &&
-        replaceEditorTextIfUnchanged(editor, textAfterInsert, originalText)
-      );
-      return {
-        ok: false,
-        reason: 'query-editor-insert-failed',
-        rolledBack,
-        visibleText: normalizeText(getEditorText(editor)).slice(0, 120)
-      };
-    }
-
-    if (!run) return { ok: true, via: 'focused-query-editor' };
-
-    try {
-      findButtonByText('Run queries')?.click();
-      return { ok: true, via: 'focused-query-editor' };
-    } catch (err) {
-      const currentText = getEditorText(editor);
-      const rolledBack = currentText === originalText || (
-        currentText === query &&
-        replaceEditorTextIfUnchanged(editor, currentText, originalText)
-      );
-      return {
-        ok: false,
-        reason: 'query-editor-run-error',
-        rolledBack,
-        message: err?.message || String(err)
-      };
-    }
-  }
-
-  async function applyQuery(query, run) {
-    const view = findCodeMirrorView();
+    const codeMirrorBinding = findCodeMirrorView();
+    const view = codeMirrorBinding?.view;
     if (view) {
       const oldText = view.state.doc.toString();
+      if (!isBeforeDeadline(deadlineAt)) {
+        return { ok: false, reason: 'operation-deadline-expired', terminal: true };
+      }
       view.dispatch({
         changes: { from: 0, to: oldText.length, insert: query },
         selection: { anchor: query.length },
@@ -467,13 +439,28 @@
       });
 
       const nextText = view.state.doc.toString();
+      const writtenDoc = view.state.doc;
       if (normalizeText(nextText) === normalizeText(query)) {
         if (run) {
           await wait(150);
-          if (normalizeText(view.state.doc.toString()) !== normalizeText(query)) {
+          const currentBinding = findCodeMirrorView();
+          if (
+            !isBeforeDeadline(deadlineAt) ||
+            hasAmbiguousEditorDom() ||
+            currentBinding?.view !== view ||
+            currentBinding?.content !== codeMirrorBinding.content ||
+            currentBinding?.editorRoot !== codeMirrorBinding.editorRoot ||
+            view.state.doc !== writtenDoc ||
+            normalizeText(view.state.doc.toString()) !== normalizeText(query)
+          ) {
             return { ok: false, reason: 'codemirror-concurrent-change-before-run', terminal: true };
           }
-          findButtonByText('Run queries')?.click();
+          const runButton = findButtonByText('Run queries');
+          if (!runButton) return { ok: false, reason: 'run-button-not-found', terminal: true };
+          if (!isBeforeDeadline(deadlineAt)) {
+            return { ok: false, reason: 'operation-deadline-expired', terminal: true };
+          }
+          runButton.click();
         }
         return {
           ok: true,
@@ -489,11 +476,11 @@
       });
     }
 
-    const monacoResult = await applyQueryViaMonaco(query, run);
+    const monacoResult = await applyQueryViaMonaco(query, run, deadlineAt);
     if (monacoResult.ok) return monacoResult;
     if (monacoResult.terminal) return monacoResult;
 
-    const editorResult = await applyQueryViaFocusedEditor(query, run);
+    const editorResult = await applyQueryViaFocusedEditor(query, run, deadlineAt);
     if (editorResult.ok) return editorResult;
 
     return {
@@ -521,11 +508,15 @@
     }
   }
 
-  function getOperation(operationId, query, run) {
+  function getOperation(operationId, query, run, deadlineAt) {
     pruneOperations();
     const existing = operations.get(operationId);
     if (existing) {
-      if (existing.query !== query || existing.run !== run) {
+      if (
+        existing.query !== query ||
+        existing.run !== run ||
+        existing.deadlineAt !== deadlineAt
+      ) {
         return Promise.resolve({ ok: false, reason: 'operation-id-collision' });
       }
       return existing.promise;
@@ -534,10 +525,10 @@
       return Promise.resolve({ ok: false, reason: 'bridge-busy' });
     }
 
-    const operation = { query, run, promise: null, finishedAt: 0 };
+    const operation = { query, run, deadlineAt, promise: null, finishedAt: 0 };
     operation.promise = operationQueue
       .catch(() => undefined)
-      .then(() => applyQuery(query, run))
+      .then(() => applyQuery(query, run, deadlineAt))
       .catch((err) => ({
         ok: false,
         reason: 'unexpected-apply-error',
@@ -565,6 +556,7 @@
       ? event.data.operationId
       : '';
     const run = event.data.run === true;
+    const deadlineAt = Number(event.data.deadlineAt);
     let result;
     try {
       result = !query
@@ -573,7 +565,11 @@
           ? { ok: false, reason: 'query-too-large' }
         : !operationId || operationId.length > 200
           ? { ok: false, reason: 'invalid-operation-id' }
-          : await getOperation(operationId, query, run);
+        : !Number.isFinite(deadlineAt) ||
+            deadlineAt <= Date.now() ||
+            deadlineAt > Date.now() + MAX_DEADLINE_AHEAD_MS
+          ? { ok: false, reason: 'invalid-operation-deadline' }
+          : await getOperation(operationId, query, run, deadlineAt);
     } catch (err) {
       result = {
         ok: false,

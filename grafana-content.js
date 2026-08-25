@@ -10,6 +10,8 @@
   const APPLY_DEADLINE_MS = 20000;
   const MAX_REQUEST_ID_LENGTH = 128;
   const MAX_QUERY_LENGTH = 16 * 1024;
+  const CONSUMED_PREFIX = 'bosunGrafanaConsumedRequestV2:';
+  const MAX_CONSUMED_MARKERS = 50;
   const config = globalThis.BosunHelperLocalConfig || {};
 
   let bridgeToken = '';
@@ -31,6 +33,99 @@
 
   function getStorageKey(requestId) {
     return requestId ? `${STORAGE_PREFIX}${requestId}` : '';
+  }
+
+  function getConsumedKey(requestId) {
+    return requestId ? `${CONSUMED_PREFIX}${requestId}` : '';
+  }
+
+  function parseConsumedMarker(raw, now) {
+    if (!raw || raw.length > 256) return null;
+    try {
+      const marker = JSON.parse(raw);
+      const consumedAt = Number(marker?.consumedAt);
+      const expiresAt = Number(marker?.expiresAt);
+      if (
+        !Number.isFinite(consumedAt) ||
+        !Number.isFinite(expiresAt) ||
+        consumedAt > now + 5000 ||
+        expiresAt <= now ||
+        expiresAt - consumedAt > PENDING_TTL_MS + 5000
+      ) return null;
+      return { consumedAt, expiresAt };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function pruneConsumedMarkers(now = Date.now()) {
+    const storage = window.sessionStorage;
+    if (!storage || !Number.isFinite(storage.length) || typeof storage.key !== 'function') return;
+    try {
+      const keys = [];
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (typeof key === 'string' && key.startsWith(CONSUMED_PREFIX)) keys.push(key);
+      }
+      const valid = [];
+      for (const key of keys) {
+        const marker = parseConsumedMarker(storage.getItem(key), now);
+        if (!marker) storage.removeItem(key);
+        else valid.push({ key, consumedAt: marker.consumedAt });
+      }
+      valid.sort((left, right) => left.consumedAt - right.consumedAt);
+      for (const entry of valid.slice(0, Math.max(0, valid.length - MAX_CONSUMED_MARKERS))) {
+        storage.removeItem(entry.key);
+      }
+    } catch (_) {}
+  }
+
+  function isRequestConsumed(requestId, now = Date.now()) {
+    const key = getConsumedKey(requestId);
+    if (!key) return false;
+    try {
+      const raw = window.sessionStorage?.getItem(key);
+      if (!parseConsumedMarker(raw, now)) {
+        window.sessionStorage?.removeItem(key);
+        return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function markRequestConsumed(requestId, expiresAt, now = Date.now()) {
+    const key = getConsumedKey(requestId);
+    if (
+      !key ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= now ||
+      expiresAt > now + PENDING_TTL_MS + 5000
+    ) return false;
+    try {
+      pruneConsumedMarkers(now);
+      window.sessionStorage?.setItem(key, JSON.stringify({
+        consumedAt: now,
+        expiresAt
+      }));
+      pruneConsumedMarkers(now);
+      return isRequestConsumed(requestId, now);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function removeRequestParamFromUrl() {
+    try {
+      const url = new URL(window.location.href);
+      if (!url.searchParams.has(REQUEST_PARAM)) return true;
+      url.searchParams.delete(REQUEST_PARAM);
+      window.history?.replaceState?.(window.history.state, '', url.toString());
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   function isConfiguredPanelPage() {
@@ -87,6 +182,27 @@
     return String(value || '').replace(/\r\n/g, '\n').trim();
   }
 
+  function isVisibleConnectedNode(node) {
+    if (!node || node.isConnected === false) return false;
+    let current = node;
+    while (current) {
+      if (current.hidden === true || current.getAttribute?.('aria-hidden') === 'true') return false;
+      try {
+        const style = window.getComputedStyle?.(current);
+        if (style?.display === 'none' || style?.visibility === 'hidden') return false;
+      } catch (_) {}
+      current = current.parentElement || null;
+    }
+    try {
+      if (typeof node.getClientRects === 'function' && node.getClientRects().length === 0) {
+        return false;
+      }
+    } catch (_) {
+      return false;
+    }
+    return true;
+  }
+
   function isQueryVisible(query) {
     const expected = normalizeText(query);
     if (!expected) return false;
@@ -96,15 +212,22 @@
       '.monaco-editor .view-lines',
       'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
     ];
+    const valuesByRoot = new Map();
     for (const selector of selectors) {
       for (const node of document.querySelectorAll(selector)) {
+        if (!isVisibleConnectedNode(node)) continue;
+        const root = node.closest?.('.cm-editor, .monaco-editor') || node;
+        if (!isVisibleConnectedNode(root)) continue;
         const text = 'value' in node
           ? node.value
           : node.innerText || node.textContent || '';
-        if (normalizeText(text) === expected) return true;
+        const values = valuesByRoot.get(root) || [];
+        values.push(normalizeText(text));
+        valuesByRoot.set(root, values);
       }
     }
-    return false;
+    if (valuesByRoot.size !== 1) return false;
+    return Array.from(valuesByRoot.values())[0].some((text) => text === expected);
   }
 
   async function waitForVisibleQuery(query, deadlineAt) {
@@ -138,9 +261,9 @@
     return true;
   }
 
-  function applyViaBridge(query, run, operationId) {
+  function applyViaBridge(query, run, operationId, deadlineAt) {
     return new Promise((resolve) => {
-      if (!ensureBridge()) {
+      if (!Number.isFinite(deadlineAt) || Date.now() >= deadlineAt || !ensureBridge()) {
         resolve(false);
         return;
       }
@@ -149,7 +272,7 @@
       const timeoutId = setTimeout(() => {
         window.removeEventListener('message', onMessage);
         resolve(false);
-      }, 2500);
+      }, Math.max(0, Math.min(2500, deadlineAt - Date.now())));
 
       function onMessage(event) {
         if (
@@ -175,14 +298,15 @@
         requestId,
         operationId,
         query,
-        run
+        run,
+        deadlineAt
       }, window.location.origin);
     });
   }
 
   async function applyWithDeadline(query, run, deadlineAt, operationId) {
     while (Date.now() < deadlineAt) {
-      const pageReportedSuccess = await applyViaBridge(query, run, operationId);
+      const pageReportedSuccess = await applyViaBridge(query, run, operationId, deadlineAt);
       // Same-page scripts can observe and forge postMessage traffic, including
       // the channel token. Treat the page-world result as advisory and verify
       // the rendered editor value independently before deleting storage.
@@ -200,6 +324,11 @@
 
     const requestId = getRequestId();
     if (!requestId) return;
+    if (isRequestConsumed(requestId)) {
+      removeRequestParamFromUrl();
+      clearPendingQuery(requestId);
+      return;
+    }
     const payload = await loadPendingQuery(requestId);
     const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
     const run = payload?.run === true;
@@ -221,14 +350,22 @@
     const expiryTimer = setTimeout(() => clearPendingQuery(requestId), expiresIn);
     const operationId = globalThis.crypto?.randomUUID?.() ||
       `${now}-${Math.random().toString(16).slice(2)}`;
+    const hardDeadlineAt = Math.min(
+      createdAt + PENDING_TTL_MS,
+      now + APPLY_DEADLINE_MS
+    );
     const applied = await applyWithDeadline(
       query,
       run,
-      now + APPLY_DEADLINE_MS,
+      hardDeadlineAt,
       operationId
     );
     if (applied) {
       clearTimeout(expiryTimer);
+      if (!markRequestConsumed(requestId, createdAt + PENDING_TTL_MS)) {
+        console.warn('[Bosun Helper] Failed to mark the Grafana request as consumed.');
+      }
+      removeRequestParamFromUrl();
       clearPendingQuery(requestId);
     } else {
       console.warn('[Bosun Helper] Grafana query editor was not ready before timeout.');

@@ -66,11 +66,21 @@ Bosun автоматически.
 
 ### Grafana
 
-- извлечение PromQL из данных алерта и добавление отсутствующих alert tags;
+- выбор graph query из `$usage_graph` текущего raw Bosun rule definition и
+  безопасное добавление instance alert tags из `/api/alerts`;
+- direct `promras`, variable chain и query/scalar arithmetic поддерживаются;
+  vector/vector arithmetic разрешается только при доказуемо эквивалентном
+  label matching, а `dropna` пока fail closed;
+  unrelated `promras` вне dependency graph не создают ложную ambiguity;
+- multi-query `merge(addtags(...), ...)` распознаётся, но не превращается в
+  меняющий семантику `or` и пока не создаёт single-query Grafana action;
+- отказ от Grafana-действия при повреждённом rule/PromQL/tags, unsupported graph
+  или неоднозначной identity алерта;
 - предварительный просмотр полного запроса до открытия Grafana;
 - выбор между **Вставить** и **Вставить и выполнить**;
 - адресованный запрос с коротким сроком действия вместо передачи PromQL в URL;
-- проверка фактического содержимого редактора перед удалением pending-запроса.
+- однократное потребление запроса и проверка единственного видимого model-backed
+  редактора перед удалением pending-запроса или выполнением Run.
 
 ## Синхронизация вкладок и обновление данных
 
@@ -84,6 +94,30 @@ follower-вкладка хранит только последний snapshot и
 после возвращения пользователя. Если координация недоступна, вкладка переходит в
 безопасный локальный режим и периодически пытается восстановить совместную
 работу.
+
+## Настройки и feature toggles
+
+Настройки проходят через единый versioned store. Схема версии 1 хранит каждое
+значение отдельным ключом `bosunSettingsV1:<path>` и использует
+`bosunSettingsSchemaVersion` как общий номер версии. Такой формат не требует
+перезаписывать весь объект настроек и позволяет вкладкам сходиться через
+`chrome.storage.onChanged`: изменения разных параметров не затирают друг друга,
+а конфликт одного параметра разрешается последней записью Chrome storage.
+
+При первом запуске store переносит существующие настройки фильтров, звука,
+автообновления, диагностики и action templates. Корректное canonical-значение
+имеет приоритет; повреждённый или частичный storage даёт безопасный default
+только для затронутого параметра. Reset удаляет только ключи настроек и не
+затрагивает tracker новых алертов, coordinator, session baseline, Grafana
+handoff или диагностический журнал.
+
+Без reload можно включать и выключать возраст одиночного алерта, улучшения
+checkbox, copy buttons, фильтры, сворачивание Acknowledged, звуковые и визуальные
+уведомления, auto refresh, action templates и Bosun-side Grafana integration.
+При выключении принадлежащие функции controls, listeners, timers и async work
+очищаются независимо. Изменение Last Action links/copy в этой итерации требует
+reload: исходная DOM-трансформация необратима без риска изменить штатный текст
+Bosun.
 
 ## Требования
 
@@ -186,6 +220,14 @@ checkbox или его увеличенной области меняет выб
 Всегда проверяйте запрос, alert tags и диапазон времени перед выполнением.
 Для открытия новой вкладки браузер должен разрешать всплывающие окна с Bosun.
 
+Bosun expression `promras(promql, stepDuration, startDuration, endDuration)`
+поддерживается в штатной четырёхаргументной форме. Неполный вызов, неверное
+число duration-аргументов или невалидный PromQL не создают Grafana action.
+Несколько queries внутри alert сами по себе не являются ambiguity: resolver
+следует только `$usage_graph`. Если rule source временно недоступен, старый
+`State.Expr` используется только когда содержит ровно один уникальный валидный
+`promras`.
+
 ## Данные, конфиденциальность и безопасность
 
 ### Разрешения и сеть
@@ -197,6 +239,10 @@ checkbox или его увеличенной области меняет выб
   настроенного Grafana origin;
 - `/api/alerts?filter=` запрашивается только как credentialed same-origin ресурс
   текущего Bosun;
+- `/api/config/running_hash` и Rule Editor endpoint `/api/config?hash=` также
+  читаются только same-origin и `no-store`; running hash используется
+  как version token до/после config fetch, raw RuleConf не сохраняется и не
+  логируется;
 - переход Grafana разрешён только на настроенный HTTPS host и путь панели;
 - расширение самостоятельно не отправляет телеметрию и не выполняет запросы к
   сторонним endpoint; переход по ссылке из заметки происходит только по
@@ -206,8 +252,8 @@ checkbox или его увеличенной области меняет выб
 
 | Данные | Хранилище | Срок и назначение |
 | --- | --- | --- |
-| Настройки UI, звук, фильтры и автообновление | `chrome.storage.local` | До изменения или удаления расширения |
-| Пользовательские шаблоны `note` / `ack` / `close` | `chrome.storage.local` | До изменения, сброса или удаления расширения |
+| Versioned settings schema: feature toggles, UI, звук, фильтры и автообновление | `chrome.storage.local` | До изменения, reset или удаления расширения |
+| Пользовательские шаблоны `note` / `ack` / `close` в settings schema | `chrome.storage.local` | До изменения, reset или удаления расширения |
 | ID, severity и время обнаружения новых Needs Ack | `chrome.storage.local` | Пока алерт актуален и ожидает Note |
 | Lease и token координатора вкладок | `chrome.storage.local` | Служебные метаданные для выбора лидера |
 | Pending PromQL и режим запуска | `chrome.storage.local` | Логический TTL 2 минуты; удаляется после подтверждённой вставки или при ближайшей очистке |
@@ -221,16 +267,24 @@ checkbox или его увеличенной области меняет выб
 сохраняются только ограниченные производные ID, ключи, флаги и счётчики,
 необходимые для baseline и восстановления маркеров.
 
+Полный raw RuleConf также никогда не попадает в browser storage: memory cache
+содержит только разобранные per-alert graph results текущего running hash.
+
 Pending PromQL может содержать операционные идентификаторы. Просроченная запись
 логически отвергается даже если физическое удаление из browser storage не
 удалось; stale-записи повторно очищаются при следующих передачах.
+После подтверждённой вставки request ID на время исходного TTL помечается как
+потреблённый в ограниченном `sessionStorage` cache. Поэтому ошибка физического
+удаления pending-записи и reload вкладки не приводят к повторному Run.
 
 ### Границы Grafana bridge
 
 Запрос передаётся из isolated content script в page context Grafana через
 same-origin `postMessage`. Проверяются source, origin, channel token, request ID,
 operation ID и таймаут. Результат page bridge считается только подсказкой:
-расширение отдельно проверяет видимый текст редактора.
+расширение отдельно проверяет единственный подключённый и видимый editor root.
+Неоднозначные/скрытые editors, истёкший deadline и DOM-only fallback отклоняются;
+Run разрешён только для повторно подтверждённого model-backed editor.
 
 Скрипты, уже выполняющиеся на самой странице Grafana, технически могут видеть
 same-window сообщения. Bridge не создаёт дополнительной cross-origin передачи
@@ -277,6 +331,7 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | Файл | Что проверяет |
 | --- | --- |
 | `smoke-test.js` | Загрузка модулей, публичные API и небольшие unit-сценарии |
+| `rule-graph-test.js` | `$usage_graph` parser, hash-bound cache и stale fetch regressions |
 | `integration-test.js` | Инициализация content scripts, remount UI и границы Bosun/Grafana |
 | `regression-test.js` | Координатор вкладок, storage-races, tracker и редакторы Grafana |
 | `browser-test.js` | Реальные DOM, CSS, responsive-layout, keyboard/pointer interactions |
@@ -296,7 +351,8 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `single-alert-age.js` | Сопоставление snapshot с DOM и возраст одиночных групп |
 | `needack-baseline.js` | Baseline для обнаружения новых Needs Ack |
 | `needack-severity.js` | Stable keys и определение warning/critical/unknown |
-| `promql.js` | Извлечение PromQL и безопасное добавление alert tags |
+| `promql.js` | Fail-closed извлечение PromQL, валидация и безопасное добавление alert tags |
+| `bosun-rule-graph.js` | Hash-bound memory-only RuleConf resolver для `$usage_graph` |
 | `page-utils.js` | Проверки маршрутов и небольшие DOM-интеграции Bosun |
 | `styles.js` | Инъекция scoped CSS и responsive/accessibility states |
 | `activity.js` | Активность пользователя и обновление после бездействия |
@@ -305,8 +361,8 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `new-alert-tracker.js` | Новые алерты, ожидающие Note |
 | `refresh-coordinator.js` | Leader election и обмен snapshots между вкладками |
 | `content.js` | Основной UI и lifecycle страницы Bosun |
-| `grafana-content.js` | Проверка pending-запроса и isolated-world bridge |
-| `grafana-page.js` | Работа с редактором Grafana в page context |
+| `grafana-content.js` | TTL/consume-once проверка pending-запроса и isolated-world bridge |
+| `grafana-page.js` | Однозначная model-backed работа с редактором Grafana в page context |
 | `scripts/sync-config.js` | Генерация `config.js` и обновление разрешённых hosts |
 | `scripts/check.js` | Проверки manifest/config, синтаксиса и Node-набора |
 | `.github/workflows/checks.yml` | CI для push и pull request |
@@ -356,6 +412,9 @@ key и короткие метаданные, но не полный snapshot и
 - проверьте `grafanaHost`, `grafanaPanelUrl` и параметр `editPanel`;
 - убедитесь, что открыта именно настроенная HTTPS-панель;
 - pending-запрос старше двух минут намеренно не применяется.
+- несколько разных `promras()`, повреждённые tags/PromQL, несколько видимых
+  editors или невозможность подтвердить backing model намеренно дают safe fallback
+  без вставки и Run.
 
 ### Browser-тест не находит Chrome
 

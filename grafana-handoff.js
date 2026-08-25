@@ -24,6 +24,8 @@
     const cleanupTimers = new Map();
     let activeDialog = null;
     let openPromise = null;
+    let activeOperation = null;
+    let lifecycleGeneration = 0;
 
     function getStorageKey(requestId) {
       return requestId ? `${storagePrefix}${requestId}` : '';
@@ -113,7 +115,7 @@
       }
     }
 
-    function savePendingQuery(requestId, query, run = false) {
+    function savePendingQuery(requestId, query, run = false, expectedGeneration = lifecycleGeneration) {
       const storageKey = getStorageKey(requestId);
       const payload = { query, run: run === true, createdAt: Date.now() };
 
@@ -124,6 +126,11 @@
             storage.set({ [storageKey]: payload }, () => {
               const error = getLastError();
               if (!error) {
+                if (expectedGeneration !== lifecycleGeneration) {
+                  clearPendingQuery(requestId);
+                  resolve(false);
+                  return;
+                }
                 schedulePendingQueryCleanup(requestId);
                 resolve(true);
                 return;
@@ -212,7 +219,13 @@
       return promise;
     }
 
-    async function performOpenQuery(query, button) {
+    function closeOperationPopup(operation) {
+      if (!operation?.popup || operation.popupClosed) return;
+      operation.popupClosed = true;
+      try { operation.popup.close?.(); } catch (_) {}
+    }
+
+    async function performOpenQuery(query, button, generation) {
       const normalizedQuery = typeof query === 'string' ? query.trim() : '';
       if (!normalizedQuery) {
         showFeedback(button, 'Запрос для Grafana не найден', false);
@@ -227,6 +240,7 @@
       }
 
       const runMode = await chooseRunMode(normalizedQuery, button);
+      if (generation !== lifecycleGeneration) return false;
       if (runMode === null) {
         showFeedback(button, 'Открытие Grafana отменено', true);
         return false;
@@ -242,10 +256,20 @@
         return false;
       }
 
+      const operation = { generation, popup, popupClosed: false, requestId: '' };
+      activeOperation = operation;
       const requestId = createRequestId();
-      const saved = await savePendingQuery(requestId, normalizedQuery, runMode);
+      operation.requestId = requestId;
+      const saved = await savePendingQuery(requestId, normalizedQuery, runMode, generation);
+      if (generation !== lifecycleGeneration) {
+        clearPendingQuery(requestId);
+        closeOperationPopup(operation);
+        if (activeOperation === operation) activeOperation = null;
+        return false;
+      }
       if (!saved) {
-        popup.close?.();
+        closeOperationPopup(operation);
+        if (activeOperation === operation) activeOperation = null;
         showFeedback(button, 'Не удалось сохранить запрос Grafana', false);
         return false;
       }
@@ -254,17 +278,20 @@
       const targetUrl = buildPanelUrl(requestId);
       if (!targetUrl) {
         clearPendingQuery(requestId);
-        popup.close?.();
+        closeOperationPopup(operation);
+        if (activeOperation === operation) activeOperation = null;
         showFeedback(button, 'Ошибка конфигурации Grafana', false);
         return false;
       }
 
       try {
         popup.location.replace(targetUrl);
+        if (activeOperation === operation) activeOperation = null;
         return true;
       } catch (error) {
         clearPendingQuery(requestId);
-        popup.close?.();
+        closeOperationPopup(operation);
+        if (activeOperation === operation) activeOperation = null;
         reportDiagnostics('grafana-window-navigation-failed', error?.message || 'unknown-error');
         showFeedback(button, 'Не удалось открыть Grafana', false);
         return false;
@@ -277,18 +304,23 @@
         showFeedback(button, 'Окно проверки Grafana уже открыто', false);
         return false;
       }
-      openPromise = performOpenQuery(query, button);
+      const currentPromise = performOpenQuery(query, button, lifecycleGeneration);
+      openPromise = currentPromise;
       try {
-        return await openPromise;
+        return await currentPromise;
       } finally {
-        openPromise = null;
+        if (openPromise === currentPromise) openPromise = null;
       }
     }
 
     function destroy() {
-      for (const timerId of cleanupTimers.values()) clearTimeout(timerId);
-      cleanupTimers.clear();
+      lifecycleGeneration += 1;
+      for (const requestId of Array.from(cleanupTimers.keys())) clearPendingQuery(requestId);
       activeDialog?.finish?.(null);
+      if (activeOperation?.requestId) clearPendingQuery(activeOperation.requestId);
+      closeOperationPopup(activeOperation);
+      activeOperation = null;
+      openPromise = null;
     }
 
     return {

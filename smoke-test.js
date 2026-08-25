@@ -100,6 +100,7 @@ context.window.requestAnimationFrame = context.requestAnimationFrame;
 for (const file of [
   'config.js',
   'shared-utils.js',
+  'settings.js',
   'diagnostics.js',
   'sound.js',
   'alerts-data.js',
@@ -107,6 +108,7 @@ for (const file of [
   'needack-baseline.js',
   'needack-severity.js',
   'promql.js',
+  'bosun-rule-graph.js',
   'page-utils.js',
   'styles.js',
   'activity.js',
@@ -122,6 +124,7 @@ for (const file of [
 
 const checks = [
   ['shared-utils', !!context.BosunSilenceHiderSharedUtils],
+  ['settings', !!context.BosunHelperSettings],
   ['diagnostics', !!context.BosunSilenceHiderDiagnostics],
   ['sound', !!context.BosunSilenceHiderSound],
   ['alerts-data', !!context.BosunSilenceHiderAlertsData],
@@ -656,6 +659,32 @@ assert.strictEqual(
   promqlApi.extractPromrasQuery("promras('''metric{label=\"a  b\"}\n  + other''')"),
   'metric{label="a  b"}\n  + other'
 );
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(
+    "promras('''sum(rate(http_requests_total[5m])) by (service)''', \"2m\", \"2h\", \"\")"
+  ),
+  'sum(rate(http_requests_total[5m])) by (service)',
+  'Canonical four-argument Bosun promras calls must expose their PromQL'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(
+    "promras('''up''', $step, duration(\"2h\", 1), \"\")"
+  ),
+  'up',
+  'Promras duration arguments may contain variables and balanced nested calls'
+);
+for (const malformedPromras of [
+  "promras('''up''', \"2m\", \"2h\")",
+  "promras('''up''', \"2m\", , \"\")",
+  "promras('''up''', \"2m\", \"2h\", \"\", \"extra\")",
+  "promras('''up''', duration(\"2m\", 1), \"2h\", \"\""
+]) {
+  assert.strictEqual(
+    promqlApi.extractPromrasQuery(malformedPromras),
+    '',
+    'Malformed or wrong-arity promras tails must fail closed'
+  );
+}
 assert.deepStrictEqual(
   Array.from(promqlApi.parseAlertTags('host="db,primary",env="prod"'), (tag) => ({ ...tag })),
   [
@@ -674,6 +703,14 @@ assert.strictEqual(
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery('sum by (host) (rate(cpu_total[5m]))', { host: 'db' }),
   'sum by (host) (rate(cpu_total{host="db"}[5m]))'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'sum by(zone,name)(rr_imsi_success_response_percent)',
+    'name=bercut1,zone=smssrv28'
+  ),
+  'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+  'A live-shaped naked vector selector must receive only the alert matchers'
 );
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(
@@ -700,7 +737,125 @@ assert.strictEqual(
   promqlApi.extractPromrasQuery(
     "promras('''first_metric''')\npromras('''second_metric''')"
   ),
-  '(first_metric) or (second_metric)'
+  '',
+  'Distinct promras calls must be rejected as ambiguous'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(
+    "promras('''same_metric''')\npromras('''same_metric''')"
+  ),
+  'same_metric',
+  'Identical promras calls may deduplicate to one query'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(
+    "# promras('''comment_metric''')\n$message = \"promras('''string_metric''')\"\npromras('''real_metric''')"
+  ),
+  'real_metric',
+  'Comment and quoted-string text must not create promras candidates'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery("promras('''unclosed_metric'''") ,
+  '',
+  'Malformed promras calls must be rejected'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    '{__name__=~"http_.*",job="api"}',
+    { host: 'web' }
+  ),
+  '',
+  'Naked selectors must fail closed until they are safely supported'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'left_metric atan2 right_metric',
+    { host: 'web' }
+  ),
+  'left_metric{host="web"} atan2 right_metric{host="web"}',
+  'atan2 must remain an operator'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'clamp(metric, -Inf, +Inf) + NaN',
+    { host: 'web' }
+  ),
+  'clamp(metric{host="web"}, -Inf, +Inf) + NaN',
+  'PromQL special float literals must not receive label matchers'
+);
+for (const malformedQuery of [
+  'metric{host="web"',
+  'metric{host="web}',
+  'sum(metric',
+  'metric)'
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(malformedQuery, { env: 'prod' }),
+    '',
+    `Malformed PromQL must fail closed: ${malformedQuery}`
+  );
+}
+for (const malformedTags of [
+  'host=web-1,host=web-2',
+  'host=web-1,broken,env=prod',
+  'host="web-1'
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery('up', malformedTags),
+    '',
+    `Malformed or conflicting tags must fail closed: ${malformedTags}`
+  );
+}
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('up', 'host=web-1,host=web-1'),
+  'up{host="web-1"}',
+  'Identical duplicate tags may deduplicate'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'left_metric + label_replace(right_metric, "dst", `raw\\` , "src", "x") + tail_metric',
+    { host: 'web' }
+  ),
+  'left_metric{host="web"} + label_replace(right_metric{host="web"}, "dst", `raw\\` , "src", "x") + tail_metric{host="web"}',
+  'Backtick raw strings and the tokens after them must be preserved byte-for-byte'
+);
+assert.strictEqual(
+  promqlApi.extractPromrasQuery(`promras('''${'m'.repeat(16 * 1024 + 1)}''')`),
+  '',
+  'Oversized extracted PromQL must fail closed'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('up', `host=${'x'.repeat(1025)}`),
+  '',
+  'Oversized tag values must fail closed'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('up', `${'n'.repeat(129)}=value`),
+  '',
+  'Oversized tag names must fail closed'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'up',
+    Array.from({ length: 65 }, (_unused, index) => `tag_${index}=x`).join(',')
+  ),
+  '',
+  'Excessive tag counts must fail closed'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('m'.repeat(16 * 1024 + 1), { host: 'web' }),
+  '',
+  'Oversized source PromQL must fail closed'
+);
+const boundedTags = Array.from({ length: 64 }, (_unused, index) => {
+  return `tag_${index}=${'x'.repeat(90)}`;
+}).join(',');
+const expandingQuery = Array.from({ length: 180 }, (_unused, index) => `metric_${index}`).join(' + ');
+assert.ok(expandingQuery.length < 16 * 1024, 'Synthetic expansion input unexpectedly exceeds source bound');
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(expandingQuery, boundedTags),
+  '',
+  'Incremental tag expansion beyond the handoff limit must fail closed'
 );
 
 function createBaselineHarness(options = {}) {

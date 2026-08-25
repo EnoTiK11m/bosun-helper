@@ -65,15 +65,16 @@ function createElement(tag = 'div') {
   };
 }
 
-function createHarness(url) {
+function createHarness(url, options = {}) {
   const parsedUrl = new URL(url);
   const documentListeners = new Map();
   const windowListeners = new Map();
-  const storageData = {};
+  const storageData = options.storageData || {};
   const postedMessages = [];
   const styleNodes = [];
   const timeoutCallbacks = [];
   const intervalCallbacks = [];
+  const clearedIntervals = new Set();
   let fetchCount = 0;
   let observerCount = 0;
   let reloadCount = 0;
@@ -110,7 +111,10 @@ function createHarness(url) {
       list.push(listener);
       documentListeners.set(name, list);
     },
-    removeEventListener() {}
+    removeEventListener(name, listener) {
+      const list = documentListeners.get(name) || [];
+      documentListeners.set(name, list.filter((candidate) => candidate !== listener));
+    }
   };
 
   const location = {
@@ -134,7 +138,14 @@ function createHarness(url) {
     sessionStorage: {
       getItem(key) { return storageData[`session:${key}`] ?? null; },
       setItem(key, value) { storageData[`session:${key}`] = String(value); },
-      removeItem(key) { delete storageData[`session:${key}`]; }
+      removeItem(key) { delete storageData[`session:${key}`]; },
+      get length() {
+        return Object.keys(storageData).filter((key) => key.startsWith('session:')).length;
+      },
+      key(index) {
+        const key = Object.keys(storageData).filter((candidate) => candidate.startsWith('session:'))[index];
+        return key ? key.slice('session:'.length) : null;
+      }
     },
     getSelection() {
       return {
@@ -160,6 +171,15 @@ function createHarness(url) {
     },
     open() { return null; }
   };
+  const history = {
+    state: null,
+    replacedUrls: [],
+    replaceState(state, _title, nextUrl) {
+      this.state = state;
+      this.replacedUrls.push(String(nextUrl));
+    }
+  };
+  window.history = history;
   window.window = window;
 
   const chrome = {
@@ -184,8 +204,14 @@ function createHarness(url) {
           callback?.();
         },
         remove(keys, callback) {
-          for (const key of keys || []) delete storageData[key];
+          if (!options.storageRemoveError) {
+            for (const key of keys || []) delete storageData[key];
+            callback?.();
+            return;
+          }
+          chrome.runtime.lastError = { message: 'synthetic remove failure' };
           callback?.();
+          chrome.runtime.lastError = null;
         }
       },
       onChanged: {
@@ -217,6 +243,7 @@ function createHarness(url) {
       clipboard: { writeText: async () => {} }
     },
     location,
+    history,
     URL,
     URLSearchParams,
     Map,
@@ -261,7 +288,7 @@ function createHarness(url) {
       intervalCallbacks.push({ callback, delay });
       return intervalCallbacks.length;
     },
-    clearInterval() {}
+    clearInterval(id) { clearedIntervals.add(id); }
   };
   context.globalThis = context;
   window.chrome = chrome;
@@ -278,16 +305,19 @@ function createHarness(url) {
     document,
     window,
     location,
+    history,
     documentListeners,
     windowListeners,
     postedMessages,
+    storageData,
     styleNodes,
     timeoutCallbacks,
     intervalCallbacks,
     get fetchCount() { return fetchCount; },
     get reloadCount() { return reloadCount; },
     get storageGetCount() { return storageGetCount; },
-    get observerCount() { return observerCount; }
+    get observerCount() { return observerCount; },
+    get clearedIntervals() { return clearedIntervals; }
   };
 }
 
@@ -300,9 +330,7 @@ function runFiles(harness, files) {
 }
 
 async function flushMicrotasks() {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
 }
 
 async function testBosunInitialization() {
@@ -424,6 +452,155 @@ async function testGrafanaContentRequiresExactConfiguredPanel() {
   configuredPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
   assert.strictEqual(configuredPanel.storageGetCount, 1, 'Configured Grafana panel must load its pending query');
+}
+
+async function testGrafanaContentPassesCreatedAtHardDeadline() {
+  const createdAt = Date.now() - 115_000;
+  const requestId = 'deadline-request';
+  const pathName = '/d/example/example';
+  const harness = createHarness(
+    `https://grafana.example.com${pathName}?orgId=1&editPanel=1&bosunHelperRequest=${requestId}`
+  );
+  harness.storageData[`bosunGrafanaPendingQueryV2:${requestId}`] = {
+    query: 'up',
+    run: true,
+    createdAt
+  };
+  runFiles(harness, ['config.js', 'grafana-content.js']);
+  harness.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await flushMicrotasks();
+
+  const applyMessage = harness.postedMessages.find(({ message }) => {
+    return message.type === 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
+  })?.message;
+  assert.ok(applyMessage, 'Grafana content bridge did not send apply request');
+  assert.strictEqual(
+    applyMessage.deadlineAt,
+    createdAt + 120_000,
+    'Page bridge did not receive the hard deadline derived from pending createdAt'
+  );
+}
+
+async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
+  function createEditorNode(text, options = {}) {
+    const ancestor = options.hiddenAncestor ? { hidden: true, parentElement: null } : null;
+    const root = {
+      hidden: false,
+      isConnected: true,
+      parentElement: ancestor,
+      getAttribute() { return null; },
+      getClientRects() { return [{}]; }
+    };
+    const node = {
+      innerText: text,
+      textContent: text,
+      isConnected: true,
+      parentElement: root,
+      getAttribute() { return null; },
+      getClientRects() { return [{}]; },
+      closest() { return root; }
+    };
+    return { node, root };
+  }
+
+  async function reportApplySuccess(harness) {
+    await flushMicrotasks();
+    const apply = harness.postedMessages.find(({ message }) => {
+      return message.type === 'BOSUN_HELPER_APPLY_GRAFANA_QUERY';
+    })?.message;
+    assert.ok(apply, 'Expected Grafana APPLY message');
+    for (const listener of harness.windowListeners.get('message') || []) {
+      listener({
+        source: harness.window,
+        origin: harness.location.origin,
+        data: {
+          type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT',
+          channelToken: apply.channelToken,
+          requestId: apply.requestId,
+          operationId: apply.operationId,
+          result: { ok: true }
+        }
+      });
+    }
+    await flushMicrotasks();
+    return apply;
+  }
+
+  const sharedStorage = {};
+  const requestId = 'consume-once';
+  const pendingKey = `bosunGrafanaPendingQueryV2:${requestId}`;
+  const markerNow = Date.now();
+  for (let index = 0; index < 55; index += 1) {
+    sharedStorage[`session:bosunGrafanaConsumedRequestV2:older-${index}`] = JSON.stringify({
+      consumedAt: markerNow - 1000 + index,
+      expiresAt: markerNow + 60_000
+    });
+  }
+  sharedStorage[pendingKey] = { query: 'up', run: true, createdAt: markerNow };
+  const targetUrl = `https://grafana.example.com/d/example/example?orgId=1&editPanel=1&bosunHelperRequest=${requestId}`;
+  const first = createHarness(targetUrl, {
+    storageData: sharedStorage,
+    storageRemoveError: true
+  });
+  const visible = createEditorNode('up');
+  const hidden = createEditorNode('up', { hiddenAncestor: true });
+  const zeroRect = createEditorNode('up');
+  zeroRect.node.getClientRects = () => [];
+  first.document.querySelectorAll = (selector) => {
+    return selector.includes('.cm-content') ? [visible.node, hidden.node, zeroRect.node] : [];
+  };
+  runFiles(first, ['config.js', 'grafana-content.js']);
+  const firstInit = first.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await reportApplySuccess(first);
+  await firstInit;
+
+  const consumedEntries = Object.entries(sharedStorage).filter(([key]) => {
+    return key.startsWith('session:bosunGrafanaConsumedRequestV2:');
+  });
+  assert.strictEqual(consumedEntries.length, 50, 'Consumed request markers were not physically bounded');
+  assert.ok(
+    consumedEntries.some(([key]) => key.endsWith(`:${requestId}`)),
+    'Successful request was not logically consumed'
+  );
+  assert.ok(
+    consumedEntries.every(([, value]) => !value.includes('up')),
+    'Consumed marker stored query data'
+  );
+  assert.ok(sharedStorage[pendingKey], 'Synthetic remove failure did not preserve pending record');
+  assert.strictEqual(first.history.replacedUrls.length, 1, 'Request URL was not sanitized');
+  assert.ok(!first.history.replacedUrls[0].includes('bosunHelperRequest='));
+
+  const reload = createHarness(targetUrl, {
+    storageData: sharedStorage,
+    storageRemoveError: true
+  });
+  reload.document.querySelectorAll = first.document.querySelectorAll;
+  runFiles(reload, ['config.js', 'grafana-content.js']);
+  await reload.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await flushMicrotasks();
+  assert.strictEqual(
+    reload.postedMessages.some(({ message }) => message.type === 'BOSUN_HELPER_APPLY_GRAFANA_QUERY'),
+    false,
+    'Logically consumed request was applied again after reload'
+  );
+
+  const ambiguousRequest = 'ambiguous-visible-roots';
+  const ambiguousKey = `bosunGrafanaPendingQueryV2:${ambiguousRequest}`;
+  sharedStorage[ambiguousKey] = { query: 'up', run: false, createdAt: Date.now() };
+  const ambiguous = createHarness(
+    targetUrl.replace(requestId, ambiguousRequest),
+    { storageData: sharedStorage }
+  );
+  const secondVisible = createEditorNode('different');
+  ambiguous.document.querySelectorAll = (selector) => {
+    if (selector.includes('.cm-content')) return [visible.node];
+    if (selector.includes('textarea.inputarea')) return [secondVisible.node];
+    return [];
+  };
+  runFiles(ambiguous, ['config.js', 'grafana-content.js']);
+  ambiguous.documentListeners.get('DOMContentLoaded')?.[0]?.();
+  await reportApplySuccess(ambiguous);
+  assert.ok(sharedStorage[ambiguousKey], 'Multiple visible editor roots produced false success');
 }
 
 async function testGrafanaBridgeAuthenticationAndSingleton() {
@@ -770,7 +947,7 @@ function createActionPageHarness() {
 
 async function testActionTemplatesFollowTextareaRemount() {
   const harness = createActionPageHarness();
-  runFiles(harness, ['action-templates.js', 'content.js']);
+  runFiles(harness, ['settings.js', 'action-templates.js', 'content.js']);
   await flushMicrotasks();
 
   const initialWrap = harness.wrap;
@@ -793,12 +970,148 @@ async function testActionTemplatesFollowTextareaRemount() {
   assert.strictEqual(harness.context.document.activeElement, replacement);
 }
 
+async function testFeatureModuleLifecycleCleanup() {
+  const activityHarness = createHarness('https://bosun.example.com/');
+  runFiles(activityHarness, ['activity.js']);
+  let enabled = true;
+  let lastActivity = Date.now();
+  let lastUrl = activityHarness.location.href;
+  const activity = activityHarness.context.BosunSilenceHiderActivity.createActivityTracker({
+    pageUtils: { isDashboardHome: () => true },
+    getAutoRefreshEnabled: () => enabled,
+    setAutoRefreshEnabled(value) { enabled = value; },
+    getAutoRefreshIdleSeconds: () => 60,
+    getLastUserActivityTs: () => lastActivity,
+    setLastUserActivityTs(value) { lastActivity = value; },
+    getLastKnownUrl: () => lastUrl,
+    setLastKnownUrl(value) { lastUrl = value; },
+    autoRefreshForceReenableMs: 0
+  });
+  activity.installUserActivityTracking();
+  activity.installUserActivityTracking();
+  activity.startAutoRefreshLoop(() => {});
+  activity.startAutoRefreshLoop(() => {});
+  for (const eventName of ['pointerdown', 'keydown', 'touchstart', 'wheel', 'scroll']) {
+    assert.strictEqual((activityHarness.windowListeners.get(eventName) || []).length, 1, `${eventName} listener duplicated`);
+  }
+  assert.strictEqual(activityHarness.intervalCallbacks.length, 1, 'Auto-refresh interval duplicated');
+  activity.destroy();
+  for (const eventName of ['pointerdown', 'keydown', 'touchstart', 'wheel', 'scroll']) {
+    assert.strictEqual((activityHarness.windowListeners.get(eventName) || []).length, 0, `${eventName} listener leaked`);
+  }
+  assert.strictEqual((activityHarness.documentListeners.get('visibilitychange') || []).length, 0);
+  assert.ok(activityHarness.clearedIntervals.has(1), 'Auto-refresh interval was not cleared');
+
+  const soundHarness = createHarness('https://bosun.example.com/');
+  runFiles(soundHarness, ['sound.js']);
+  const sound = soundHarness.context.BosunSilenceHiderSound.createSound({
+    alertFile: 'alert.wav',
+    softFile: 'soft.wav',
+    getEnabled: () => true,
+    reportDiagnostics() {}
+  });
+  sound.installAudioUnlockTracking();
+  sound.installAudioUnlockTracking();
+  sound.scheduleNeedAckChimeRetry('alert', 'NotAllowedError');
+  assert.strictEqual((soundHarness.windowListeners.get('pointerdown') || []).length, 2);
+  assert.strictEqual((soundHarness.windowListeners.get('keydown') || []).length, 2);
+  sound.destroy();
+  assert.strictEqual((soundHarness.windowListeners.get('pointerdown') || []).length, 0);
+  assert.strictEqual((soundHarness.windowListeners.get('keydown') || []).length, 0);
+}
+
+async function testNewAlertTrackerDestroyInvalidatesAsyncWork() {
+  const restoreHarness = createHarness('https://bosun.example.com/');
+  let restoreCallback = null;
+  restoreHarness.context.chrome.storage.local.get = (_keys, callback) => { restoreCallback = callback; };
+  const restoreNotifications = [];
+  runFiles(restoreHarness, ['new-alert-tracker.js']);
+  const restoring = restoreHarness.context.BosunHelperNewAlertTracker.createNewAlertTracker({
+    onChange(value) { restoreNotifications.push(value); }
+  });
+  const restorePromise = restoring.start();
+  restoring.destroy();
+  restoreCallback({ bosunNewAlertsAwaitingNoteV1: {
+    version: 1,
+    alerts: [{ id: 'late', severity: 'warning', detectedAt: Date.now() }]
+  } });
+  await restorePromise;
+  assert.strictEqual(restoreNotifications.length, 0, 'Late restore mutated tracker after destroy');
+
+  const writeHarness = createHarness('https://bosun.example.com/');
+  const setCallbacks = [];
+  let storageWrites = 0;
+  writeHarness.context.chrome.storage.local.get = (_keys, callback) => callback({});
+  writeHarness.context.chrome.storage.local.set = (_values, callback) => {
+    storageWrites += 1;
+    setCallbacks.push(callback);
+  };
+  runFiles(writeHarness, ['new-alert-tracker.js']);
+  const writing = writeHarness.context.BosunHelperNewAlertTracker.createNewAlertTracker();
+  await writing.start();
+  await writing.add(['A'], new Map([['A', 'warning']]));
+  await writing.add(['B'], new Map([['B', 'critical']]));
+  assert.strictEqual(storageWrites, 1);
+  writing.destroy();
+  setCallbacks[0]();
+  await flushMicrotasks();
+  assert.strictEqual(storageWrites, 1, 'Late write callback flushed queued tracker state after destroy');
+}
+
+async function testGrafanaHandoffDestroyCancelsDelayedSave() {
+  const harness = createHarness('https://bosun.example.com/');
+  const pending = {};
+  let saveCallback = null;
+  const removed = [];
+  let popupClosed = 0;
+  let navigated = 0;
+  harness.window.confirm = () => true;
+  harness.window.open = () => ({
+    opener: harness.window,
+    close() { popupClosed += 1; },
+    location: { replace() { navigated += 1; } }
+  });
+  harness.context.chrome.storage.local.set = (values, callback) => {
+    Object.assign(pending, values);
+    saveCallback = callback;
+  };
+  harness.context.chrome.storage.local.remove = (keys, callback) => {
+    removed.push(...keys);
+    for (const key of keys) delete pending[key];
+    callback?.();
+  };
+  runFiles(harness, ['grafana-handoff.js']);
+  const handoff = harness.context.BosunHelperGrafanaHandoff.createGrafanaHandoff({
+    config: {
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    },
+    getStorage: () => harness.context.chrome.storage.local,
+    getLastError: () => null
+  });
+  const opening = handoff.openQuery('up', null);
+  while (!saveCallback) await Promise.resolve();
+  const requestKey = Object.keys(pending).find((key) => key.startsWith('bosunGrafanaPendingQueryV2:'));
+  assert.ok(requestKey, 'Delayed Grafana request was not staged');
+  handoff.destroy();
+  saveCallback();
+  assert.strictEqual(await opening, false);
+  assert.strictEqual(popupClosed, 1, 'In-flight Grafana popup was not closed');
+  assert.strictEqual(navigated, 0, 'Disabled Grafana integration navigated after delayed save');
+  assert.ok(removed.includes(requestKey), 'Disabled Grafana integration did not clean the staged request');
+}
+
 (async () => {
   await testBosunInitialization();
   await testGrafanaContentIsolation();
   await testGrafanaContentRequiresExactConfiguredPanel();
+  await testGrafanaContentPassesCreatedAtHardDeadline();
+  await testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot();
   await testGrafanaBridgeAuthenticationAndSingleton();
   await testActionTemplatesFollowTextareaRemount();
+  await testFeatureModuleLifecycleCleanup();
+  await testNewAlertTrackerDestroyInvalidatesAsyncWork();
+  await testGrafanaHandoffDestroyCancelsDelayedSave();
   console.log('Integration test passed');
 })().catch((error) => {
   console.error(error);

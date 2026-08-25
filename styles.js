@@ -24,6 +24,7 @@
       soundAlertsToggleId,
       diagnosticsModalId,
       diagnosticsLogListId,
+      checkboxImprovementsDisabledClass = 'bosun-checkbox-improvements-disabled',
     } = config;
 
     if (document.getElementById("bosun-silence-hider-styles")) return;
@@ -146,7 +147,7 @@
         margin-left: auto;
         white-space: nowrap;
       }
-      :is(
+      body:not(.${checkboxImprovementsDisabledClass}) :is(
         [ts-ack-group="schedule.Groups.NeedAck"],
         [ts-ack-group="schedule.Groups.Acknowledged"]
       ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select {
@@ -166,20 +167,20 @@
         transition: background-color .12s ease, box-shadow .12s ease;
       }
       @media (hover: hover) {
-        :is(
+        body:not(.${checkboxImprovementsDisabledClass}) :is(
           [ts-ack-group="schedule.Groups.NeedAck"],
           [ts-ack-group="schedule.Groups.Acknowledged"]
         ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select:hover {
           background: rgba(0, 0, 0, .055);
         }
       }
-      :is(
+      body:not(.${checkboxImprovementsDisabledClass}) :is(
         [ts-ack-group="schedule.Groups.NeedAck"],
         [ts-ack-group="schedule.Groups.Acknowledged"]
       ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select:has(input:focus-visible) {
         box-shadow: 0 0 0 2px rgba(255, 255, 255, .9), 0 0 0 4px #2d69a0;
       }
-      :is(
+      body:not(.${checkboxImprovementsDisabledClass}) :is(
         [ts-ack-group="schedule.Groups.NeedAck"],
         [ts-ack-group="schedule.Groups.Acknowledged"]
       ) > .panel-group > .panel > .panel-heading > .panel-title > label.pull-right.select > input[type="checkbox"] {
@@ -188,7 +189,7 @@
         margin: 0;
         cursor: pointer;
       }
-      :is(
+      body:not(.${checkboxImprovementsDisabledClass}) :is(
         [ts-ack-group="schedule.Groups.NeedAck"],
         [ts-ack-group="schedule.Groups.Acknowledged"]
       ) > .panel-group > .panel > .panel-heading > .panel-title > input[type="checkbox"] {
@@ -198,7 +199,7 @@
         height: 16px;
         margin-left: 8px;
       }
-      :is(
+      body:not(.${checkboxImprovementsDisabledClass}) :is(
         [ts-ack-group="schedule.Groups.NeedAck"],
         [ts-ack-group="schedule.Groups.Acknowledged"]
       ) > .panel-group > .panel > .panel-heading:has(

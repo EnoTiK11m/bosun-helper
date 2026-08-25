@@ -18,6 +18,7 @@
       templatesByType = DEFAULT_TEMPLATES,
       getStorage = () => globalThis.chrome?.storage?.local || null,
       getLastError = () => globalThis.chrome?.runtime?.lastError || null,
+      settingsStore = null,
       storageKey = STORAGE_KEY,
       wrapClass = 'bosun-action-templates',
       titleClass = 'bosun-action-templates-title',
@@ -100,6 +101,27 @@
 
     function installStorageChangeTracking() {
       if (storageChangeTrackingInstalled) return;
+      if (settingsStore?.subscribe) {
+        storageChangeTrackingInstalled = true;
+        storageChangeListener = settingsStore.subscribe((next, _previous, changedPaths) => {
+          const relevant = ACTION_TYPES.filter((type) => changedPaths.includes(`actionTemplates.${type}`));
+          if (!relevant.length) return;
+          for (const type of relevant) {
+            const templates = next?.actionTemplates?.[type];
+            if (Array.isArray(templates)) storedTemplates[type] = templates.slice();
+            else delete storedTemplates[type];
+            if (editorOpen && editorType === type && !storageWritePending) {
+              setStorageStatus('Шаблоны изменены в другой вкладке', false);
+            }
+          }
+          if (storageWritePending) return;
+          const focusState = captureEditorFocus();
+          renderVersion += 1;
+          refresh();
+          restoreEditorFocus(focusState);
+        });
+        return;
+      }
       const onChanged = globalThis.chrome?.storage?.onChanged;
       if (!onChanged?.addListener) return;
       storageChangesApi = onChanged;
@@ -134,6 +156,26 @@
       storageLoadStarted = true;
       storageLoaded = false;
       const loadGeneration = ++storageLoadGeneration;
+      if (settingsStore?.start) {
+        settingsStore.start().then(() => {
+          if (loadGeneration !== storageLoadGeneration) return;
+          const loaded = {};
+          for (const type of ACTION_TYPES) {
+            const templates = settingsStore.get(`actionTemplates.${type}`);
+            if (Array.isArray(templates)) loaded[type] = templates.slice();
+          }
+          storedTemplates = loaded;
+          storageLoaded = true;
+          renderVersion += 1;
+          refresh();
+        }).catch((error) => {
+          if (loadGeneration !== storageLoadGeneration) return;
+          storageLoaded = true;
+          warnStorage('Failed to load action templates; using defaults.', error);
+          refresh();
+        });
+        return;
+      }
       const storage = getStorage();
       if (!storage?.get) {
         if (loadGeneration === storageLoadGeneration) storageLoaded = true;
@@ -168,6 +210,24 @@
     }
 
     function persistTemplates(type, templates, successMessage, onSuccess) {
+      if (settingsStore?.update && isSupportedType(type)) {
+        const writeGeneration = storageLoadGeneration;
+        settingsStore.update({ [`actionTemplates.${type}`]: templates }).then(() => {
+          if (writeGeneration !== storageLoadGeneration) return;
+          storageWritePending = false;
+          onSuccess();
+          setStorageStatus(successMessage, false);
+          closeEditor();
+        }).catch((error) => {
+          if (writeGeneration !== storageLoadGeneration) return;
+          storageWritePending = false;
+          warnStorage('Failed to save action templates.', error);
+          setStorageStatus('Не удалось сохранить шаблоны', true);
+          rerenderEditor();
+          focusEditorInput(0);
+        });
+        return;
+      }
       const storage = getStorage();
       if (!storage || !isSupportedType(type)) {
         storageWritePending = false;
@@ -574,7 +634,8 @@
     function destroy() {
       document.querySelector(`.${wrapClass}`)?.remove();
       if (storageChangeTrackingInstalled && storageChangeListener) {
-        storageChangesApi?.removeListener?.(storageChangeListener);
+        if (settingsStore?.subscribe) storageChangeListener();
+        else storageChangesApi?.removeListener?.(storageChangeListener);
       }
       storageChangeTrackingInstalled = false;
       storageChangeListener = null;
