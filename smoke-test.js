@@ -101,6 +101,7 @@ for (const file of [
   'config.js',
   'shared-utils.js',
   'settings.js',
+  'settings-ui.js',
   'diagnostics.js',
   'sound.js',
   'alerts-data.js',
@@ -125,6 +126,7 @@ for (const file of [
 const checks = [
   ['shared-utils', !!context.BosunSilenceHiderSharedUtils],
   ['settings', !!context.BosunHelperSettings],
+  ['settings-ui', !!context.BosunHelperSettingsUi],
   ['diagnostics', !!context.BosunSilenceHiderDiagnostics],
   ['sound', !!context.BosunSilenceHiderSound],
   ['alerts-data', !!context.BosunSilenceHiderAlertsData],

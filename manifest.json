@@ -36,6 +36,7 @@
         "config.js",
         "shared-utils.js",
         "settings.js",
+        "settings-ui.js",
         "diagnostics.js",
         "sound.js",
         "alerts-data.js",

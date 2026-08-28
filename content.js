@@ -168,6 +168,14 @@
           grafanaIntegration: true
         }
       };
+  const settingsUi = globalThis.BosunHelperSettingsUi?.createSettingsUi?.({
+    settingsStore,
+    schema: settingsApi?.SCHEMA || [],
+    toolbarId: TOP_BAR_ID,
+    reportStatus: (message, level = 'info', title = '') => {
+      setToolbarStatus('settings-ui', message, level, { title });
+    }
+  }) || null;
   let toolbarStatusSource = '';
   let toolbarStatusLevel = '';
   let toolbarStatusMessage = '';
@@ -1161,6 +1169,7 @@
     } else {
       disconnectTopBarMountObserver();
       refreshCoordinatorApi?.stop?.();
+      settingsUi?.close?.({ restoreFocus: false });
       document.getElementById(TOP_BAR_ID)?.remove();
       clearAlertDerivedState();
     }
@@ -2587,6 +2596,16 @@
     return bar?.querySelector('.bosun-top-controls-actions') || null;
   }
 
+  function ensureToolbarUtilityGroup(actions) {
+    let group = actions.querySelector('.bosun-toolbar-utility-group');
+    if (!group) {
+      group = document.createElement('div');
+      group.className = 'bosun-toolbar-utility-group';
+      actions.appendChild(group);
+    }
+    return group;
+  }
+
   function ensureToggleExists() {
     if (!isDashboardHome()) {
       document.getElementById(TOP_BAR_ID)?.remove();
@@ -2600,13 +2619,15 @@
     ensureAutoRefreshControls(actions);
     ensureToolbarStatusIndicator(actions);
     ensureNewAlertNotice();
+    ensureDiagnosticsControls(actions);
+    const utilityGroup = ensureToolbarUtilityGroup(actions);
 
     let btn = document.getElementById(TOGGLE_ID);
     let counter = document.getElementById(TOGGLE_COUNTER_ID);
 
     if (!isFeatureEnabled('silencedFilter')) {
       btn?.remove();
-      ensureDiagnosticsControls(actions);
+      settingsUi?.mount?.(utilityGroup);
       return;
     }
 
@@ -2631,10 +2652,10 @@
     if (counter.parentElement !== btn) {
       btn.appendChild(counter);
     }
-    if (btn.parentElement !== actions) {
-      actions.appendChild(btn);
+    if (btn.parentElement !== utilityGroup) {
+      utilityGroup.appendChild(btn);
     }
-    ensureDiagnosticsControls(actions);
+    settingsUi?.mount?.(utilityGroup);
     updateToggleText();
   }
 
@@ -3652,6 +3673,7 @@
     window.addEventListener('pagehide', () => {
       ruleGraphLifecycleGeneration += 1;
       ruleGraphResolver?.stop?.();
+      settingsUi?.destroy?.();
       if (alertMarkerCachePersistTimer) {
         clearTimeout(alertMarkerCachePersistTimer);
         alertMarkerCachePersistTimer = null;

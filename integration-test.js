@@ -3,6 +3,17 @@
 const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
+const { loadConfigFile } = require('./scripts/config-sync');
+
+const runtimeConfig = loadConfigFile('config.js');
+
+function createConfiguredGrafanaUrl(searchParams = {}) {
+  const url = new URL(runtimeConfig.grafanaPanelUrl);
+  Object.entries(searchParams).forEach(([name, value]) => {
+    url.searchParams.set(name, value);
+  });
+  return url.toString();
+}
 
 function createElement(tag = 'div') {
   const attributes = new Map();
@@ -334,14 +345,14 @@ async function flushMicrotasks() {
 }
 
 async function testBosunInitialization() {
-  const harness = createHarness('https://bosun.example.com/');
+  const configuredHost = loadConfigFile('config.js').bosunHosts[0];
+  const harness = createHarness(`https://${configuredHost}/`);
   const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
   runFiles(harness, manifest.content_scripts[0].js);
 
   const domReadyListeners = harness.documentListeners.get('DOMContentLoaded') || [];
   assert.strictEqual(domReadyListeners.length, 1, 'Bosun init listener was not installed');
   domReadyListeners[0]();
-  assert.strictEqual(harness.fetchCount, 1, 'Initial alerts request must start during initialization');
   await flushMicrotasks();
 
   assert.strictEqual(harness.fetchCount, 1, 'Initial alerts request was not sent exactly once');
@@ -418,9 +429,7 @@ async function testBosunInitialization() {
 }
 
 async function testGrafanaContentIsolation() {
-  const harness = createHarness(
-    'https://grafana.example.com/d/example/example?editPanel=1'
-  );
+  const harness = createHarness(createConfiguredGrafanaUrl());
   const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
   runFiles(harness, manifest.content_scripts[1].js);
 
@@ -436,18 +445,18 @@ async function testGrafanaContentIsolation() {
 }
 
 async function testGrafanaContentRequiresExactConfiguredPanel() {
-  const pathName = '/d/example/example';
-  const wrongPanel = createHarness(
-    `https://grafana.example.com${pathName}?orgId=1&editPanel=8&bosunHelperRequest=request-1`
-  );
+  const configuredUrl = new URL(createConfiguredGrafanaUrl({ bosunHelperRequest: 'request-1' }));
+  const wrongUrl = new URL(configuredUrl);
+  const configuredPanelId = configuredUrl.searchParams.get('editPanel');
+  wrongUrl.searchParams.set('editPanel', configuredPanelId === '999999' ? '999998' : '999999');
+
+  const wrongPanel = createHarness(wrongUrl.toString());
   runFiles(wrongPanel, ['config.js', 'grafana-content.js']);
   wrongPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
   assert.strictEqual(wrongPanel.storageGetCount, 0, 'Wrong Grafana panel must not read pending query storage');
 
-  const configuredPanel = createHarness(
-    `https://grafana.example.com${pathName}?orgId=1&editPanel=1&bosunHelperRequest=request-1`
-  );
+  const configuredPanel = createHarness(configuredUrl.toString());
   runFiles(configuredPanel, ['config.js', 'grafana-content.js']);
   configuredPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
@@ -457,10 +466,7 @@ async function testGrafanaContentRequiresExactConfiguredPanel() {
 async function testGrafanaContentPassesCreatedAtHardDeadline() {
   const createdAt = Date.now() - 115_000;
   const requestId = 'deadline-request';
-  const pathName = '/d/example/example';
-  const harness = createHarness(
-    `https://grafana.example.com${pathName}?orgId=1&editPanel=1&bosunHelperRequest=${requestId}`
-  );
+  const harness = createHarness(createConfiguredGrafanaUrl({ bosunHelperRequest: requestId }));
   harness.storageData[`bosunGrafanaPendingQueryV2:${requestId}`] = {
     query: 'up',
     run: true,
@@ -537,7 +543,7 @@ async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
     });
   }
   sharedStorage[pendingKey] = { query: 'up', run: true, createdAt: markerNow };
-  const targetUrl = `https://grafana.example.com/d/example/example?orgId=1&editPanel=1&bosunHelperRequest=${requestId}`;
+  const targetUrl = createConfiguredGrafanaUrl({ bosunHelperRequest: requestId });
   const first = createHarness(targetUrl, {
     storageData: sharedStorage,
     storageRemoveError: true

@@ -119,6 +119,12 @@ checkbox, copy buttons, фильтры, сворачивание Acknowledged, �
 reload: исходная DOM-трансформация необратима без риска изменить штатный текст
 Bosun.
 
+Кнопка **⚙ Настройки** в верхней панели открывает компактное окно управления
+feature toggles, интервалом автообновления и шаблонами Note/Ack/Close. Все
+изменения проходят через тот же versioned settings store и отражаются в других
+открытых вкладках. Reset затрагивает только settings schema. Для Last Action
+панель явно сообщает, что изменение применится после перезагрузки страницы.
+
 ## Требования
 
 - Google Chrome, Chromium или Microsoft Edge с поддержкой Manifest V3;
@@ -214,6 +220,12 @@ npm run prepare-commit
 - скрыть или показать **Acknowledged**;
 - включить или выключить звук;
 - настроить обновление страницы после бездействия.
+
+Кнопка **⚙ Настройки** открывает полную панель существующих пользовательских
+настроек. Её можно закрыть клавишей `Escape` или кликом вне окна. Feature toggles
+применяются сразу, кроме отдельно помеченной настройки Last Action. Кнопка
+**Сбросить настройки** требует подтверждения и не затрагивает tracker,
+coordinator или Grafana pending requests.
 
 Клик по основной части строки по-прежнему раскрывает группу. Клик по штатному
 checkbox или его увеличенной области меняет выбор, не раскрывая строку.
@@ -351,6 +363,7 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `rule-graph-test.js` | `$usage_graph` parser, hash-bound cache и stale fetch regressions |
 | `integration-test.js` | Инициализация content scripts, remount UI и границы Bosun/Grafana |
 | `regression-test.js` | Координатор вкладок, storage-races, tracker и редакторы Grafana |
+| `settings-ui-test.js` | Lifecycle, persistence, reset и multi-tab contract панели настроек |
 | `browser-test.js` | Реальные DOM, CSS, responsive-layout, keyboard/pointer interactions |
 
 ### Структура проекта
@@ -362,6 +375,7 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `config.example.js` | Безопасный пример локальной конфигурации |
 | `config.js` | Сгенерированная runtime-конфигурация |
 | `shared-utils.js` | Общая нормализация данных и DOM-значений |
+| `settings-ui.js` | Панель пользовательских настроек поверх API `settings.js` |
 | `diagnostics.js` | Ограниченный внутренний журнал диагностики |
 | `sound.js` | Звук и межвкладочная защита от повторов |
 | `alerts-data.js` | Загрузка `/api/alerts`, retry и индекс алертов |

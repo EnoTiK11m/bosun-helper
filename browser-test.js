@@ -254,6 +254,8 @@ function instrumentContentSource(source) {
   globalThis.__BosunHelperBrowserTest = {
     ensureStateIcon,
     ensureParentStateIcon,
+    ensureToggleExists,
+    destroySettingsUi: () => settingsUi?.destroy?.(),
     ensureAutoRefreshControls,
     ensureLastActionCopyButtons,
     ensureGrafanaQueryButtons,
@@ -352,6 +354,8 @@ ${source.slice(closing)}`;
 }
 
 async function runBrowserAssertions(client) {
+  const settingsSource = fs.readFileSync(path.join(root, 'settings.js'), 'utf8');
+  const settingsUiSource = fs.readFileSync(path.join(root, 'settings-ui.js'), 'utf8');
   const actionSource = fs.readFileSync(path.join(root, 'action-templates.js'), 'utf8');
   const needAckBaselineSource = fs.readFileSync(path.join(root, 'needack-baseline.js'), 'utf8');
   const singleAlertAgeSource = fs.readFileSync(path.join(root, 'single-alert-age.js'), 'utf8');
@@ -363,7 +367,467 @@ async function runBrowserAssertions(client) {
   const ruleGraphSource = fs.readFileSync(path.join(root, 'bosun-rule-graph.js'), 'utf8');
   const contentSource = instrumentContentSource(fs.readFileSync(path.join(root, 'content.js'), 'utf8'));
 
+  await client.send('Emulation.setDeviceMetricsOverride', {
+    width: 320,
+    height: 720,
+    deviceScaleFactor: 1,
+    mobile: false
+  });
+  const settingsUiResult = await evaluate(client, `(async () => {
+    document.body.innerHTML = '<div id="bosun-top-controls"><div class="bosun-top-controls-actions"></div></div>';
+    ${settingsSource}
+    ${settingsUiSource}
+    ${stylesSource}
+    const subscribers = new Set();
+    const calls = { updates: [], resets: 0, confirms: 0 };
+    let snapshot = JSON.parse(JSON.stringify(BosunHelperSettings.DEFAULTS));
+    snapshot.features.copyButtons = false;
+    snapshot.features.grafanaIntegration = true;
+    snapshot.features.lastActionEnhancements = true;
+    snapshot.preferences.autoRefreshIdleSeconds = 45;
+    snapshot.actionTemplates.note = ['browser note'];
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const writePath = (target, path, value) => {
+      const [section, name] = path.split('.');
+      target[section][name] = value;
+    };
+    const store = {
+      getSnapshot: () => clone(snapshot),
+      async update(values) {
+        calls.updates.push(clone(values));
+        const previous = clone(snapshot);
+        for (const [path, value] of Object.entries(values)) writePath(snapshot, path, value);
+        const changedPaths = Object.keys(values);
+        for (const subscriber of Array.from(subscribers)) subscriber(clone(snapshot), previous, changedPaths);
+        return clone(snapshot);
+      },
+      async reset() {
+        calls.resets += 1;
+        const previous = clone(snapshot);
+        snapshot = clone(BosunHelperSettings.DEFAULTS);
+        const changedPaths = BosunHelperSettings.SCHEMA.map((entry) => entry.path);
+        for (const subscriber of Array.from(subscribers)) subscriber(clone(snapshot), previous, changedPaths);
+        return clone(snapshot);
+      },
+      subscribe(listener) { subscribers.add(listener); return () => subscribers.delete(listener); }
+    };
+    const api = BosunHelperSettingsUi.createSettingsUi({
+      settingsStore: store,
+      schema: BosunHelperSettings.SCHEMA,
+      toolbarId: 'bosun-top-controls',
+      confirmReset() { calls.confirms += 1; return true; }
+    });
+    const actions = document.querySelector('.bosun-top-controls-actions');
+    api.mount(actions);
+    api.mount(actions);
+    const button = document.querySelector('#bosun-settings-button');
+    button.focus();
+    button.click();
+    const panel = document.querySelector('.bosun-settings-panel');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true }));
+    const focusTrapWrapsBackward = document.activeElement === document.querySelector('#bosun-settings-reset');
+    document.querySelector('#bosun-settings-close').focus();
+    const initial = {
+      buttonCount: document.querySelectorAll('#bosun-settings-button').length,
+      dialogCount: document.querySelectorAll('#bosun-settings-modal').length,
+      copyButtons: document.querySelector('[data-setting-path="features.copyButtons"]').checked,
+      idleSeconds: document.querySelector('[data-setting-path="preferences.autoRefreshIdleSeconds"]').value,
+      note: document.querySelector('[data-setting-path="actionTemplates.note"]').value,
+      reloadHint: Boolean(document.querySelector('.bosun-settings-reload-hint')),
+      focusInside: panel.contains(document.activeElement),
+      focusTrapWrapsBackward,
+      panelFitsViewport: panel.getBoundingClientRect().width <= document.documentElement.clientWidth,
+      noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth
+    };
+
+    const copyToggle = document.querySelector('[data-setting-path="features.copyButtons"]');
+    copyToggle.focus();
+    copyToggle.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const saveFocusPreserved = document.activeElement === copyToggle;
+
+    const grafanaToggle = document.querySelector('[data-setting-path="features.grafanaIntegration"]');
+    const soundToggle = document.querySelector('[data-setting-path="features.soundNotifications"]');
+    grafanaToggle.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const soundUnaffected = soundToggle.checked;
+
+    const previous = clone(snapshot);
+    snapshot.features.copyButtons = false;
+    for (const subscriber of Array.from(subscribers)) {
+      subscriber(clone(snapshot), previous, ['features.copyButtons']);
+    }
+    await Promise.resolve();
+    const externalUpdateReflected = copyToggle.checked === false;
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    const escapeClosed = !api.isOpen() && document.activeElement === button;
+    button.click();
+    document.querySelector('#bosun-settings-modal').click();
+    const outsideClosed = !api.isOpen() && document.activeElement === button;
+
+    button.click();
+    const resetButton = document.querySelector('#bosun-settings-reset');
+    resetButton.focus();
+    resetButton.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    const resetApplied = calls.resets === 1 &&
+      document.querySelector('[data-setting-path="features.copyButtons"]').checked === true;
+    const resetFocusPreserved = document.activeElement === resetButton;
+    const templateAccessibility = ['note', 'ack', 'close'].every((type) => {
+      const textarea = document.querySelector('[data-setting-path="actionTemplates.' + type + '"]');
+      const defaultButton = document.querySelector('[data-template-default-path="actionTemplates.' + type + '"]');
+      const describedBy = textarea.getAttribute('aria-describedby');
+      const label = type[0].toUpperCase() + type.slice(1);
+      return defaultButton.getAttribute('aria-label') === 'Вернуть встроенные шаблоны: ' + label &&
+        Boolean(describedBy) && document.getElementById(describedBy);
+    });
+
+    api.destroy();
+    const destroyed = !document.querySelector('#bosun-settings-button') &&
+      !document.querySelector('#bosun-settings-modal') && subscribers.size === 0;
+    const remountApi = BosunHelperSettingsUi.createSettingsUi({
+      settingsStore: store,
+      schema: BosunHelperSettings.SCHEMA,
+      toolbarId: 'bosun-top-controls'
+    });
+    remountApi.mount(actions);
+    const remounted = document.querySelectorAll('#bosun-settings-button').length === 1;
+    remountApi.destroy();
+    return {
+      initial,
+      updates: calls.updates,
+      saveFocusPreserved,
+      soundUnaffected,
+      externalUpdateReflected,
+      escapeClosed,
+      outsideClosed,
+      resetApplied,
+      resetFocusPreserved,
+      templateAccessibility,
+      confirms: calls.confirms,
+      destroyed,
+      remounted,
+      finalSubscribers: subscribers.size
+    };
+  })()`);
+  await client.send('Emulation.clearDeviceMetricsOverride');
+  assert.deepStrictEqual(settingsUiResult.initial, {
+    buttonCount: 1,
+    dialogCount: 1,
+    copyButtons: false,
+    idleSeconds: '45',
+    note: 'browser note',
+    reloadHint: true,
+    focusInside: true,
+    focusTrapWrapsBackward: true,
+    panelFitsViewport: true,
+    noHorizontalOverflow: true
+  });
+  assert.ok(
+    settingsUiResult.updates.some((call) => call['features.copyButtons'] === true),
+    'Settings UI did not persist the copy-buttons toggle'
+  );
+  assert.strictEqual(settingsUiResult.saveFocusPreserved, true, 'Async save lost keyboard focus');
+  assert.ok(
+    settingsUiResult.updates.some((call) => call['features.grafanaIntegration'] === false),
+    'Settings UI did not persist the Grafana toggle'
+  );
+  assert.strictEqual(settingsUiResult.soundUnaffected, true, 'Grafana toggle changed an unrelated feature');
+  assert.strictEqual(settingsUiResult.externalUpdateReflected, true);
+  assert.strictEqual(settingsUiResult.escapeClosed, true);
+  assert.strictEqual(settingsUiResult.outsideClosed, true);
+  assert.strictEqual(settingsUiResult.resetApplied, true);
+  assert.strictEqual(settingsUiResult.resetFocusPreserved, true, 'Reset lost keyboard focus');
+  assert.strictEqual(settingsUiResult.templateAccessibility, true);
+  assert.strictEqual(settingsUiResult.confirms, 1);
+  assert.strictEqual(settingsUiResult.destroyed, true);
+  assert.strictEqual(settingsUiResult.remounted, true);
+  assert.strictEqual(settingsUiResult.finalSubscribers, 0);
+
+  const normalizedSettingsUiResult = await evaluate(client, `(async () => {
+    document.body.innerHTML = '<div id="normalized-toolbar"><div class="bosun-top-controls-actions"></div></div>';
+    const data = {
+      bosunSettingsSchemaVersion: 1,
+      'bosunSettingsV1:features.copyButtons': 'corrupt',
+      'bosunSettingsV1:preferences.autoRefreshIdleSeconds': 'not-a-number'
+    };
+    const listeners = new Set();
+    const storage = {
+      get(keys, callback) {
+        const result = {};
+        for (const key of keys) if (Object.prototype.hasOwnProperty.call(data, key)) result[key] = data[key];
+        queueMicrotask(() => callback(result));
+      },
+      set(values, callback) { Object.assign(data, values); queueMicrotask(() => callback?.()); },
+      remove(keys, callback) {
+        for (const key of keys) delete data[key];
+        queueMicrotask(() => callback?.());
+      }
+    };
+    const storageChanges = {
+      addListener(listener) { listeners.add(listener); },
+      removeListener(listener) { listeners.delete(listener); }
+    };
+    const store = BosunHelperSettings.createSettingsStore({
+      storage,
+      storageChanges,
+      getLastError: () => null
+    });
+    await store.start();
+    const api = BosunHelperSettingsUi.createSettingsUi({
+      settingsStore: store,
+      schema: BosunHelperSettings.SCHEMA,
+      toolbarId: 'normalized-toolbar'
+    });
+    api.mount(document.querySelector('.bosun-top-controls-actions'));
+    api.open();
+    const result = {
+      copyButtons: document.querySelector('[data-setting-path="features.copyButtons"]').checked,
+      idleSeconds: document.querySelector('[data-setting-path="preferences.autoRefreshIdleSeconds"]').value
+    };
+    api.destroy();
+    store.destroy();
+    result.listenersAfterDestroy = listeners.size;
+    return result;
+  })()`);
+  assert.deepStrictEqual(normalizedSettingsUiResult, {
+    copyButtons: true,
+    idleSeconds: '60',
+    listenersAfterDestroy: 0
+  });
+
+  await client.send('Emulation.setDeviceMetricsOverride', {
+    width: 1200,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false
+  });
+  const wideSettingsLayout = await evaluate(client, `(async () => {
+    document.body.innerHTML = '<div id="layout-toolbar"><div class="bosun-top-controls-actions"></div></div>';
+    document.getElementById('bosun-silence-hider-styles')?.remove();
+    BosunSilenceHiderStyles.injectStyles({
+      hiddenClass: 'layout-hidden', userCommentFilterHiddenClass: 'layout-user-hidden',
+      acknowledgedCollapsedClass: 'layout-ack-hidden', copyButtonClass: 'layout-copy',
+      copyAllButtonClass: 'layout-copy-all', copyLastActionButtonClass: 'layout-copy-last',
+      grafanaQueryButtonClass: 'layout-grafana', noSelectClass: 'layout-no-select',
+      silencedBadgeClass: 'layout-silenced', oldNoNoteIconClass: 'layout-old-note',
+      hasNoteIconClass: 'layout-has-note', topBarId: 'layout-toolbar',
+      topBarStatusId: 'layout-status', toggleId: 'layout-toggle',
+      toggleCounterId: 'layout-counter', autoRefreshToggleId: 'layout-auto-toggle',
+      autoRefreshInputId: 'layout-auto-input', autoRefreshCountdownId: 'layout-countdown',
+      soundAlertsToggleId: 'layout-sound', diagnosticsModalId: 'layout-diagnostics',
+      diagnosticsLogListId: 'layout-diagnostics-list'
+    });
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    let snapshot = clone(BosunHelperSettings.DEFAULTS);
+    snapshot.actionTemplates.note = ['draft template'];
+    const subscribers = new Set();
+    const store = {
+      getSnapshot: () => clone(snapshot),
+      async update(values) {
+        const previous = clone(snapshot);
+        for (const [path, value] of Object.entries(values)) {
+          const [section, name] = path.split('.');
+          snapshot[section][name] = value;
+        }
+        for (const listener of Array.from(subscribers)) listener(clone(snapshot), previous, Object.keys(values));
+        return clone(snapshot);
+      },
+      async reset() { return clone(snapshot); },
+      subscribe(listener) { subscribers.add(listener); return () => subscribers.delete(listener); }
+    };
+    const api = BosunHelperSettingsUi.createSettingsUi({
+      settingsStore: store,
+      schema: BosunHelperSettings.SCHEMA,
+      toolbarId: 'layout-toolbar'
+    });
+    api.mount(document.querySelector('.bosun-top-controls-actions'));
+    api.open();
+    const details = document.querySelector('.bosun-settings-group-collapsible');
+    const summary = details.querySelector('summary');
+    const panel = document.querySelector('.bosun-settings-panel');
+    const body = document.querySelector('.bosun-settings-body');
+    const collapsedHeight = panel.getBoundingClientRect().height;
+    summary.focus();
+    summary.click();
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const note = document.querySelector('[data-setting-path="actionTemplates.note"]');
+    note.value = 'unsaved visual draft';
+    const groupByTitle = (title) => Array.from(document.querySelectorAll('.bosun-settings-group')).find((group) => {
+      return group.querySelector('.bosun-settings-group-title')?.textContent === title;
+    });
+    const integration = groupByTitle('Интеграции').getBoundingClientRect();
+    const templates = groupByTitle('Шаблоны').getBoundingClientRect();
+    const groupLefts = Array.from(document.querySelectorAll('.bosun-settings-group'), (group) => {
+      return Math.round(group.getBoundingClientRect().left);
+    });
+    summary.click();
+    summary.click();
+    const draftPreserved = note.value === 'unsaved visual draft';
+    globalThis.__settingsLayoutTest = { api, store, subscribers };
+    return {
+      columnCount: getComputedStyle(body).columnCount,
+      distinctColumns: new Set(groupLefts).size,
+      integrationHeight: integration.height,
+      templatesHeight: templates.height,
+      collapsedHeight,
+      expandedHeight: panel.getBoundingClientRect().height,
+      templatesOpen: details.open,
+      summaryFocusedBeforeToggle: document.activeElement === summary,
+      draftPreserved,
+      noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth
+    };
+  })()`);
+
+  await client.send('Emulation.setDeviceMetricsOverride', {
+    width: 600,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false
+  });
+  const narrowSettingsLayout = await evaluate(client, `(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const body = document.querySelector('.bosun-settings-body');
+    const panel = document.querySelector('.bosun-settings-panel');
+    const lefts = Array.from(document.querySelectorAll('.bosun-settings-group'), (group) => {
+      return Math.round(group.getBoundingClientRect().left);
+    });
+    const result = {
+      columnCount: getComputedStyle(body).columnCount,
+      distinctColumns: new Set(lefts).size,
+      fitsViewport: panel.getBoundingClientRect().width <= document.documentElement.clientWidth,
+      noHorizontalOverflow: panel.scrollWidth <= panel.clientWidth,
+      draftPreserved: document.querySelector('[data-setting-path="actionTemplates.note"]').value === 'unsaved visual draft'
+    };
+    __settingsLayoutTest.api.destroy();
+    result.subscribersAfterDestroy = __settingsLayoutTest.subscribers.size;
+    delete globalThis.__settingsLayoutTest;
+    document.getElementById('bosun-silence-hider-styles')?.remove();
+    return result;
+  })()`);
+  await client.send('Emulation.clearDeviceMetricsOverride');
+
+  assert.strictEqual(wideSettingsLayout.columnCount, '2');
+  assert.ok(wideSettingsLayout.distinctColumns >= 2, 'Wide settings panel did not retain two columns');
+  assert.ok(
+    wideSettingsLayout.integrationHeight + 40 < wideSettingsLayout.templatesHeight,
+    'Integration card was stretched to match the templates card'
+  );
+  assert.ok(wideSettingsLayout.collapsedHeight < wideSettingsLayout.expandedHeight);
+  assert.strictEqual(wideSettingsLayout.templatesOpen, true);
+  assert.strictEqual(wideSettingsLayout.summaryFocusedBeforeToggle, true);
+  assert.strictEqual(wideSettingsLayout.draftPreserved, true);
+  assert.strictEqual(wideSettingsLayout.noHorizontalOverflow, true);
+  assert.deepStrictEqual(narrowSettingsLayout, {
+    columnCount: '1',
+    distinctColumns: 1,
+    fitsViewport: true,
+    noHorizontalOverflow: true,
+    draftPreserved: true,
+    subscribersAfterDestroy: 0
+  });
+
+  const toolbarLayouts = [];
+  await client.send('Emulation.setDeviceMetricsOverride', {
+    width: 1920,
+    height: 800,
+    deviceScaleFactor: 1,
+    mobile: false
+  });
+  await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '<nav class="navbar navbar-default navbar-static-top"></nav><main class="container"></main>';
+    document.getElementById('bosun-silence-hider-styles')?.remove();
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${contentSource}
+    BosunSilenceHiderStyles.injectStyles({
+      hiddenClass: 'bosun-silence-hidden', userCommentFilterHiddenClass: 'bosun-user-comment-hidden',
+      acknowledgedCollapsedClass: 'bosun-acknowledged-collapsed', copyButtonClass: 'bosun-copy-alert-btn',
+      copyAllButtonClass: 'bosun-copy-all-alerts-btn', copyLastActionButtonClass: 'bosun-copy-last-action-btn',
+      grafanaQueryButtonClass: 'bosun-grafana-query-btn', noSelectClass: 'bosun-no-select',
+      silencedBadgeClass: 'bosun-silenced-badge', oldNoNoteIconClass: 'bosun-old-no-note-icon',
+      hasNoteIconClass: 'bosun-has-note-icon', topBarId: 'bosun-top-controls-bar',
+      topBarStatusId: 'bosun-top-controls-status', toggleId: 'bosun-silence-toggle',
+      toggleCounterId: 'bosun-silence-toggle-counter', autoRefreshToggleId: 'bosun-auto-refresh-toggle',
+      autoRefreshInputId: 'bosun-auto-refresh-idle-seconds', autoRefreshCountdownId: 'bosun-auto-refresh-countdown',
+      soundAlertsToggleId: 'bosun-sound-alerts-toggle', diagnosticsModalId: 'bosun-diagnostics-modal',
+      diagnosticsLogListId: 'bosun-diagnostics-log-list'
+    });
+    __BosunHelperBrowserTest.ensureToggleExists();
+    globalThis.__measureToolbarLayout = () => {
+      const actions = document.querySelector('.bosun-top-controls-actions');
+      const utility = document.querySelector('.bosun-toolbar-utility-group');
+      const silenced = document.querySelector('#bosun-silence-toggle');
+      const settings = document.querySelector('#bosun-settings-button');
+      const first = document.querySelector('.bosun-sound-alerts-wrap');
+      const status = document.querySelector('#bosun-top-controls-status');
+      const actionsRect = actions.getBoundingClientRect();
+      const utilityRect = utility.getBoundingClientRect();
+      const silencedRect = silenced.getBoundingClientRect();
+      const settingsRect = settings.getBoundingClientRect();
+      const firstRect = first.getBoundingClientRect();
+      const statusRect = status.getBoundingClientRect();
+      return {
+        utilityChildren: Array.from(utility.children, (node) => node.id),
+        utilityWrap: getComputedStyle(utility).flexWrap,
+        sameUtilityLine: Math.abs(silencedRect.top - settingsRect.top) <= 1,
+        settingsAfterSilenced: settingsRect.left >= silencedRect.right,
+        sameAsFirstLine: Math.abs(utilityRect.top - firstRect.top) <= 1,
+        rightAligned: Math.abs(utilityRect.right - actionsRect.right) <= 1,
+        insideActions: utilityRect.left >= actionsRect.left && utilityRect.right <= actionsRect.right + 1,
+        statusHidden: getComputedStyle(status).display === 'none' && statusRect.width === 0 && statusRect.height === 0,
+        noHorizontalOverflow: actions.scrollWidth <= actions.clientWidth
+      };
+    };
+  })()`);
+
+  try {
+    for (const width of [1920, 1200, 900, 600]) {
+      await client.send('Emulation.setDeviceMetricsOverride', {
+        width,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: false
+      });
+      const layout = await evaluate(client, `(async () => {
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return __measureToolbarLayout();
+      })()`);
+      toolbarLayouts.push({ width, ...layout });
+    }
+  } finally {
+    await evaluate(client, `(() => {
+      __BosunHelperBrowserTest.destroySettingsUi();
+      delete globalThis.__measureToolbarLayout;
+      document.getElementById('bosun-silence-hider-styles')?.remove();
+    })()`);
+    await client.send('Emulation.clearDeviceMetricsOverride');
+  }
+
+  for (const layout of toolbarLayouts) {
+    assert.deepStrictEqual(layout.utilityChildren, ['bosun-silence-toggle', 'bosun-settings-button']);
+    assert.strictEqual(layout.utilityWrap, 'nowrap');
+    assert.strictEqual(layout.sameUtilityLine, true);
+    assert.strictEqual(layout.settingsAfterSilenced, true);
+    assert.strictEqual(layout.rightAligned, true);
+    assert.strictEqual(layout.insideActions, true);
+    assert.strictEqual(layout.statusHidden, true, `Empty toolbar status was visible at ${layout.width}px`);
+    assert.strictEqual(layout.noHorizontalOverflow, true, `Toolbar overflowed at ${layout.width}px`);
+  }
+  assert.strictEqual(toolbarLayouts.find((layout) => layout.width === 1920).sameAsFirstLine, true);
+  assert.strictEqual(toolbarLayouts.find((layout) => layout.width === 1200).sameAsFirstLine, true);
+  assert.strictEqual(toolbarLayouts.find((layout) => layout.width === 600).sameAsFirstLine, false);
+
   const actionResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/action?type=note');
     document.body.innerHTML = '<div id="action-host"><textarea id="old-message"></textarea></div>';
     ${actionSource}
     const api = BosunHelperActionTemplates.createActionTemplates({
