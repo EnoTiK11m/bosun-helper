@@ -51,6 +51,7 @@ const contentIndex = bosunScripts.indexOf('content.js');
 assert.ok(contentIndex >= 0, 'Bosun entry must include content.js');
 for (const provider of [
   'settings.js',
+  'settings-ui.js',
   'promql.js',
   'bosun-rule-graph.js',
   'single-alert-age.js',
@@ -66,6 +67,10 @@ for (const provider of [
 assert.ok(
   bosunScripts.indexOf('settings.js') < bosunScripts.indexOf('action-templates.js'),
   'settings.js must load before action-templates.js'
+);
+assert.ok(
+  bosunScripts.indexOf('settings.js') < bosunScripts.indexOf('settings-ui.js'),
+  'settings.js must load before settings-ui.js'
 );
 assert.ok(
   bosunScripts.indexOf('promql.js') < bosunScripts.indexOf('bosun-rule-graph.js'),
@@ -116,6 +121,13 @@ const settings = spawnSync(process.execPath, ['settings-test.js'], {
   stdio: 'inherit'
 });
 assert.strictEqual(settings.status, 0, 'Settings test failed');
+
+const settingsUi = spawnSync(process.execPath, ['settings-ui-test.js'], {
+  cwd: root,
+  encoding: 'utf8',
+  stdio: 'inherit'
+});
+assert.strictEqual(settingsUi.status, 0, 'Settings UI test failed');
 
 const ruleGraph = spawnSync(process.execPath, ['rule-graph-test.js'], {
   cwd: root,

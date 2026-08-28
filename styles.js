@@ -336,10 +336,22 @@
       }
 
       #${topBarId} .bosun-top-controls-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: 1 1 auto;
+        flex-wrap: wrap;
+        min-width: 0;
+        width: 100%;
+      }
+
+      #${topBarId} .bosun-toolbar-utility-group {
         display: inline-flex;
         align-items: center;
         gap: 8px;
-        flex-wrap: wrap;
+        flex: 0 0 auto;
+        flex-wrap: nowrap;
+        margin-left: auto;
       }
 
       #${topBarId} .bosun-new-alerts-notice {
@@ -401,6 +413,7 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      #${topBarStatusId}.bosun-toolbar-status[hidden] { display: none !important; }
 
       #${topBarStatusId}.bosun-toolbar-status.is-info {
         border-color: #a8c4e4;
@@ -649,6 +662,225 @@
       .bosun-action-template-editor-btn.is-primary { border-color: #2f6fad; background: #337ab7; color: #fff; }
       .bosun-action-template-status { margin: -2px 0 6px; color: #4d6b45; font-size: 11px; }
       .bosun-action-template-status.is-error { color: #a33; }
+
+      .bosun-settings-modal {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483645;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding: max(16px, 5vh) 16px 16px;
+        box-sizing: border-box;
+        overflow: auto;
+        background: rgba(0, 0, 0, .46);
+      }
+      .bosun-settings-modal[hidden] { display: none !important; }
+      .bosun-settings-panel {
+        width: min(680px, 100%);
+        max-height: calc(100vh - max(32px, 10vh));
+        display: flex;
+        flex-direction: column;
+        box-sizing: border-box;
+        overflow: hidden;
+        border: 1px solid #c9c9c9;
+        border-radius: 9px;
+        color: #333;
+        background: #fff;
+        box-shadow: 0 14px 38px rgba(0, 0, 0, .34);
+        font-family: Arial, sans-serif;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .bosun-settings-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex: 0 0 auto;
+        padding: 11px 14px;
+        border-bottom: 1px solid #e3e3e3;
+      }
+      .bosun-settings-title { margin: 0; color: #333; font-size: 17px; line-height: 1.3; }
+      .bosun-settings-close {
+        flex: 0 0 auto;
+        width: 30px;
+        height: 30px;
+        padding: 0;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        color: #555;
+        background: transparent;
+        font-size: 24px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .bosun-settings-close:hover { border-color: #d2d2d2; background: #f3f3f3; }
+      .bosun-settings-body {
+        display: block;
+        column-count: 2;
+        column-gap: 12px;
+        min-width: 0;
+        padding: 12px 14px;
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+      .bosun-settings-group {
+        display: inline-block;
+        width: 100%;
+        min-width: 0;
+        margin: 0 0 12px;
+        padding: 9px 10px 10px;
+        box-sizing: border-box;
+        break-inside: avoid;
+        border: 1px solid #dedede;
+        border-radius: 7px;
+        vertical-align: top;
+      }
+      .bosun-settings-group-title {
+        width: auto;
+        margin: 0;
+        padding: 0 5px;
+        border: 0;
+        color: #555;
+        font-size: 12px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+      .bosun-settings-group-collapsible > .bosun-settings-group-title {
+        cursor: pointer;
+        user-select: none;
+      }
+      .bosun-settings-group-collapsible[open] > .bosun-settings-group-title { margin-bottom: 4px; }
+      .bosun-settings-group-collapsible:not([open]) { padding-bottom: 9px; }
+      .bosun-settings-toggle {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        min-width: 0;
+        margin: 0;
+        padding: 5px 2px;
+        color: #333;
+        font-weight: 400;
+        cursor: pointer;
+      }
+      .bosun-settings-toggle input {
+        flex: 0 0 auto;
+        width: 16px;
+        height: 16px;
+        margin: 1px 0 0;
+        accent-color: #337ab7;
+        cursor: pointer;
+      }
+      .bosun-settings-toggle input:disabled,
+      .bosun-settings-number-input:disabled,
+      .bosun-settings-template-input:disabled { cursor: wait; opacity: .65; }
+      .bosun-settings-toggle-copy { min-width: 0; overflow-wrap: anywhere; }
+      .bosun-settings-toggle-label { display: block; }
+      .bosun-settings-field-hint,
+      .bosun-settings-template-mode {
+        display: block;
+        margin-top: 2px;
+        color: #6f6f6f;
+        font-size: 11px;
+        line-height: 1.3;
+      }
+      .bosun-settings-number-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+        margin: 0;
+        padding: 5px 2px;
+        color: #333;
+        font-weight: 400;
+      }
+      .bosun-settings-number-label { min-width: 0; overflow-wrap: anywhere; }
+      .bosun-settings-number-value { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; }
+      .bosun-settings-number-input {
+        width: 72px;
+        height: 28px;
+        box-sizing: border-box;
+        padding: 3px 6px;
+        border: 1px solid #8a8a8a;
+        border-radius: 4px;
+        color: #333;
+        background: #fff;
+        font: inherit;
+      }
+      .bosun-settings-number-suffix { color: #666; font-size: 12px; }
+      .bosun-settings-template { min-width: 0; padding: 5px 2px; }
+      .bosun-settings-template-title-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 0;
+        margin-bottom: 4px;
+      }
+      .bosun-settings-template-label { margin: 0; color: #333; font-size: 12px; font-weight: 700; }
+      .bosun-settings-template-input {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        min-height: 56px;
+        box-sizing: border-box;
+        resize: vertical;
+        padding: 5px 7px;
+        border: 1px solid #8a8a8a;
+        border-radius: 4px;
+        color: #333;
+        background: #fff;
+        font: 12px/1.35 Arial, sans-serif;
+      }
+      .bosun-settings-small-button,
+      .bosun-settings-reset {
+        min-height: 28px;
+        padding: 4px 9px;
+        border: 1px solid #8a8a8a;
+        border-radius: 5px;
+        color: #444;
+        background: #fff;
+        font: 600 11px/1.2 Arial, sans-serif;
+        cursor: pointer;
+      }
+      .bosun-settings-small-button:hover,
+      .bosun-settings-reset:hover { border-color: #aaa; background: #f4f4f4; }
+      .bosun-settings-small-button:disabled,
+      .bosun-settings-reset:disabled { cursor: default; opacity: .55; }
+      .bosun-settings-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        flex: 0 0 auto;
+        min-height: 31px;
+        padding: 9px 14px;
+        border-top: 1px solid #e3e3e3;
+        background: #fafafa;
+      }
+      .bosun-settings-status { min-width: 0; color: #476c47; font-size: 11px; overflow-wrap: anywhere; }
+      .bosun-settings-status.is-error { color: #a33; }
+      .bosun-settings-close:focus-visible,
+      .bosun-settings-group-collapsible > summary:focus-visible,
+      .bosun-settings-toggle input:focus-visible,
+      .bosun-settings-number-input:focus-visible,
+      .bosun-settings-template-input:focus-visible,
+      .bosun-settings-small-button:focus-visible,
+      .bosun-settings-reset:focus-visible {
+        outline: 2px solid #2f6fad;
+        outline-offset: 2px;
+      }
+
+      @media (max-width: 620px) {
+        .bosun-settings-modal { padding: 8px; }
+        .bosun-settings-panel { max-height: calc(100vh - 16px); }
+        .bosun-settings-body { column-count: 1; padding: 10px; }
+        .bosun-settings-header, .bosun-settings-footer { padding-left: 10px; padding-right: 10px; }
+        .bosun-settings-footer { align-items: flex-start; flex-direction: column; }
+      }
 
       #${diagnosticsModalId} {
         position: fixed;
