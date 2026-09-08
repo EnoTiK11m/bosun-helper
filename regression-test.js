@@ -310,15 +310,29 @@ async function testAlertsDataBoundsAndAbort() {
     filename: 'alerts-data.js'
   });
   const api = context.BosunSilenceHiderAlertsData.createAlertsData({ oldNoNoteMinutes: 60 });
+  assert.deepStrictEqual(
+    await api.fetchAlertsDataWithRetry({ attempts: 1 }),
+    {},
+    'A legitimate alerts response larger than 10 MiB must be accepted'
+  );
+
+  context.fetch = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      headers: { get: () => String(65 * 1024 * 1024) },
+      async text() { return '{}'; }
+    };
+  };
   await assert.rejects(
     api.fetchAlertsDataWithRetry({ attempts: 1 }),
     (error) => error?.code === 'ERESPONSETOOLARGE'
   );
-  assert.strictEqual(fetchCalls, 1, 'Oversized response must not be retried');
+  assert.strictEqual(fetchCalls, 2, 'Oversized response must not be retried');
 
   let streamCancelled = false;
   let chunkIndex = 0;
-  const oversizedChunks = [new Uint8Array(6 * 1024 * 1024), new Uint8Array(6 * 1024 * 1024)];
+  const oversizedChunks = [new Uint8Array([123]), { byteLength: 64 * 1024 * 1024 }];
   context.fetch = async () => ({
     ok: true,
     headers: { get: () => null },
@@ -354,7 +368,7 @@ async function testAlertsDataBoundsAndAbort() {
   const pending = api.fetchAlertsDataWithRetry({ signal: controller.signal, attempts: 3 });
   controller.abort();
   await assert.rejects(pending, (error) => error?.name === 'AbortError');
-  assert.strictEqual(fetchCalls, 2, 'Lifecycle abort must not be retried');
+  assert.strictEqual(fetchCalls, 3, 'Lifecycle abort must not be retried');
 }
 
 async function testRefreshCoordinatorLeaderFailoverAndStop() {

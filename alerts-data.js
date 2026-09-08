@@ -6,7 +6,10 @@
     const DEFAULT_REQUEST_TIMEOUT_MS = 4500;
     const DEFAULT_RETRY_DELAY_MS = 350;
     const DEFAULT_RETRY_ATTEMPTS = 3;
-    const MAX_ALERTS_RESPONSE_CHARS = 10 * 1024 * 1024;
+    // Large Bosun installations can legitimately return more than 10 MiB here.
+    // Keep a generous safety bound so a malformed endpoint cannot grow memory
+    // without limit, while allowing normal alert snapshots through.
+    const MAX_ALERTS_RESPONSE_CHARS = 64 * 1024 * 1024;
 
     function isOlderThanThreshold(agoValue) {
       if (!agoValue) return false;
