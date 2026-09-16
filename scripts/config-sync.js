@@ -280,26 +280,28 @@ function getHostDependentEntries(manifest) {
   const entries = {
     bosunContent: findOwnedEntry(
       manifest.content_scripts,
-      (entry) => Array.isArray(entry.js) && entry.js.includes('content.js'),
+      (entry) => Array.isArray(entry.js) && entry.js.includes('src/bosun/content.js'),
       'Bosun content script entry is missing.',
       'Bosun content script entry is ambiguous.'
     ),
     grafanaContent: findOwnedEntry(
       manifest.content_scripts,
-      (entry) => Array.isArray(entry.js) && entry.js.includes('grafana-content.js'),
+      (entry) => Array.isArray(entry.js) && entry.js.includes('src/grafana/grafana-content.js'),
       'Grafana content script entry is missing.',
       'Grafana content script entry is ambiguous.'
     ),
     bosunResources: findOwnedEntry(
       manifest.web_accessible_resources,
       (entry) => Array.isArray(entry.resources) &&
-        entry.resources.some((resource) => resource === 'bosun_notification_alert_chime.wav'),
+        entry.resources.some((resource) =>
+          resource === 'assets/sounds/bosun_notification_alert_chime.wav'),
       'Audio resource entry is missing.',
       'Audio resource entry is ambiguous.'
     ),
     grafanaResources: findOwnedEntry(
       manifest.web_accessible_resources,
-      (entry) => Array.isArray(entry.resources) && entry.resources.includes('grafana-page.js'),
+      (entry) => Array.isArray(entry.resources) &&
+        entry.resources.includes('src/grafana/grafana-page.js'),
       'Grafana bridge resource entry is missing.',
       'Grafana bridge resource entry is ambiguous.'
     )

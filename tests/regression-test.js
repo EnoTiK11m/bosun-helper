@@ -7,7 +7,7 @@ const path = require('path');
 const vm = require('vm');
 const { spawnSync } = require('child_process');
 
-const root = __dirname;
+const root = path.resolve(__dirname, '..');
 
 async function flushMicrotasks() {
   for (let index = 0; index < 12; index += 1) await Promise.resolve();
@@ -161,8 +161,8 @@ function createCoordinatorTab(name, clock, shared, options = {}) {
   };
   context.globalThis = context;
   context.window = context;
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'refresh-coordinator.js'), 'utf8'), context, {
-    filename: 'refresh-coordinator.js'
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/shared/refresh-coordinator.js'), 'utf8'), context, {
+    filename: 'src/shared/refresh-coordinator.js'
   });
   const coordinator = context.BosunHelperRefreshCoordinator.createRefreshCoordinator({
     async fetchSnapshot(fetchOptions) {
@@ -306,8 +306,8 @@ async function testAlertsDataBoundsAndAbort() {
   };
   context.TextDecoder = TextDecoder;
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'alerts-data.js'), 'utf8'), context, {
-    filename: 'alerts-data.js'
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/alerts-data.js'), 'utf8'), context, {
+    filename: 'src/bosun/alerts-data.js'
   });
   const api = context.BosunSilenceHiderAlertsData.createAlertsData({ oldNoNoteMinutes: 60 });
   assert.deepStrictEqual(
@@ -500,8 +500,8 @@ async function testNewAlertTrackerPersistsUntilNote() {
     Object
   };
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'new-alert-tracker.js'), 'utf8'), context, {
-    filename: 'new-alert-tracker.js'
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/new-alert-tracker.js'), 'utf8'), context, {
+    filename: 'src/bosun/new-alert-tracker.js'
   });
   const storage = {
     get(keys, callback) {
@@ -585,7 +585,10 @@ async function testNewAlertTrackerRestoreRaceAndSaveRetry() {
     Object
   };
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'new-alert-tracker.js'), 'utf8'), context);
+  vm.runInNewContext(
+    fs.readFileSync(path.join(root, 'src/bosun/new-alert-tracker.js'), 'utf8'),
+    context
+  );
 
   let delayedGet = null;
   const storageListeners = new Set();
@@ -679,12 +682,12 @@ function testPortConfigurationSynchronization() {
     fs.writeFileSync(path.join(temporaryRoot, 'manifest.json'), JSON.stringify({
       manifest_version: 3,
       content_scripts: [
-        { matches: [], js: ['config.js', 'content.js'] },
-        { matches: [], js: ['config.js', 'grafana-content.js'] }
+        { matches: [], js: ['config.js', 'src/bosun/content.js'] },
+        { matches: [], js: ['config.js', 'src/grafana/grafana-content.js'] }
       ],
       web_accessible_resources: [
-        { matches: [], resources: ['bosun_notification_alert_chime.wav'] },
-        { matches: [], resources: ['grafana-page.js'] }
+        { matches: [], resources: ['assets/sounds/bosun_notification_alert_chime.wav'] },
+        { matches: [], resources: ['src/grafana/grafana-page.js'] }
       ]
     }));
 
@@ -772,8 +775,8 @@ function createGrafanaPageContext(overrides = {}) {
   };
   context.globalThis = context;
   if (overrides.monaco) window.monaco = overrides.monaco;
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'grafana-page.js'), 'utf8'), context, {
-    filename: 'grafana-page.js'
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8'), context, {
+    filename: 'src/grafana/grafana-page.js'
   });
   return { context, window, messageListeners, postedMessages };
 }

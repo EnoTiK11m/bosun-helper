@@ -47,57 +47,70 @@ for (const file of referencedFiles) {
 }
 
 const bosunScripts = manifest.content_scripts[0].js;
-const contentIndex = bosunScripts.indexOf('content.js');
-assert.ok(contentIndex >= 0, 'Bosun entry must include content.js');
+const contentPath = 'src/bosun/content.js';
+const contentIndex = bosunScripts.indexOf(contentPath);
+assert.ok(contentIndex >= 0, `Bosun entry must include ${contentPath}`);
 for (const provider of [
-  'settings.js',
-  'settings-ui.js',
-  'promql.js',
-  'bosun-rule-graph.js',
-  'single-alert-age.js',
-  'action-templates.js',
-  'grafana-handoff.js',
-  'new-alert-tracker.js',
-  'refresh-coordinator.js'
+  'src/settings/settings.js',
+  'src/settings/settings-ui.js',
+  'src/grafana/promql.js',
+  'src/grafana/bosun-rule-graph.js',
+  'src/bosun/single-alert-age.js',
+  'src/bosun/action-templates.js',
+  'src/grafana/grafana-handoff.js',
+  'src/bosun/new-alert-tracker.js',
+  'src/shared/refresh-coordinator.js'
 ]) {
   const providerIndex = bosunScripts.indexOf(provider);
   assert.ok(providerIndex >= 0, `Bosun entry must include ${provider}`);
-  assert.ok(providerIndex < contentIndex, `${provider} must load before content.js`);
+  assert.ok(providerIndex < contentIndex, `${provider} must load before ${contentPath}`);
 }
 assert.ok(
-  bosunScripts.indexOf('settings.js') < bosunScripts.indexOf('action-templates.js'),
+  bosunScripts.indexOf('src/settings/settings.js') <
+    bosunScripts.indexOf('src/bosun/action-templates.js'),
   'settings.js must load before action-templates.js'
 );
 assert.ok(
-  bosunScripts.indexOf('settings.js') < bosunScripts.indexOf('settings-ui.js'),
+  bosunScripts.indexOf('src/settings/settings.js') <
+    bosunScripts.indexOf('src/settings/settings-ui.js'),
   'settings.js must load before settings-ui.js'
 );
 assert.ok(
-  bosunScripts.indexOf('promql.js') < bosunScripts.indexOf('bosun-rule-graph.js'),
+  bosunScripts.indexOf('src/grafana/promql.js') <
+    bosunScripts.indexOf('src/grafana/bosun-rule-graph.js'),
   'promql.js must load before bosun-rule-graph.js'
 );
 assert.deepStrictEqual(
   manifest.content_scripts[1].js,
-  ['config.js', 'grafana-content.js'],
+  ['config.js', 'src/grafana/grafana-content.js'],
   'Grafana entry must remain isolated from Bosun modules'
 );
 
-const contentSource = fs.readFileSync(path.join(root, 'content.js'), 'utf8');
-const grafanaSource = fs.readFileSync(path.join(root, 'grafana-page.js'), 'utf8');
-const stylesSource = fs.readFileSync(path.join(root, 'styles.js'), 'utf8');
+const contentSource = fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8');
+const grafanaSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8');
+const stylesSource = fs.readFileSync(path.join(root, 'src/shared/styles.js'), 'utf8');
 assert.ok(!/postMessage\([\s\S]{0,200},\s*['"]\*['"]\)/.test(contentSource), 'Wildcard postMessage in content.js');
 assert.ok(!/postMessage\([\s\S]{0,200},\s*['"]\*['"]\)/.test(grafanaSource), 'Wildcard postMessage in grafana-page.js');
 assert.ok(!/a:focus,\s*[\s\S]*button:focus/.test(stylesSource), 'Global focus styles are forbidden');
 
-const javascriptFiles = fs.readdirSync(root)
-  .filter((name) => name.endsWith('.js'))
-  .map((name) => path.join(root, name));
-
-for (const directory of ['scripts']) {
-  const fullDirectory = path.join(root, directory);
-  for (const name of fs.readdirSync(fullDirectory)) {
-    if (name.endsWith('.js')) javascriptFiles.push(path.join(fullDirectory, name));
+function collectJavaScriptFiles(directory) {
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const filename = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectJavaScriptFiles(filename));
+    } else if (entry.isFile() && entry.name.endsWith('.js')) {
+      files.push(filename);
+    }
   }
+  return files;
+}
+
+const javascriptFiles = fs.readdirSync(root, { withFileTypes: true })
+  .filter((entry) => entry.isFile() && entry.name.endsWith('.js'))
+  .map((entry) => path.join(root, entry.name));
+for (const directory of ['src', 'tests', 'scripts']) {
+  javascriptFiles.push(...collectJavaScriptFiles(path.join(root, directory)));
 }
 
 for (const file of javascriptFiles) {
@@ -108,49 +121,49 @@ for (const file of javascriptFiles) {
   assert.strictEqual(result.status, 0, result.stderr || `Syntax check failed: ${file}`);
 }
 
-const smoke = spawnSync(process.execPath, ['smoke-test.js'], {
+const smoke = spawnSync(process.execPath, ['tests/smoke-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(smoke.status, 0, 'Smoke test failed');
 
-const settings = spawnSync(process.execPath, ['settings-test.js'], {
+const settings = spawnSync(process.execPath, ['tests/settings-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(settings.status, 0, 'Settings test failed');
 
-const settingsUi = spawnSync(process.execPath, ['settings-ui-test.js'], {
+const settingsUi = spawnSync(process.execPath, ['tests/settings-ui-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(settingsUi.status, 0, 'Settings UI test failed');
 
-const ruleGraph = spawnSync(process.execPath, ['rule-graph-test.js'], {
+const ruleGraph = spawnSync(process.execPath, ['tests/rule-graph-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(ruleGraph.status, 0, 'Rule graph test failed');
 
-const integration = spawnSync(process.execPath, ['integration-test.js'], {
+const integration = spawnSync(process.execPath, ['tests/integration-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(integration.status, 0, 'Integration test failed');
 
-const regression = spawnSync(process.execPath, ['regression-test.js'], {
+const regression = spawnSync(process.execPath, ['tests/regression-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'
 });
 assert.strictEqual(regression.status, 0, 'Regression test failed');
 
-const configSync = spawnSync(process.execPath, ['config-sync-test.js'], {
+const configSync = spawnSync(process.execPath, ['tests/config-sync-test.js'], {
   cwd: root,
   encoding: 'utf8',
   stdio: 'inherit'

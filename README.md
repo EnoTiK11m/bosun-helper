@@ -359,12 +359,12 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 
 | Файл | Что проверяет |
 | --- | --- |
-| `smoke-test.js` | Загрузка модулей, публичные API и небольшие unit-сценарии |
-| `rule-graph-test.js` | `$usage_graph` parser, hash-bound cache и stale fetch regressions |
-| `integration-test.js` | Инициализация content scripts, remount UI и границы Bosun/Grafana |
-| `regression-test.js` | Координатор вкладок, storage-races, tracker и редакторы Grafana |
-| `settings-ui-test.js` | Lifecycle, persistence, reset и multi-tab contract панели настроек |
-| `browser-test.js` | Реальные DOM, CSS, responsive-layout, keyboard/pointer interactions |
+| `tests/smoke-test.js` | Загрузка модулей, публичные API и небольшие unit-сценарии |
+| `tests/rule-graph-test.js` | `$usage_graph` parser, hash-bound cache и stale fetch regressions |
+| `tests/integration-test.js` | Инициализация content scripts, remount UI и границы Bosun/Grafana |
+| `tests/regression-test.js` | Координатор вкладок, storage-races, tracker и редакторы Grafana |
+| `tests/settings-ui-test.js` | Lifecycle, persistence, reset и multi-tab contract панели настроек |
+| `tests/browser-test.js` | Реальные DOM, CSS, responsive-layout, keyboard/pointer interactions |
 
 ### Структура проекта
 
@@ -374,26 +374,12 @@ CI использует Ubuntu и Node.js 22 и запускает `npm test`,
 | `package.json` | Требование Node.js и команды разработки |
 | `config.example.js` | Безопасный пример локальной конфигурации |
 | `config.js` | Сгенерированная runtime-конфигурация |
-| `shared-utils.js` | Общая нормализация данных и DOM-значений |
-| `settings-ui.js` | Панель пользовательских настроек поверх API `settings.js` |
-| `diagnostics.js` | Ограниченный внутренний журнал диагностики |
-| `sound.js` | Звук и межвкладочная защита от повторов |
-| `alerts-data.js` | Загрузка `/api/alerts`, retry и индекс алертов |
-| `single-alert-age.js` | Сопоставление snapshot с DOM и возраст одиночных групп |
-| `needack-baseline.js` | Baseline для обнаружения новых Needs Ack |
-| `needack-severity.js` | Stable keys и определение warning/critical/unknown |
-| `promql.js` | Fail-closed извлечение PromQL, валидация и безопасное добавление alert tags |
-| `bosun-rule-graph.js` | Hash-bound memory-only RuleConf resolver для `$usage_graph` |
-| `page-utils.js` | Проверки маршрутов и небольшие DOM-интеграции Bosun |
-| `styles.js` | Инъекция scoped CSS и responsive/accessibility states |
-| `activity.js` | Активность пользователя и обновление после бездействия |
-| `action-templates.js` | Редактор шаблонов `/action` и локальное хранение |
-| `grafana-handoff.js` | Preview, pending request, режим запуска и TTL |
-| `new-alert-tracker.js` | Новые алерты, ожидающие Note |
-| `refresh-coordinator.js` | Leader election и обмен snapshots между вкладками |
-| `content.js` | Основной UI и lifecycle страницы Bosun |
-| `grafana-content.js` | TTL/consume-once проверка pending-запроса и isolated-world bridge |
-| `grafana-page.js` | Однозначная model-backed работа с редактором Grafana в page context |
+| `src/bosun/` | Bosun orchestration, alerts data, DOM integration и alert lifecycle |
+| `src/grafana/` | PromQL/rule resolution, handoff и Grafana editor bridge |
+| `src/settings/` | Versioned settings store и панель пользовательских настроек |
+| `src/shared/` | Общие utilities, diagnostics, sound, styles и cross-tab coordinator |
+| `tests/` | Node и Chromium test suites |
+| `assets/sounds/` | Web-accessible звуковые ресурсы расширения |
 | `scripts/config-sync.js` | Общая валидация и генерация config/manifest для local и public режимов |
 | `scripts/sync-config.js` | CLI выбора local или public source config |
 | `scripts/check.js` | Проверки manifest/config, синтаксиса и Node-набора |
