@@ -9,8 +9,8 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "bosun_notification_alert_chime.wav",
-        "bosun_notification_soft_chime.wav"
+        "assets/sounds/bosun_notification_alert_chime.wav",
+        "assets/sounds/bosun_notification_soft_chime.wav"
       ],
       "matches": [
         "https://bosun.example.com/*",
@@ -19,7 +19,7 @@
     },
     {
       "resources": [
-        "grafana-page.js"
+        "src/grafana/grafana-page.js"
       ],
       "matches": [
         "https://grafana.example.com/*"
@@ -34,25 +34,25 @@
       ],
       "js": [
         "config.js",
-        "shared-utils.js",
-        "settings.js",
-        "settings-ui.js",
-        "diagnostics.js",
-        "sound.js",
-        "alerts-data.js",
-        "single-alert-age.js",
-        "needack-baseline.js",
-        "needack-severity.js",
-        "promql.js",
-        "bosun-rule-graph.js",
-        "page-utils.js",
-        "styles.js",
-        "activity.js",
-        "action-templates.js",
-        "grafana-handoff.js",
-        "new-alert-tracker.js",
-        "refresh-coordinator.js",
-        "content.js"
+        "src/shared/shared-utils.js",
+        "src/settings/settings.js",
+        "src/settings/settings-ui.js",
+        "src/shared/diagnostics.js",
+        "src/shared/sound.js",
+        "src/bosun/alerts-data.js",
+        "src/bosun/single-alert-age.js",
+        "src/bosun/needack-baseline.js",
+        "src/bosun/needack-severity.js",
+        "src/grafana/promql.js",
+        "src/grafana/bosun-rule-graph.js",
+        "src/bosun/page-utils.js",
+        "src/shared/styles.js",
+        "src/bosun/activity.js",
+        "src/bosun/action-templates.js",
+        "src/grafana/grafana-handoff.js",
+        "src/bosun/new-alert-tracker.js",
+        "src/shared/refresh-coordinator.js",
+        "src/bosun/content.js"
       ],
       "run_at": "document_end"
     },
@@ -62,7 +62,7 @@
       ],
       "js": [
         "config.js",
-        "grafana-content.js"
+        "src/grafana/grafana-content.js"
       ],
       "run_at": "document_end"
     }

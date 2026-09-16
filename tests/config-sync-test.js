@@ -9,7 +9,7 @@ const { spawnSync } = require('child_process');
 const {
   loadConfigFile,
   synchronizeConfiguration
-} = require('./scripts/config-sync');
+} = require('../scripts/config-sync');
 
 function createConfigSource(config) {
   return `globalThis.BosunHelperLocalConfig = ${JSON.stringify(config, null, 2)};\n`;
@@ -23,22 +23,22 @@ function createManifest() {
     content_scripts: [
       {
         matches: ['https://old-bosun.invalid/*'],
-        js: ['config.js', 'content.js'],
+        js: ['config.js', 'src/bosun/content.js'],
         run_at: 'document_idle'
       },
       {
         matches: ['https://old-grafana.invalid/*'],
-        js: ['config.js', 'grafana-content.js'],
+        js: ['config.js', 'src/grafana/grafana-content.js'],
         run_at: 'document_idle'
       }
     ],
     web_accessible_resources: [
       {
-        resources: ['bosun_notification_alert_chime.wav'],
+        resources: ['assets/sounds/bosun_notification_alert_chime.wav'],
         matches: ['https://old-bosun.invalid/*']
       },
       {
-        resources: ['grafana-page.js'],
+        resources: ['src/grafana/grafana-page.js'],
         matches: ['https://old-grafana.invalid/*']
       }
     ],
@@ -83,7 +83,7 @@ function installConfigCli(root) {
   const scriptsDirectory = path.join(root, 'scripts');
   fs.mkdirSync(scriptsDirectory, { recursive: true });
   for (const name of ['config-sync.js', 'sync-config.js']) {
-    fs.copyFileSync(path.join(__dirname, 'scripts', name), path.join(scriptsDirectory, name));
+    fs.copyFileSync(path.join(__dirname, '..', 'scripts', name), path.join(scriptsDirectory, name));
   }
 }
 

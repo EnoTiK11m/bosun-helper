@@ -59,9 +59,9 @@ function loadApi() {
   const context = { console, structuredClone, queueMicrotask, globalThis: null };
   context.globalThis = context;
   vm.runInNewContext(
-    fs.readFileSync(path.join(__dirname, 'settings.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src/settings/settings.js'), 'utf8'),
     context,
-    { filename: 'settings.js' }
+    { filename: 'src/settings/settings.js' }
   );
   return context.BosunHelperSettings;
 }

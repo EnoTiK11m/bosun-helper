@@ -252,7 +252,7 @@
     const script = document.createElement('script');
     script.id = BRIDGE_MARKER_ID;
     script.dataset.channelToken = bridgeToken;
-    script.src = chrome.runtime.getURL('grafana-page.js');
+    script.src = chrome.runtime.getURL('src/grafana/grafana-page.js');
     script.addEventListener('error', () => {
       console.warn('[Bosun Helper] Failed to load the Grafana page bridge.');
       script.remove();

@@ -17,9 +17,11 @@ function loadApi() {
     clearTimeout
   };
   context.globalThis = context;
-  vm.runInNewContext(fs.readFileSync('promql.js', 'utf8'), context, { filename: 'promql.js' });
-  vm.runInNewContext(fs.readFileSync('bosun-rule-graph.js', 'utf8'), context, {
-    filename: 'bosun-rule-graph.js'
+  vm.runInNewContext(fs.readFileSync('src/grafana/promql.js', 'utf8'), context, {
+    filename: 'src/grafana/promql.js'
+  });
+  vm.runInNewContext(fs.readFileSync('src/grafana/bosun-rule-graph.js', 'utf8'), context, {
+    filename: 'src/grafana/bosun-rule-graph.js'
   });
   return context.BosunHelperRuleGraph;
 }
@@ -76,7 +78,7 @@ async function flushMicrotasks() {
 }
 
 async function run() {
-  const moduleSource = fs.readFileSync('bosun-rule-graph.js', 'utf8');
+  const moduleSource = fs.readFileSync('src/grafana/bosun-rule-graph.js', 'utf8');
   assert.ok(!/chrome\.storage|localStorage|sessionStorage/.test(moduleSource));
   assert.ok(!/console\.(?:log|warn|error)/.test(moduleSource), 'Resolver must not log raw source or queries');
   const api = loadApi();

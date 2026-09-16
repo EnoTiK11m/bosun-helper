@@ -2,10 +2,12 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
-const { loadConfigFile } = require('./scripts/config-sync');
+const { loadConfigFile } = require('../scripts/config-sync');
 
-const runtimeConfig = loadConfigFile('config.js');
+const root = path.resolve(__dirname, '..');
+const runtimeConfig = loadConfigFile(path.join(root, 'config.js'));
 
 function createConfiguredGrafanaUrl(searchParams = {}) {
   const url = new URL(runtimeConfig.grafanaPanelUrl);
@@ -334,7 +336,7 @@ function createHarness(url, options = {}) {
 
 function runFiles(harness, files) {
   for (const file of files) {
-    vm.runInNewContext(fs.readFileSync(file, 'utf8'), harness.context, {
+    vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), harness.context, {
       filename: file
     });
   }
@@ -345,9 +347,9 @@ async function flushMicrotasks() {
 }
 
 async function testBosunInitialization() {
-  const configuredHost = loadConfigFile('config.js').bosunHosts[0];
+  const configuredHost = loadConfigFile(path.join(root, 'config.js')).bosunHosts[0];
   const harness = createHarness(`https://${configuredHost}/`);
-  const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   runFiles(harness, manifest.content_scripts[0].js);
 
   const domReadyListeners = harness.documentListeners.get('DOMContentLoaded') || [];
@@ -430,7 +432,7 @@ async function testBosunInitialization() {
 
 async function testGrafanaContentIsolation() {
   const harness = createHarness(createConfiguredGrafanaUrl());
-  const manifest = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   runFiles(harness, manifest.content_scripts[1].js);
 
   const domReadyListeners = harness.documentListeners.get('DOMContentLoaded') || [];
@@ -451,13 +453,13 @@ async function testGrafanaContentRequiresExactConfiguredPanel() {
   wrongUrl.searchParams.set('editPanel', configuredPanelId === '999999' ? '999998' : '999999');
 
   const wrongPanel = createHarness(wrongUrl.toString());
-  runFiles(wrongPanel, ['config.js', 'grafana-content.js']);
+  runFiles(wrongPanel, ['config.js', 'src/grafana/grafana-content.js']);
   wrongPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
   assert.strictEqual(wrongPanel.storageGetCount, 0, 'Wrong Grafana panel must not read pending query storage');
 
   const configuredPanel = createHarness(configuredUrl.toString());
-  runFiles(configuredPanel, ['config.js', 'grafana-content.js']);
+  runFiles(configuredPanel, ['config.js', 'src/grafana/grafana-content.js']);
   configuredPanel.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
   assert.strictEqual(configuredPanel.storageGetCount, 1, 'Configured Grafana panel must load its pending query');
@@ -472,7 +474,7 @@ async function testGrafanaContentPassesCreatedAtHardDeadline() {
     run: true,
     createdAt
   };
-  runFiles(harness, ['config.js', 'grafana-content.js']);
+  runFiles(harness, ['config.js', 'src/grafana/grafana-content.js']);
   harness.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
 
@@ -555,7 +557,7 @@ async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
   first.document.querySelectorAll = (selector) => {
     return selector.includes('.cm-content') ? [visible.node, hidden.node, zeroRect.node] : [];
   };
-  runFiles(first, ['config.js', 'grafana-content.js']);
+  runFiles(first, ['config.js', 'src/grafana/grafana-content.js']);
   const firstInit = first.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await reportApplySuccess(first);
   await firstInit;
@@ -581,7 +583,7 @@ async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
     storageRemoveError: true
   });
   reload.document.querySelectorAll = first.document.querySelectorAll;
-  runFiles(reload, ['config.js', 'grafana-content.js']);
+  runFiles(reload, ['config.js', 'src/grafana/grafana-content.js']);
   await reload.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await flushMicrotasks();
   assert.strictEqual(
@@ -603,7 +605,7 @@ async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
     if (selector.includes('textarea.inputarea')) return [secondVisible.node];
     return [];
   };
-  runFiles(ambiguous, ['config.js', 'grafana-content.js']);
+  runFiles(ambiguous, ['config.js', 'src/grafana/grafana-content.js']);
   ambiguous.documentListeners.get('DOMContentLoaded')?.[0]?.();
   await reportApplySuccess(ambiguous);
   assert.ok(sharedStorage[ambiguousKey], 'Multiple visible editor roots produced false success');
@@ -615,9 +617,9 @@ async function testGrafanaBridgeAuthenticationAndSingleton() {
   bridgeScript.dataset.channelToken = 'secret-token';
   harness.document.currentScript = bridgeScript;
 
-  runFiles(harness, ['grafana-page.js']);
+  runFiles(harness, ['src/grafana/grafana-page.js']);
   harness.document.currentScript = bridgeScript;
-  runFiles(harness, ['grafana-page.js']);
+  runFiles(harness, ['src/grafana/grafana-page.js']);
 
   const listeners = harness.windowListeners.get('message') || [];
   assert.strictEqual(listeners.length, 1, 'Grafana bridge must install only one message listener');
@@ -953,7 +955,11 @@ function createActionPageHarness() {
 
 async function testActionTemplatesFollowTextareaRemount() {
   const harness = createActionPageHarness();
-  runFiles(harness, ['settings.js', 'action-templates.js', 'content.js']);
+  runFiles(harness, [
+    'src/settings/settings.js',
+    'src/bosun/action-templates.js',
+    'src/bosun/content.js'
+  ]);
   await flushMicrotasks();
 
   const initialWrap = harness.wrap;
@@ -978,7 +984,7 @@ async function testActionTemplatesFollowTextareaRemount() {
 
 async function testFeatureModuleLifecycleCleanup() {
   const activityHarness = createHarness('https://bosun.example.com/');
-  runFiles(activityHarness, ['activity.js']);
+  runFiles(activityHarness, ['src/bosun/activity.js']);
   let enabled = true;
   let lastActivity = Date.now();
   let lastUrl = activityHarness.location.href;
@@ -1009,7 +1015,7 @@ async function testFeatureModuleLifecycleCleanup() {
   assert.ok(activityHarness.clearedIntervals.has(1), 'Auto-refresh interval was not cleared');
 
   const soundHarness = createHarness('https://bosun.example.com/');
-  runFiles(soundHarness, ['sound.js']);
+  runFiles(soundHarness, ['src/shared/sound.js']);
   const sound = soundHarness.context.BosunSilenceHiderSound.createSound({
     alertFile: 'alert.wav',
     softFile: 'soft.wav',
@@ -1031,7 +1037,7 @@ async function testNewAlertTrackerDestroyInvalidatesAsyncWork() {
   let restoreCallback = null;
   restoreHarness.context.chrome.storage.local.get = (_keys, callback) => { restoreCallback = callback; };
   const restoreNotifications = [];
-  runFiles(restoreHarness, ['new-alert-tracker.js']);
+  runFiles(restoreHarness, ['src/bosun/new-alert-tracker.js']);
   const restoring = restoreHarness.context.BosunHelperNewAlertTracker.createNewAlertTracker({
     onChange(value) { restoreNotifications.push(value); }
   });
@@ -1052,7 +1058,7 @@ async function testNewAlertTrackerDestroyInvalidatesAsyncWork() {
     storageWrites += 1;
     setCallbacks.push(callback);
   };
-  runFiles(writeHarness, ['new-alert-tracker.js']);
+  runFiles(writeHarness, ['src/bosun/new-alert-tracker.js']);
   const writing = writeHarness.context.BosunHelperNewAlertTracker.createNewAlertTracker();
   await writing.start();
   await writing.add(['A'], new Map([['A', 'warning']]));
@@ -1086,7 +1092,7 @@ async function testGrafanaHandoffDestroyCancelsDelayedSave() {
     for (const key of keys) delete pending[key];
     callback?.();
   };
-  runFiles(harness, ['grafana-handoff.js']);
+  runFiles(harness, ['src/grafana/grafana-handoff.js']);
   const handoff = harness.context.BosunHelperGrafanaHandoff.createGrafanaHandoff({
     config: {
       grafanaHost: 'grafana.example.test',

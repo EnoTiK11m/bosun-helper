@@ -1,6 +1,9 @@
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
+
+const root = path.resolve(__dirname, '..');
 
 const listeners = {};
 const documentStub = {
@@ -99,27 +102,27 @@ context.window.requestAnimationFrame = context.requestAnimationFrame;
 
 for (const file of [
   'config.js',
-  'shared-utils.js',
-  'settings.js',
-  'settings-ui.js',
-  'diagnostics.js',
-  'sound.js',
-  'alerts-data.js',
-  'single-alert-age.js',
-  'needack-baseline.js',
-  'needack-severity.js',
-  'promql.js',
-  'bosun-rule-graph.js',
-  'page-utils.js',
-  'styles.js',
-  'activity.js',
-  'action-templates.js',
-  'grafana-handoff.js',
-  'new-alert-tracker.js',
-  'refresh-coordinator.js',
-  'content.js'
+  'src/shared/shared-utils.js',
+  'src/settings/settings.js',
+  'src/settings/settings-ui.js',
+  'src/shared/diagnostics.js',
+  'src/shared/sound.js',
+  'src/bosun/alerts-data.js',
+  'src/bosun/single-alert-age.js',
+  'src/bosun/needack-baseline.js',
+  'src/bosun/needack-severity.js',
+  'src/grafana/promql.js',
+  'src/grafana/bosun-rule-graph.js',
+  'src/bosun/page-utils.js',
+  'src/shared/styles.js',
+  'src/bosun/activity.js',
+  'src/bosun/action-templates.js',
+  'src/grafana/grafana-handoff.js',
+  'src/bosun/new-alert-tracker.js',
+  'src/shared/refresh-coordinator.js',
+  'src/bosun/content.js'
 ]) {
-  const code = fs.readFileSync(file, 'utf8');
+  const code = fs.readFileSync(path.join(root, file), 'utf8');
   vm.runInNewContext(code, context, { filename: file });
 }
 

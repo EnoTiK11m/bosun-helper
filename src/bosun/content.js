@@ -38,8 +38,8 @@
   const ALERT_MARKER_CACHE_MAX_UNCHANGED_AGE_MS = 5 * 60 * 1000;
   const ALERT_MARKER_CACHE_MAX_RAW_LENGTH = 5 * 1024 * 1024;
   const ALERT_MARKER_CACHE_MAX_KEY_LENGTH = 1000;
-  const SOUND_FILE_ALERT = 'bosun_notification_alert_chime.wav';
-  const SOUND_FILE_SOFT = 'bosun_notification_soft_chime.wav';
+  const SOUND_FILE_ALERT = 'assets/sounds/bosun_notification_alert_chime.wav';
+  const SOUND_FILE_SOFT = 'assets/sounds/bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
   const COPY_ALL_BUTTON_CLASS = 'bosun-copy-all-alerts-btn';
   const COPY_LAST_ACTION_BUTTON_CLASS = 'bosun-copy-last-action-btn';

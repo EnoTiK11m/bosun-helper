@@ -194,9 +194,9 @@ function loadSettingsUi(harness) {
   };
   context.globalThis = context;
   vm.runInNewContext(
-    fs.readFileSync(path.join(__dirname, 'settings-ui.js'), 'utf8'),
+    fs.readFileSync(path.join(__dirname, '..', 'src/settings/settings-ui.js'), 'utf8'),
     context,
-    { filename: 'settings-ui.js' }
+    { filename: 'src/settings/settings-ui.js' }
   );
   return context.BosunHelperSettingsUi;
 }

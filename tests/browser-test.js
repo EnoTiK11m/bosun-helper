@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 
-const root = __dirname;
+const root = path.resolve(__dirname, '..');
 const CDP_TIMEOUT_MS = 15_000;
 
 if (typeof WebSocket !== 'function') {
@@ -354,18 +354,22 @@ ${source.slice(closing)}`;
 }
 
 async function runBrowserAssertions(client) {
-  const settingsSource = fs.readFileSync(path.join(root, 'settings.js'), 'utf8');
-  const settingsUiSource = fs.readFileSync(path.join(root, 'settings-ui.js'), 'utf8');
-  const actionSource = fs.readFileSync(path.join(root, 'action-templates.js'), 'utf8');
-  const needAckBaselineSource = fs.readFileSync(path.join(root, 'needack-baseline.js'), 'utf8');
-  const singleAlertAgeSource = fs.readFileSync(path.join(root, 'single-alert-age.js'), 'utf8');
-  const pageUtilsSource = fs.readFileSync(path.join(root, 'page-utils.js'), 'utf8');
-  const stylesSource = fs.readFileSync(path.join(root, 'styles.js'), 'utf8');
-  const handoffSource = fs.readFileSync(path.join(root, 'grafana-handoff.js'), 'utf8');
-  const grafanaPageSource = JSON.stringify(fs.readFileSync(path.join(root, 'grafana-page.js'), 'utf8'));
-  const promqlSource = fs.readFileSync(path.join(root, 'promql.js'), 'utf8');
-  const ruleGraphSource = fs.readFileSync(path.join(root, 'bosun-rule-graph.js'), 'utf8');
-  const contentSource = instrumentContentSource(fs.readFileSync(path.join(root, 'content.js'), 'utf8'));
+  const settingsSource = fs.readFileSync(path.join(root, 'src/settings/settings.js'), 'utf8');
+  const settingsUiSource = fs.readFileSync(path.join(root, 'src/settings/settings-ui.js'), 'utf8');
+  const actionSource = fs.readFileSync(path.join(root, 'src/bosun/action-templates.js'), 'utf8');
+  const needAckBaselineSource = fs.readFileSync(path.join(root, 'src/bosun/needack-baseline.js'), 'utf8');
+  const singleAlertAgeSource = fs.readFileSync(path.join(root, 'src/bosun/single-alert-age.js'), 'utf8');
+  const pageUtilsSource = fs.readFileSync(path.join(root, 'src/bosun/page-utils.js'), 'utf8');
+  const stylesSource = fs.readFileSync(path.join(root, 'src/shared/styles.js'), 'utf8');
+  const handoffSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-handoff.js'), 'utf8');
+  const grafanaPageSource = JSON.stringify(
+    fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8')
+  );
+  const promqlSource = fs.readFileSync(path.join(root, 'src/grafana/promql.js'), 'utf8');
+  const ruleGraphSource = fs.readFileSync(path.join(root, 'src/grafana/bosun-rule-graph.js'), 'utf8');
+  const contentSource = instrumentContentSource(
+    fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8')
+  );
 
   await client.send('Emulation.setDeviceMetricsOverride', {
     width: 320,
