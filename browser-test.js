@@ -2699,7 +2699,138 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(accessibilityResult.markerOnActionRoute, { ready: false, note: false });
   assert.deepStrictEqual(accessibilityResult.markerAfterDashboardReturn, { ready: true, note: true });
 
-  const ambiguousGrafanaEditorResult = await evaluate(client, `(async () => {
+  const grafanaEditorBindingResult = await evaluate(client, `(async () => {
+    const channelToken = 'browser-ambiguous-editor-token';
+    const bridgeScript = document.createElement('script');
+    bridgeScript.dataset.channelToken = channelToken;
+    bridgeScript.textContent = ${grafanaPageSource};
+    document.documentElement.appendChild(bridgeScript);
+
+    async function applyQuery(operationId, query) {
+      const requestId = 'browser-request-' + operationId;
+      const response = new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          window.removeEventListener('message', onMessage);
+          reject(new Error('Timed out waiting for Grafana operation ' + operationId));
+        }, 4000);
+        function onMessage(event) {
+          if (
+            event.source !== window ||
+            event.origin !== window.location.origin ||
+            event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT' ||
+            event.data?.requestId !== requestId ||
+            event.data?.operationId !== operationId
+          ) return;
+          clearTimeout(timeoutId);
+          window.removeEventListener('message', onMessage);
+          resolve(event.data.result);
+        }
+        window.addEventListener('message', onMessage);
+      });
+      window.postMessage({
+        type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
+        channelToken,
+        requestId,
+        operationId,
+        query,
+        run: true,
+        deadlineAt: Date.now() + 5000
+      }, window.location.origin);
+      return response;
+    }
+
+    function createModel(initialText) {
+      let text = initialText;
+      let version = 1;
+      return {
+        model: {
+          getValue: () => text,
+          getVersionId: () => version,
+          setValue(next) { text = next; version += 1; }
+        },
+        getText: () => text
+      };
+    }
+
+    function mountMonacoEditor() {
+      document.body.innerHTML =
+        '<div class="query-row">' +
+          '<button type="button">Code</button>' +
+          '<div id="grafana-monaco-root" class="monaco-editor" style="display:block;width:320px;height:48px">' +
+            '<textarea class="inputarea monaco-mouse-cursor-text" role="textbox" ' +
+              'style="display:block;width:300px;height:32px"></textarea>' +
+          '</div>' +
+          '<button id="grafana-run" type="button">Run queries</button>' +
+        '</div>';
+      let runClicks = 0;
+      document.getElementById('grafana-run').addEventListener('click', () => { runClicks += 1; });
+      return {
+        root: document.getElementById('grafana-monaco-root'),
+        getRunClicks: () => runClicks
+      };
+    }
+
+    const validDom = mountMonacoEditor();
+    const visibleModel = createModel('up');
+    const hiddenModel = createModel('rate(hidden_total[5m])');
+    const visibleEditor = {
+      getDomNode: () => validDom.root,
+      getModel: () => visibleModel.model
+    };
+    window.monaco = {
+      editor: {
+        getEditors: () => [visibleEditor],
+        getModels: () => [visibleModel.model, hiddenModel.model]
+      }
+    };
+    const validResult = await applyQuery('browser-monaco-valid-binding', 'sum(new_metric)');
+    const valid = {
+      ok: validResult?.ok === true,
+      visibleText: visibleModel.getText(),
+      hiddenText: hiddenModel.getText(),
+      runClicks: validDom.getRunClicks()
+    };
+
+    const mismatchDom = mountMonacoEditor();
+    const mismatchModel = createModel('up');
+    const unrelatedRoot = document.createElement('div');
+    unrelatedRoot.style.cssText = 'display:block;width:320px;height:48px';
+    document.body.appendChild(unrelatedRoot);
+    window.monaco = {
+      editor: {
+        getEditors: () => [{
+          getDomNode: () => unrelatedRoot,
+          getModel: () => mismatchModel.model
+        }],
+        getModels: () => [mismatchModel.model]
+      }
+    };
+    const mismatchResult = await applyQuery('browser-monaco-mismatched-dom', 'sum(new_metric)');
+    const mismatched = {
+      ok: mismatchResult?.ok === true,
+      text: mismatchModel.getText(),
+      runClicks: mismatchDom.getRunClicks()
+    };
+
+    const disconnectedDom = mountMonacoEditor();
+    const disconnectedModel = createModel('up');
+    const detachedRoot = document.createElement('div');
+    window.monaco = {
+      editor: {
+        getEditors: () => [{
+          getDomNode: () => detachedRoot,
+          getModel: () => disconnectedModel.model
+        }],
+        getModels: () => [disconnectedModel.model]
+      }
+    };
+    const disconnectedResult = await applyQuery('browser-monaco-disconnected-dom', 'sum(new_metric)');
+    const disconnected = {
+      ok: disconnectedResult?.ok === true,
+      text: disconnectedModel.getText(),
+      runClicks: disconnectedDom.getRunClicks()
+    };
+
     document.body.innerHTML =
       '<div class="query-row">' +
         '<button id="grafana-code-toggle" type="button">Code</button>' +
@@ -2736,68 +2867,54 @@ async function runBrowserAssertions(client) {
     document.getElementById('grafana-editor-two').cmView = second.view;
     const secondContent = document.querySelector('#grafana-editor-two .cm-content');
     secondContent.focus();
+    window.monaco = undefined;
 
-    let runClicks = 0;
-    document.getElementById('grafana-run').addEventListener('click', () => { runClicks += 1; });
-    const channelToken = 'browser-ambiguous-editor-token';
-    const requestId = 'browser-ambiguous-editor-request';
-    const operationId = 'browser-ambiguous-editor-operation';
-    const response = new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        window.removeEventListener('message', onMessage);
-        reject(new Error('Timed out waiting for the Grafana page bridge result'));
-      }, 1000);
-      function onMessage(event) {
-        if (
-          event.source !== window ||
-          event.origin !== window.location.origin ||
-          event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT' ||
-          event.data?.requestId !== requestId
-        ) return;
-        clearTimeout(timeoutId);
-        window.removeEventListener('message', onMessage);
-        resolve(event.data.result);
-      }
-      window.addEventListener('message', onMessage);
+    let ambiguousRunClicks = 0;
+    document.getElementById('grafana-run').addEventListener('click', () => {
+      ambiguousRunClicks += 1;
     });
+    const ambiguousResult = await applyQuery(
+      'browser-ambiguous-editor-operation',
+      'replacement query'
+    );
 
-    const bridgeScript = document.createElement('script');
-    bridgeScript.dataset.channelToken = channelToken;
-    bridgeScript.textContent = ${grafanaPageSource};
-    document.documentElement.appendChild(bridgeScript);
-    window.postMessage({
-      type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
-      channelToken,
-      requestId,
-      operationId,
-      query: 'replacement query',
-      run: true,
-      deadlineAt: Date.now() + 5000
-    }, window.location.origin);
-
-    const result = await response;
     return {
-      result,
-      runClicks,
-      firstText: first.getText(),
-      secondText: second.getText(),
-      firstDispatches: first.getDispatchCount(),
-      secondDispatches: second.getDispatchCount(),
-      firstDomText: document.querySelector('#grafana-editor-one .cm-content').textContent,
-      secondDomText: secondContent.textContent,
-      activeEditorPreserved: document.activeElement === secondContent
+      valid,
+      mismatched,
+      disconnected,
+      ambiguous: {
+        result: ambiguousResult,
+        runClicks: ambiguousRunClicks,
+        firstText: first.getText(),
+        secondText: second.getText(),
+        firstDispatches: first.getDispatchCount(),
+        secondDispatches: second.getDispatchCount(),
+        firstDomText: document.querySelector('#grafana-editor-one .cm-content').textContent,
+        secondDomText: secondContent.textContent,
+        activeEditorPreserved: document.activeElement === secondContent
+      }
     };
   })()`);
-  assert.deepStrictEqual(ambiguousGrafanaEditorResult, {
-    result: { ok: false, reason: 'ambiguous-editor-dom', terminal: true },
-    runClicks: 0,
-    firstText: 'first query',
-    secondText: 'second query',
-    firstDispatches: 0,
-    secondDispatches: 0,
-    firstDomText: 'first query',
-    secondDomText: 'second query',
-    activeEditorPreserved: true
+  assert.deepStrictEqual(grafanaEditorBindingResult, {
+    valid: {
+      ok: true,
+      visibleText: 'sum(new_metric)',
+      hiddenText: 'rate(hidden_total[5m])',
+      runClicks: 1
+    },
+    mismatched: { ok: false, text: 'up', runClicks: 0 },
+    disconnected: { ok: false, text: 'up', runClicks: 0 },
+    ambiguous: {
+      result: { ok: false, reason: 'ambiguous-editor-dom', terminal: true },
+      runClicks: 0,
+      firstText: 'first query',
+      secondText: 'second query',
+      firstDispatches: 0,
+      secondDispatches: 0,
+      firstDomText: 'first query',
+      secondDomText: 'second query',
+      activeEditorPreserved: true
+    }
   });
 
   const handoffResult = await evaluate(client, `(async () => {

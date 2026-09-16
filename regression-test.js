@@ -728,6 +728,10 @@ function createGrafanaPageContext(overrides = {}) {
     currentScript: bridgeScript,
     querySelector: overrides.querySelector || (() => null),
     querySelectorAll: overrides.querySelectorAll || (() => []),
+    contains: overrides.documentContains || ((node) => node?.isConnected !== false),
+    documentElement: overrides.documentElement || {
+      contains: overrides.documentContains || ((node) => node?.isConnected !== false)
+    },
     createRange: overrides.createRange || (() => ({ selectNodeContents() {} })),
     execCommand: overrides.execCommand || (() => true)
   };
@@ -799,6 +803,444 @@ async function dispatchGrafanaApply(
   return harness.postedMessages.at(-1)?.message?.result;
 }
 
+function createTrackedMonacoModel(initialValue) {
+  let value = initialValue;
+  let version = 1;
+  return {
+    api: {
+      getValue: () => value,
+      getVersionId: () => version,
+      setValue(next) {
+        value = next;
+        version += 1;
+      }
+    },
+    get value() { return value; },
+    get version() { return version; },
+    replace(next) {
+      value = next;
+      version += 1;
+    }
+  };
+}
+
+function createMonacoDom() {
+  const root = {
+    isConnected: true,
+    parentElement: null,
+    hidden: false,
+    getAttribute() { return null; },
+    getClientRects() { return [{}]; },
+    matches(selector) { return selector === '.monaco-editor'; },
+    contains(node) {
+      let current = node;
+      while (current) {
+        if (current === this) return true;
+        current = current.parentElement || null;
+      }
+      return false;
+    }
+  };
+  const textarea = {
+    value: '',
+    isConnected: true,
+    parentElement: root,
+    hidden: false,
+    getAttribute() { return null; },
+    getClientRects() { return [{}]; },
+    closest(selector) { return selector === '.monaco-editor' ? root : null; },
+    focus() {},
+    click() {},
+    blur() {},
+    dispatchEvent() {}
+  };
+  return { root, textarea };
+}
+
+function createGrafanaMonacoHarness(options) {
+  let runClicks = 0;
+  const doms = options.doms || [createMonacoDom()];
+  const getEditors = options.getEditors || (() => options.editors || []);
+  const getModels = options.getModels || (() => options.models || []);
+  const runButton = {
+    textContent: 'Run queries',
+    click() { runClicks += 1; }
+  };
+  const harness = createGrafanaPageContext({
+    setTimeout: options.setTimeout,
+    monaco: {
+      editor: {
+        getEditors,
+        getModels
+      }
+    },
+    querySelector(selector) {
+      if (selector.includes('textarea.inputarea') && doms.length === 1) return doms[0].textarea;
+      if (selector.includes('.monaco-editor') && doms.length === 1) return doms[0].root;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector.includes('textarea.inputarea')) return doms.map((dom) => dom.textarea);
+      if (selector.includes('.monaco-editor')) return doms.map((dom) => dom.root);
+      if (selector === 'button') return [runButton];
+      return [];
+    }
+  });
+  return {
+    harness,
+    doms,
+    get runClicks() { return runClicks; }
+  };
+}
+
+async function settleGrafanaOperationWithTimers(pending, timers, description) {
+  let settled = false;
+  let outcome;
+  let failure;
+  pending.then(
+    (value) => { settled = true; outcome = value; },
+    (error) => { settled = true; failure = error; }
+  );
+
+  for (let turn = 0; turn < 20 && !settled; turn += 1) {
+    await flushMicrotasks();
+    const callback = timers.shift();
+    if (callback) callback();
+  }
+  await flushMicrotasks();
+  if (failure) throw failure;
+  assert.ok(settled, `${description} did not settle after all deterministic timers were released`);
+  return outcome;
+}
+
+async function waitForGrafanaTimer(timers, description) {
+  for (let turn = 0; turn < 10 && !timers.length; turn += 1) {
+    await flushMicrotasks();
+  }
+  assert.ok(timers.length, `${description} did not reach the expected deferred validation`);
+}
+
+async function testGrafanaMonacoUsesVisibleEditorModelBinding() {
+  const visible = createTrackedMonacoModel('up');
+  const hidden = createTrackedMonacoModel('rate(hidden_total[5m])');
+  const dom = createMonacoDom();
+  const visibleEditor = {
+    getDomNode: () => dom.root,
+    getModel: () => visible.api
+  };
+  let getModelsCalls = 0;
+  const rig = createGrafanaMonacoHarness({
+    doms: [dom],
+    editors: [visibleEditor],
+    getModels() {
+      getModelsCalls += 1;
+      return [visible.api, hidden.api];
+    }
+  });
+
+  const result = await dispatchGrafanaApply(
+    rig.harness,
+    'visible-editor-model-binding',
+    'sum(new_metric)',
+    true
+  );
+
+  assert.deepStrictEqual(
+    {
+      visibleValue: visible.value,
+      hiddenValue: hidden.value,
+      runClicks: rig.runClicks,
+      resultOk: result?.ok
+    },
+    {
+      visibleValue: 'sum(new_metric)',
+      hiddenValue: 'rate(hidden_total[5m])',
+      runClicks: 1,
+      resultOk: true
+    },
+    'Grafana must mutate and run only the model proven to belong to the visible Monaco editor'
+  );
+  assert.strictEqual(getModelsCalls, 0, 'Monaco model ownership fell back to getModels() heuristics');
+}
+
+async function testGrafanaMonacoRejectsMissingBindingApis() {
+  {
+    const model = createTrackedMonacoModel('up');
+    const dom = createMonacoDom();
+    const harness = createGrafanaPageContext({
+      monaco: { editor: { getModels: () => [model.api] } },
+      querySelectorAll(selector) {
+        if (selector.includes('textarea.inputarea')) return [dom.textarea];
+        if (selector === '.monaco-editor') return [dom.root];
+        return [];
+      }
+    });
+    const result = await dispatchGrafanaApply(
+      harness,
+      'missing-get-editors',
+      'sum(new_metric)',
+      true
+    );
+    assert.strictEqual(model.value, 'up', 'Missing getEditors() still mutated a Monaco model');
+    assert.strictEqual(result?.ok, false, 'Missing getEditors() reported success');
+  }
+
+  for (const testCase of [
+    {
+      name: 'missing-dom-node',
+      createEditor: (model) => ({ getModel: () => model })
+    },
+    {
+      name: 'null-dom-node',
+      createEditor: (model) => ({ getDomNode: () => null, getModel: () => model })
+    },
+    {
+      name: 'missing-get-model',
+      createEditor: (_model, dom) => ({ getDomNode: () => dom.root })
+    },
+    {
+      name: 'null-model',
+      createEditor: (_model, dom) => ({ getDomNode: () => dom.root, getModel: () => null })
+    }
+  ]) {
+    const model = createTrackedMonacoModel('up');
+    const dom = createMonacoDom();
+    const editor = testCase.createEditor(model.api, dom);
+    const rig = createGrafanaMonacoHarness({
+      doms: [dom],
+      editors: [editor],
+      models: [model.api]
+    });
+    const result = await dispatchGrafanaApply(
+      rig.harness,
+      `binding-api-${testCase.name}`,
+      'sum(new_metric)',
+      true
+    );
+    assert.strictEqual(model.value, 'up', `${testCase.name} mutated the only Monaco model`);
+    assert.strictEqual(rig.runClicks, 0, `${testCase.name} clicked Run queries`);
+    assert.strictEqual(result?.ok, false, `${testCase.name} reported success`);
+  }
+}
+
+async function testGrafanaMonacoRejectsMismatchedDomBinding() {
+  const model = createTrackedMonacoModel('up');
+  const visibleDom = createMonacoDom();
+  const unrelatedDom = createMonacoDom();
+  const editor = {
+    getDomNode: () => unrelatedDom.root,
+    getModel: () => model.api
+  };
+  const rig = createGrafanaMonacoHarness({
+    doms: [visibleDom],
+    editors: [editor],
+    models: [model.api]
+  });
+  const result = await dispatchGrafanaApply(
+    rig.harness,
+    'mismatched-editor-dom',
+    'sum(new_metric)',
+    true
+  );
+  assert.strictEqual(model.value, 'up', 'Editor attached to an unrelated DOM root mutated a model');
+  assert.strictEqual(rig.runClicks, 0, 'Editor attached to an unrelated DOM root clicked Run queries');
+  assert.strictEqual(result?.ok, false);
+}
+
+async function testGrafanaMonacoRejectsMultipleVisibleEditorInstances() {
+  const first = createTrackedMonacoModel('up');
+  const second = createTrackedMonacoModel('other_metric');
+  const firstDom = createMonacoDom();
+  const secondDom = createMonacoDom();
+  const rig = createGrafanaMonacoHarness({
+    doms: [firstDom, secondDom],
+    editors: [
+      { getDomNode: () => firstDom.root, getModel: () => first.api },
+      { getDomNode: () => secondDom.root, getModel: () => second.api }
+    ],
+    models: [first.api, second.api]
+  });
+  const result = await dispatchGrafanaApply(
+    rig.harness,
+    'multiple-visible-monaco-editors',
+    'sum(new_metric)',
+    true
+  );
+  assert.deepStrictEqual([first.value, second.value], ['up', 'other_metric']);
+  assert.strictEqual(rig.runClicks, 0, 'Multiple visible Monaco editors clicked Run queries');
+  assert.strictEqual(result?.ok, false);
+}
+
+async function testGrafanaMonacoRejectsUninspectableVisibleEditorInstances() {
+  for (const kind of ['missing-dom-api', 'mismatched-dom', 'throwing-model', 'null-model']) {
+    const selected = createTrackedMonacoModel('up');
+    const other = createTrackedMonacoModel('other_metric');
+    const dom = createMonacoDom();
+    const unrelatedDom = createMonacoDom();
+    const validEditor = {
+      getDomNode: () => dom.root,
+      getModel: () => selected.api
+    };
+    let unsafeEditor;
+    if (kind === 'missing-dom-api') {
+      unsafeEditor = { getModel: () => other.api };
+    } else if (kind === 'mismatched-dom') {
+      unsafeEditor = { getDomNode: () => unrelatedDom.root, getModel: () => other.api };
+    } else if (kind === 'throwing-model') {
+      unsafeEditor = {
+        getDomNode: () => dom.root,
+        getModel() { throw new Error('synthetic getModel failure'); }
+      };
+    } else {
+      unsafeEditor = { getDomNode: () => dom.root, getModel: () => null };
+    }
+    const rig = createGrafanaMonacoHarness({
+      doms: [dom],
+      editors: [validEditor, unsafeEditor],
+      models: [selected.api, other.api]
+    });
+    const result = await dispatchGrafanaApply(
+      rig.harness,
+      `uninspectable-visible-editor-${kind}`,
+      'sum(new_metric)',
+      true
+    );
+    assert.deepStrictEqual(
+      [selected.value, other.value],
+      ['up', 'other_metric'],
+      `${kind} did not fail closed before Monaco mutation`
+    );
+    assert.strictEqual(rig.runClicks, 0, `${kind} clicked Run queries`);
+    assert.strictEqual(result?.ok, false, `${kind} reported success`);
+  }
+}
+
+async function testGrafanaMonacoRejectsBindingChangeBeforeMutation() {
+  for (const kind of ['model', 'dom']) {
+    const initial = createTrackedMonacoModel('up');
+    const replacement = createTrackedMonacoModel('rate(hidden_total[5m])');
+    const dom = createMonacoDom();
+    const unrelatedDom = createMonacoDom();
+    let getModelCalls = 0;
+    let getDomNodeCalls = 0;
+    const editor = {
+      getDomNode() {
+        getDomNodeCalls += 1;
+        return kind === 'dom' && getDomNodeCalls > 1 ? unrelatedDom.root : dom.root;
+      },
+      getModel() {
+        getModelCalls += 1;
+        return kind === 'model' && getModelCalls > 1 ? replacement.api : initial.api;
+      }
+    };
+    const rig = createGrafanaMonacoHarness({
+      doms: [dom],
+      editors: [editor],
+      models: [initial.api, replacement.api]
+    });
+    const result = await dispatchGrafanaApply(
+      rig.harness,
+      `${kind}-binding-change-before-mutation`,
+      'sum(new_metric)',
+      true
+    );
+    assert.deepStrictEqual(
+      [initial.value, replacement.value],
+      ['up', 'rate(hidden_total[5m])'],
+      `A changed pre-mutation ${kind} binding still mutated Monaco state`
+    );
+    assert.strictEqual(
+      rig.runClicks,
+      0,
+      `A changed pre-mutation ${kind} binding clicked Run queries`
+    );
+    assert.strictEqual(result?.ok, false);
+  }
+}
+
+async function testGrafanaMonacoRejectsBindingChangeBeforeRun() {
+  for (const kind of ['model', 'dom']) {
+    const timers = [];
+    const initial = createTrackedMonacoModel('up');
+    const replacement = createTrackedMonacoModel('rate(hidden_total[5m])');
+    const dom = createMonacoDom();
+    const unrelatedDom = createMonacoDom();
+    let currentModel = initial.api;
+    let currentDom = dom.root;
+    const editor = {
+      getDomNode: () => currentDom,
+      getModel: () => currentModel
+    };
+    const rig = createGrafanaMonacoHarness({
+      doms: [dom],
+      editors: [editor],
+      models: [initial.api, replacement.api],
+      setTimeout(callback) { timers.push(callback); return timers.length; }
+    });
+    const pending = dispatchGrafanaApply(
+      rig.harness,
+      `${kind}-binding-change-before-run`,
+      'sum(new_metric)',
+      true
+    );
+    await waitForGrafanaTimer(timers, `Monaco ${kind}-binding-change race`);
+    if (kind === 'model') currentModel = replacement.api;
+    else currentDom = unrelatedDom.root;
+    const result = await settleGrafanaOperationWithTimers(
+      pending,
+      timers,
+      `Monaco ${kind}-binding-change race`
+    );
+    assert.deepStrictEqual(
+      [initial.value, replacement.value],
+      ['up', 'rate(hidden_total[5m])'],
+      `A changed post-mutation ${kind} binding was not safely rolled back`
+    );
+    assert.strictEqual(
+      rig.runClicks,
+      0,
+      `A changed post-mutation ${kind} binding clicked Run queries`
+    );
+    assert.strictEqual(result?.ok, false);
+  }
+}
+
+async function testGrafanaMonacoRejectsConcurrentModelChangeBeforeRun() {
+  const timers = [];
+  const visible = createTrackedMonacoModel('up');
+  const dom = createMonacoDom();
+  const editor = {
+    getDomNode: () => dom.root,
+    getModel: () => visible.api
+  };
+  const rig = createGrafanaMonacoHarness({
+    doms: [dom],
+    editors: [editor],
+    models: [visible.api],
+    setTimeout(callback) { timers.push(callback); return timers.length; }
+  });
+  const pending = dispatchGrafanaApply(
+    rig.harness,
+    'concurrent-model-change-before-run',
+    'sum(new_metric)',
+    true
+  );
+  await waitForGrafanaTimer(timers, 'Monaco concurrent-edit race');
+  visible.replace('concurrent_user_query');
+  const result = await settleGrafanaOperationWithTimers(
+    pending,
+    timers,
+    'Monaco concurrent-edit race'
+  );
+  assert.strictEqual(
+    visible.value,
+    'concurrent_user_query',
+    'Concurrent Monaco text/version change was overwritten during failure handling'
+  );
+  assert.strictEqual(rig.runClicks, 0, 'Concurrent Monaco text/version change still clicked Run queries');
+  assert.strictEqual(result?.ok, false);
+}
+
 async function testGrafanaRejectsAmbiguousMonacoModels() {
   const values = ['old query', 'old query'];
   const models = values.map((_value, index) => ({
@@ -806,21 +1248,17 @@ async function testGrafanaRejectsAmbiguousMonacoModels() {
     getVersionId: () => 1,
     setValue(next) { values[index] = next; }
   }));
-  const textarea = {
-    value: 'old query',
-    focus() {}, click() {}, blur() {}, dispatchEvent() {}
-  };
-  const harness = createGrafanaPageContext({
-    monaco: { editor: { getModels: () => models } },
-    querySelector(selector) {
-      return selector.includes('textarea.inputarea') ? textarea : null;
-    },
-    querySelectorAll(selector) {
-      return selector.includes('textarea.inputarea') ? [textarea] : [];
-    }
+  const dom = createMonacoDom();
+  const harness = createGrafanaMonacoHarness({
+    doms: [dom],
+    editors: models.map((model) => ({
+      getDomNode: () => dom.root,
+      getModel: () => model
+    })),
+    models
   });
 
-  const result = await dispatchGrafanaApply(harness, 'ambiguous-models', 'new query', false);
+  const result = await dispatchGrafanaApply(harness.harness, 'ambiguous-models', 'new query', false);
   assert.deepStrictEqual(values, ['old query', 'old query'], 'Ambiguous Monaco models were mutated');
   assert.strictEqual(result?.ok, false);
 
@@ -830,15 +1268,21 @@ async function testGrafanaRejectsAmbiguousMonacoModels() {
     getVersionId: () => 1,
     setValue(next) { modelValue = next; }
   };
-  const editors = [
+  const codeMirrorEditors = [
     { innerText: 'first', textContent: 'first', closest: () => null },
     { innerText: 'second', textContent: 'second', closest: () => null }
   ];
+  const singleDom = createMonacoDom();
+  const singleEditor = {
+    getDomNode: () => singleDom.root,
+    getModel: () => singleModel
+  };
   const ambiguousDom = createGrafanaPageContext({
-    monaco: { editor: { getModels: () => [singleModel] } },
+    monaco: { editor: { getEditors: () => [singleEditor], getModels: () => [singleModel] } },
     querySelectorAll(selector) {
-      if (selector.includes('textarea.inputarea')) return [textarea];
-      if (selector.includes('.cm-content')) return editors;
+      if (selector.includes('textarea.inputarea')) return [singleDom.textarea];
+      if (selector === '.monaco-editor') return [singleDom.root];
+      if (selector.includes('.cm-content')) return codeMirrorEditors;
       return [];
     }
   });
@@ -861,16 +1305,21 @@ async function testGrafanaRejectsMixedAdaptersAndIgnoresHiddenAncestorDecoy() {
   };
   const editorRoot = { cmView: view, querySelectorAll: () => [] };
   const content = { innerText: '', textContent: '', closest: () => editorRoot };
-  const textarea = { value: 'old monaco query', focus() {}, click() {}, blur() {}, dispatchEvent() {} };
+  const monacoDom = createMonacoDom();
   const model = {
     getValue: () => modelText,
     getVersionId: () => 1,
     setValue(next) { modelText = next; }
   };
+  const monacoEditor = {
+    getDomNode: () => monacoDom.root,
+    getModel: () => model
+  };
   const mixed = createGrafanaPageContext({
-    monaco: { editor: { getModels: () => [model] } },
+    monaco: { editor: { getEditors: () => [monacoEditor], getModels: () => [model] } },
     querySelectorAll(selector) {
-      if (selector.includes('textarea.inputarea')) return [textarea];
+      if (selector.includes('textarea.inputarea')) return [monacoDom.textarea];
+      if (selector === '.monaco-editor') return [monacoDom.root];
       if (selector.includes('.cm-content')) return [content];
       return [];
     }
@@ -1087,13 +1536,7 @@ async function testGrafanaMonacoConditionalRollback() {
       getVersionId: () => version,
       setValue(next) { value = next; version += 1; }
     };
-    const textarea = {
-      value: '',
-      focus() {},
-      click() {},
-      blur() {},
-      dispatchEvent() {}
-    };
+    const dom = createMonacoDom();
     const runButton = {
       textContent: 'Run queries',
       click() {
@@ -1104,13 +1547,12 @@ async function testGrafanaMonacoConditionalRollback() {
         throw new Error('run failed');
       }
     };
+    const editor = { getDomNode: () => dom.root, getModel: () => model };
     const harness = createGrafanaPageContext({
-      monaco: { editor: { getModels: () => [model] } },
-      querySelector(selector) {
-        return selector.includes('textarea.inputarea') ? textarea : null;
-      },
+      monaco: { editor: { getEditors: () => [editor], getModels: () => [model] } },
       querySelectorAll(selector) {
-        if (selector.includes('textarea.inputarea')) return [textarea];
+        if (selector.includes('textarea.inputarea')) return [dom.textarea];
+        if (selector === '.monaco-editor') return [dom.root];
         return selector === 'button' ? [runButton] : [];
       }
     });
@@ -1146,17 +1588,22 @@ async function testGrafanaMonacoConditionalRollback() {
       normalizedValue = next === 'new query' ? 'normalized query' : next;
     }
   };
+  const normalizedDom = createMonacoDom();
+  const normalizedEditor = {
+    getDomNode: () => normalizedDom.root,
+    getModel: () => normalizedModel
+  };
   const normalizedHarness = createGrafanaPageContext({
-    monaco: { editor: { getModels: () => [normalizedModel] } },
-    querySelector(selector) {
-      return selector.includes('textarea.inputarea')
-        ? { focus() {}, click() {}, blur() {}, dispatchEvent() {} }
-        : null;
+    monaco: {
+      editor: {
+        getEditors: () => [normalizedEditor],
+        getModels: () => [normalizedModel]
+      }
     },
     querySelectorAll(selector) {
-      return selector.includes('textarea.inputarea')
-        ? [{ focus() {}, click() {}, blur() {}, dispatchEvent() {} }]
-        : [];
+      if (selector.includes('textarea.inputarea')) return [normalizedDom.textarea];
+      if (selector === '.monaco-editor') return [normalizedDom.root];
+      return [];
     }
   });
   await dispatchGrafanaApply(normalizedHarness, 'normalized-owned', 'new query', false);
@@ -1272,6 +1719,14 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   await testVisibleFollowerImmediatelyTakesLeadership();
   await testNewAlertTrackerPersistsUntilNote();
   await testNewAlertTrackerRestoreRaceAndSaveRetry();
+  await testGrafanaMonacoUsesVisibleEditorModelBinding();
+  await testGrafanaMonacoRejectsMissingBindingApis();
+  await testGrafanaMonacoRejectsMismatchedDomBinding();
+  await testGrafanaMonacoRejectsMultipleVisibleEditorInstances();
+  await testGrafanaMonacoRejectsUninspectableVisibleEditorInstances();
+  await testGrafanaMonacoRejectsBindingChangeBeforeMutation();
+  await testGrafanaMonacoRejectsBindingChangeBeforeRun();
+  await testGrafanaMonacoRejectsConcurrentModelChangeBeforeRun();
   await testGrafanaRejectsAmbiguousMonacoModels();
   await testGrafanaRejectsMixedAdaptersAndIgnoresHiddenAncestorDecoy();
   await testGrafanaRequiresUniqueVisibleEnabledRunButton();
