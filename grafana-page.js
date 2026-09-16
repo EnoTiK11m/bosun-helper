@@ -212,11 +212,25 @@
     return matches.length === 1 ? matches[0] : null;
   }
 
-  function getUniqueMonacoTextarea() {
+  function getUniqueVisibleMonacoDom() {
     const textareas = Array.from(document.querySelectorAll(
       'textarea.inputarea.monaco-mouse-cursor-text[role="textbox"]'
     )).filter(isElementVisible);
-    return textareas.length === 1 ? textareas[0] : null;
+    if (textareas.length !== 1) return null;
+
+    const textarea = textareas[0];
+    const root = textarea.closest?.('.monaco-editor') || null;
+    if (
+      textarea.isConnected !== true ||
+      !root ||
+      root.isConnected !== true ||
+      !isElementVisible(root)
+    ) return null;
+
+    const roots = Array.from(document.querySelectorAll('.monaco-editor'))
+      .filter(isElementVisible);
+    if (roots.length !== 1 || roots[0] !== root) return null;
+    return { root, textarea };
   }
 
   function hasAmbiguousEditorDom() {
@@ -240,38 +254,86 @@
   }
 
   function findPrometheusMonacoBinding() {
-    const monacoApi = window.monaco;
-    const models = monacoApi?.editor?.getModels?.();
-    if (!Array.isArray(models) || !models.length) return null;
+    const getEditors = window.monaco?.editor?.getEditors;
+    if (typeof getEditors !== 'function') return null;
 
-    const textarea = getUniqueMonacoTextarea();
-    if (!textarea) return null;
-    const visibleText = textarea?.value || '';
+    const dom = getUniqueVisibleMonacoDom();
+    if (!dom) return null;
 
-    if (visibleText) {
-      const exact = models.filter((model) => model?.getValue?.() === visibleText);
-      if (exact.length === 1) return { model: exact[0], textarea };
-      if (exact.length > 1) return null;
-
-      const prefix = visibleText.slice(0, 40);
-      const partial = models.filter((model) => {
-        const value = model?.getValue?.() || '';
-        return prefix && value.includes(prefix);
-      });
-      if (partial.length === 1) return { model: partial[0], textarea };
-      if (partial.length > 1) return null;
+    let editors;
+    try {
+      editors = Array.from(getEditors.call(window.monaco.editor) || []);
+    } catch (_) {
+      return null;
     }
 
-    const promModels = models.filter((model) => {
-      const value = model?.getValue?.() || '';
-      return /\b(sum|rate|avg|min|max|count|histogram_quantile)\s*(by|without)?\s*\(/.test(value) ||
-        /[a-zA-Z_:][a-zA-Z0-9_:]*\s*\{/.test(value);
-    });
+    const matches = [];
+    for (const editor of editors) {
+      if (typeof editor?.getDomNode !== 'function') return null;
 
-    if (promModels.length === 1) return { model: promModels[0], textarea };
-    if (promModels.length > 1) return null;
-    if (models.length === 1) return { model: models[0], textarea };
-    return null;
+      let domNode;
+      try {
+        domNode = editor.getDomNode();
+      } catch (_) {
+        return null;
+      }
+      if (!domNode) return null;
+      if (domNode.isConnected !== true || !isElementVisible(domNode)) continue;
+
+      const belongsToRoot = domNode === dom.root ||
+        (typeof dom.root.contains === 'function' && dom.root.contains(domNode));
+      if (!belongsToRoot || typeof editor?.getModel !== 'function') return null;
+
+      let model;
+      try {
+        model = editor.getModel();
+      } catch (_) {
+        return null;
+      }
+      if (
+        typeof model?.getValue !== 'function' ||
+        typeof model?.setValue !== 'function' ||
+        typeof model?.getVersionId !== 'function'
+      ) return null;
+      matches.push({ editor, domNode, root: dom.root, textarea: dom.textarea, model });
+    }
+
+    return matches.length === 1 ? matches[0] : null;
+  }
+
+  function isSameMonacoBinding(left, right) {
+    return Boolean(
+      left &&
+      right &&
+      left.editor === right.editor &&
+      left.domNode === right.domNode &&
+      left.root === right.root &&
+      left.textarea === right.textarea &&
+      left.model === right.model
+    );
+  }
+
+  function readMonacoModelState(model) {
+    try {
+      const text = model.getValue();
+      const version = model.getVersionId();
+      if (typeof text !== 'string' || !Number.isFinite(version)) return null;
+      return { text, version };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function confirmMonacoBinding(binding, expectedText, expectedVersion) {
+    const current = findPrometheusMonacoBinding();
+    if (!isSameMonacoBinding(current, binding)) return null;
+    const state = readMonacoModelState(binding.model);
+    if (
+      !state ||
+      state.text !== expectedText ||
+      state.version !== expectedVersion
+    ) return null;
+    return state;
   }
 
   function commitMonacoTextarea(textarea) {
@@ -285,7 +347,7 @@
     return true;
   }
 
-  function rollbackMonacoIfUnchanged(model, textarea, oldText, writtenText, writtenVersion) {
+  function rollbackMonacoIfUnchanged(model, oldText, writtenText, writtenVersion) {
     let currentText;
     let currentVersion;
     try {
@@ -304,19 +366,18 @@
 
     try {
       model.setValue(oldText);
-      commitMonacoTextarea(textarea);
       return true;
     } catch (_) {
       return false;
     }
   }
 
-  function rollbackMonacoIfOwnedVersion(model, textarea, oldText, writtenVersion) {
+  function rollbackMonacoIfOwnedVersion(model, oldText, writtenText, writtenVersion) {
     if (!Number.isFinite(writtenVersion)) return false;
     try {
+      if (model.getValue?.() !== writtenText) return false;
       if (model.getVersionId?.() !== writtenVersion) return false;
       model.setValue(oldText);
-      commitMonacoTextarea(textarea);
       return true;
     } catch (_) {
       return false;
@@ -334,21 +395,52 @@
       return { ok: false, reason: 'operation-deadline-expired', terminal: true };
     }
 
-    const oldText = model.getValue();
+    const initialState = readMonacoModelState(model);
+    if (!initialState) {
+      return { ok: false, reason: 'monaco-model-state-unavailable', terminal: true };
+    }
+    const oldText = initialState.text;
+    if (!confirmMonacoBinding(binding, oldText, initialState.version)) {
+      return { ok: false, reason: 'monaco-binding-changed-before-mutation', terminal: true };
+    }
+    if (!isBeforeDeadline(deadlineAt)) {
+      return { ok: false, reason: 'operation-deadline-expired', terminal: true };
+    }
+
     let writtenVersion;
     try {
       model.setValue(query);
-      writtenVersion = model.getVersionId?.();
-      commitMonacoTextarea(textarea);
-      await wait(500);
-      const nextText = model.getValue();
-      if (normalizeText(nextText) !== normalizeText(query)) {
-        const rolledBack = rollbackMonacoIfOwnedVersion(model, textarea, oldText, writtenVersion);
+      const writtenState = readMonacoModelState(model);
+      writtenVersion = writtenState?.version;
+      if (
+        !writtenState ||
+        writtenState.text !== query ||
+        !confirmMonacoBinding(binding, query, writtenVersion)
+      ) {
+        const rolledBack = rollbackMonacoIfOwnedVersion(
+          model,
+          oldText,
+          writtenState?.text,
+          writtenVersion
+        );
         return {
           ok: false,
-          reason: 'monaco-setvalue-not-applied',
+          reason: 'monaco-binding-changed-after-mutation',
           rolledBack,
-          terminal: !rolledBack,
+          terminal: true
+        };
+      }
+      commitMonacoTextarea(textarea);
+      await wait(500);
+      const nextState = confirmMonacoBinding(binding, query, writtenVersion);
+      const nextText = nextState?.text ?? '';
+      if (!nextState) {
+        const rolledBack = rollbackMonacoIfOwnedVersion(model, oldText, query, writtenVersion);
+        return {
+          ok: false,
+          reason: 'monaco-binding-changed-after-mutation',
+          rolledBack,
+          terminal: true,
           oldLength: oldText.length,
           nextLength: nextText.length
         };
@@ -364,25 +456,35 @@
       }
       commitMonacoTextarea(textarea);
       await wait(500);
-      const beforeRunText = model.getValue();
-      const beforeRunVersion = model.getVersionId?.();
-      const currentBinding = findPrometheusMonacoBinding();
       if (
         !isBeforeDeadline(deadlineAt) ||
         hasAmbiguousEditorDom() ||
-        currentBinding?.model !== model ||
-        currentBinding?.textarea !== textarea ||
-        normalizeText(beforeRunText) !== normalizeText(query) ||
-        !Number.isFinite(writtenVersion) ||
-        !Number.isFinite(beforeRunVersion) ||
-        beforeRunVersion !== writtenVersion
+        !confirmMonacoBinding(binding, query, writtenVersion)
       ) {
-        return { ok: false, reason: 'monaco-concurrent-change-before-run', terminal: true };
+        const rolledBack = rollbackMonacoIfOwnedVersion(model, oldText, query, writtenVersion);
+        return {
+          ok: false,
+          reason: 'monaco-concurrent-change-before-run',
+          rolledBack,
+          terminal: true
+        };
       }
       const runButton = findButtonByText('Run queries');
       if (!runButton) return { ok: false, reason: 'run-button-not-found', terminal: true };
       if (!isBeforeDeadline(deadlineAt)) {
         return { ok: false, reason: 'operation-deadline-expired', terminal: true };
+      }
+      if (
+        hasAmbiguousEditorDom() ||
+        !confirmMonacoBinding(binding, query, writtenVersion)
+      ) {
+        const rolledBack = rollbackMonacoIfOwnedVersion(model, oldText, query, writtenVersion);
+        return {
+          ok: false,
+          reason: 'monaco-concurrent-change-before-run',
+          rolledBack,
+          terminal: true
+        };
       }
       runButton.click();
 
@@ -399,7 +501,6 @@
       } catch (_) {}
       const rolledBack = rollbackMonacoIfUnchanged(
         model,
-        textarea,
         oldText,
         query,
         writtenVersion
