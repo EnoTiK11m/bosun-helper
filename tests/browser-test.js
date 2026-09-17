@@ -358,6 +358,7 @@ ${source.slice(closing)}`;
 }
 
 async function runBrowserAssertions(client) {
+  const focusedAuditCase = process.env.BOSUN_HELPER_BROWSER_CASE || '';
   const settingsSource = fs.readFileSync(path.join(root, 'src/settings/settings.js'), 'utf8');
   const settingsUiSource = fs.readFileSync(path.join(root, 'src/settings/settings-ui.js'), 'utf8');
   const actionSource = fs.readFileSync(path.join(root, 'src/bosun/action-templates.js'), 'utf8');
@@ -556,6 +557,129 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(settingsUiResult.destroyed, true);
   assert.strictEqual(settingsUiResult.remounted, true);
   assert.strictEqual(settingsUiResult.finalSubscribers, 0);
+
+  const settingsBfcacheLifecycle = await evaluate(client, `(async () => {
+    const frame = document.createElement('iframe');
+    frame.src = location.origin + '/';
+    document.body.appendChild(frame);
+    await new Promise((resolve, reject) => {
+      frame.addEventListener('load', resolve, { once: true });
+      frame.addEventListener('error', () => reject(new Error('BFCache test frame failed to load')), { once: true });
+    });
+    const win = frame.contentWindow;
+    const doc = frame.contentDocument;
+    doc.body.innerHTML = '<nav class="navbar navbar-default navbar-static-top"></nav><main class="container"></main>';
+    const storageData = { bosunSettingsSchemaVersion: 1 };
+    const storageListeners = new Set();
+    const storage = {
+      get(keys, callback) {
+        const result = {};
+        if (keys === null) Object.assign(result, storageData);
+        else for (const key of keys || []) {
+          if (Object.prototype.hasOwnProperty.call(storageData, key)) result[key] = storageData[key];
+        }
+        callback(result);
+      },
+      set(values, callback) {
+        const changes = {};
+        for (const [key, value] of Object.entries(values)) {
+          changes[key] = { oldValue: storageData[key], newValue: value };
+          storageData[key] = value;
+        }
+        callback?.();
+        for (const listener of Array.from(storageListeners)) listener(changes, 'local');
+      },
+      remove(keys, callback) {
+        const changes = {};
+        for (const key of keys || []) {
+          changes[key] = { oldValue: storageData[key], newValue: undefined };
+          delete storageData[key];
+        }
+        callback?.();
+        for (const listener of Array.from(storageListeners)) listener(changes, 'local');
+      }
+    };
+    win.chrome = {
+      runtime: { lastError: null, getURL: (file) => 'chrome-extension://test/' + file },
+      storage: {
+        local: storage,
+        onChanged: {
+          addListener(listener) { storageListeners.add(listener); },
+          removeListener(listener) { storageListeners.delete(listener); }
+        }
+      }
+    };
+    win.BosunHelperLocalConfig = {
+      bosunHosts: [win.location.host],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    win.eval(${JSON.stringify(settingsSource)});
+    win.eval(${JSON.stringify(settingsUiSource)});
+    win.eval(${JSON.stringify(contentSource)});
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    await new Promise((resolve) => win.setTimeout(resolve, 0));
+
+    const transition = (type, persisted) => {
+      const event = new win.Event(type);
+      Object.defineProperty(event, 'persisted', { value: persisted });
+      win.dispatchEvent(event);
+    };
+    const initialButton = doc.querySelector('#bosun-settings-button');
+    initialButton?.click();
+    const initialOpen = doc.querySelector('#bosun-settings-modal')?.classList.contains('is-open') === true;
+    doc.querySelector('#bosun-settings-close')?.click();
+
+    const cycleCounts = [];
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      transition('pagehide', true);
+      transition('pageshow', true);
+      for (let index = 0; index < 4; index += 1) await Promise.resolve();
+      cycleCounts.push({
+        buttons: doc.querySelectorAll('#bosun-settings-button').length,
+        dialogs: doc.querySelectorAll('#bosun-settings-modal').length
+      });
+    }
+
+    const resumedButton = doc.querySelector('#bosun-settings-button');
+    resumedButton?.click();
+    const resumedOpen = doc.querySelector('#bosun-settings-modal')?.classList.contains('is-open') === true;
+    storageData['bosunSettingsV1:features.copyButtons'] = false;
+    for (const listener of Array.from(storageListeners)) {
+      listener({
+        'bosunSettingsV1:features.copyButtons': { oldValue: true, newValue: false }
+      }, 'local');
+    }
+    await Promise.resolve();
+    const syncAfterResume =
+      doc.querySelector('[data-setting-path="features.copyButtons"]')?.checked === false;
+
+    transition('pagehide', false);
+    const normalHideDestroyed = doc.querySelector('#bosun-settings-button') === null &&
+      doc.querySelector('#bosun-settings-modal') === null;
+    const result = {
+      initialOpen,
+      cycleCounts,
+      resumedOpen,
+      syncAfterResume,
+      normalHideDestroyed
+    };
+    frame.remove();
+    return result;
+  })()`);
+  if (!focusedAuditCase || focusedAuditCase === 'A04') {
+    assert.deepStrictEqual(settingsBfcacheLifecycle, {
+      initialOpen: true,
+      cycleCounts: [
+        { buttons: 1, dialogs: 1 },
+        { buttons: 1, dialogs: 1 }
+      ],
+      resumedOpen: true,
+      syncAfterResume: true,
+      normalHideDestroyed: true
+    });
+  }
+  if (focusedAuditCase === 'A04') return;
 
   const normalizedSettingsUiResult = await evaluate(client, `(async () => {
     document.body.innerHTML = '<div id="normalized-toolbar"><div class="bosun-top-controls-actions"></div></div>';
@@ -989,9 +1113,10 @@ async function runBrowserAssertions(client) {
   assert.ok(Array.isArray(templateSettingsResult.defaults.close));
 
   const delayedTemplateSaveResult = await evaluate(client, `(() => {
-    document.body.innerHTML = '<div><textarea></textarea></div>';
+    document.body.innerHTML = '<div><textarea id="bosun-message"></textarea></div>';
     let pendingSave = null;
     let pendingValues = null;
+    let lastError = null;
     const storage = {
       get(_keys, callback) { callback({ 'delayed:note': ['first'] }); },
       set(values, callback) { pendingValues = values; pendingSave = callback; },
@@ -1002,7 +1127,7 @@ async function runBrowserAssertions(client) {
       templatesByType: { note: ['default'], ack: [], close: [] },
       storageKey: 'delayed',
       getStorage: () => storage,
-      getLastError: () => null
+      getLastError: () => lastError
     });
     api.refresh();
     document.querySelector('.bosun-action-templates-settings').click();
@@ -1021,24 +1146,46 @@ async function runBrowserAssertions(client) {
     const limitHint = document.getElementById(describedBy)?.textContent || '';
     input.value = 'late change';
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    const bosunMessage = document.querySelector('#bosun-message');
+    bosunMessage.focus();
     pendingSave?.();
+    const successPreservedExternalFocus = document.activeElement === bosunMessage;
+    const savedWhilePending = pendingValues?.['delayed:note'];
+
+    document.querySelector('.bosun-action-templates-settings').click();
+    const retryInput = document.querySelector('.bosun-action-template-input');
+    retryInput.value = 'failed change';
+    retryInput.dispatchEvent(new Event('input', { bubbles: true }));
+    const retrySave = Array.from(document.querySelectorAll('.bosun-action-template-editor-btn'))
+      .find((node) => node.textContent === 'Сохранить');
+    retrySave.click();
+    bosunMessage.focus();
+    lastError = { message: 'synthetic delayed save failure' };
+    pendingSave?.();
+    lastError = null;
+    const failurePreservedExternalFocus = document.activeElement === bosunMessage;
     return {
       focusedWhilePending,
       busyWhilePending,
       readOnlyWhilePending,
       limitHint,
-      savedWhilePending: pendingValues?.['delayed:note'],
-      focusedAfterSave: document.activeElement?.classList.contains('bosun-action-templates-settings') === true
+      savedWhilePending,
+      successPreservedExternalFocus,
+      failurePreservedExternalFocus
     };
   })()`);
-  assert.deepStrictEqual(delayedTemplateSaveResult, {
-    focusedWhilePending: true,
-    busyWhilePending: 'true',
-    readOnlyWhilePending: true,
-    limitHint: 'До 50 шаблонов, до 500 символов каждый, без дубликатов, общий объём до 10000 символов',
-    savedWhilePending: ['changed'],
-    focusedAfterSave: true
-  });
+  if (!focusedAuditCase || focusedAuditCase === 'A12') {
+    assert.deepStrictEqual(delayedTemplateSaveResult, {
+      focusedWhilePending: true,
+      busyWhilePending: 'true',
+      readOnlyWhilePending: true,
+      limitHint: 'До 50 шаблонов, до 500 символов каждый, без дубликатов, общий объём до 10000 символов',
+      savedWhilePending: ['changed'],
+      successPreservedExternalFocus: true,
+      failurePreservedExternalFocus: true
+    });
+  }
+  if (focusedAuditCase === 'A12') return;
 
   const singleAlertAgeResult = await evaluate(client, `(() => {
     ${singleAlertAgeSource}
@@ -2642,6 +2789,69 @@ async function runBrowserAssertions(client) {
     return { checked: notify.checked, clicks };
   })()`);
   assert.deepStrictEqual(checkboxActionGate, { checked: true, clicks: 0 });
+
+  const notifyChoiceLifecycle = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/action?type=note');
+    document.body.innerHTML =
+      '<form id="action-form"><input id="notify-choice" type="checkbox" ng-model="state.Notify" checked></form>';
+    const api = BosunSilenceHiderPageUtils.createPageUtils();
+    const first = document.querySelector('#notify-choice');
+    let firstClicks = 0;
+    first.addEventListener('click', () => { firstClicks += 1; });
+    api.applyActionPageTweaks();
+    const initialDefaultApplied = first.checked === false && firstClicks === 1;
+
+    first.click();
+    const explicitUserChoice = first.checked === true;
+    document.querySelector('#action-form').appendChild(document.createElement('span'));
+    api.applyActionPageTweaks();
+    const sameFormPreserved = first.checked === true && firstClicks === 2;
+
+    const replacement = document.createElement('input');
+    replacement.id = 'notify-choice';
+    replacement.type = 'checkbox';
+    replacement.checked = true;
+    replacement.setAttribute('ng-model', 'state.Notify');
+    let replacementClicks = 0;
+    replacement.addEventListener('click', () => { replacementClicks += 1; });
+    first.replaceWith(replacement);
+    api.applyActionPageTweaks();
+    const sameFormRepaintPreserved = replacement.checked === true && replacementClicks === 0;
+
+    const newForm = document.createElement('form');
+    newForm.id = 'replacement-action-form';
+    const newFormNotify = document.createElement('input');
+    newFormNotify.type = 'checkbox';
+    newFormNotify.checked = true;
+    newFormNotify.setAttribute('ng-model', 'state.Notify');
+    let newFormClicks = 0;
+    newFormNotify.addEventListener('click', () => { newFormClicks += 1; });
+    newForm.appendChild(newFormNotify);
+    document.querySelector('#action-form').replaceWith(newForm);
+    api.applyActionPageTweaks();
+    const newFormReceivedDefault = newFormNotify.checked === false && newFormClicks === 1;
+
+    api.applyActionPageTweaks();
+    return {
+      initialDefaultApplied,
+      explicitUserChoice,
+      sameFormPreserved,
+      sameFormRepaintPreserved,
+      newFormReceivedDefault,
+      repeatedNewFormPassStable: newFormNotify.checked === false && newFormClicks === 1
+    };
+  })()`);
+  if (!focusedAuditCase || focusedAuditCase === 'A06') {
+    assert.deepStrictEqual(notifyChoiceLifecycle, {
+      initialDefaultApplied: true,
+      explicitUserChoice: true,
+      sameFormPreserved: true,
+      sameFormRepaintPreserved: true,
+      newFormReceivedDefault: true,
+      repeatedNewFormPassStable: true
+    });
+  }
+  if (focusedAuditCase === 'A06') return;
 
   const preferenceWriteRollback = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');

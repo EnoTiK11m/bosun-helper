@@ -3,6 +3,7 @@
 
   function createPageUtils() {
     const guardedGroupCheckboxTitles = new Map();
+    const initializedActionNotificationForms = new WeakSet();
     const groupCheckboxTitleSelector =
       ':is(' +
         '[ts-ack-group="schedule.Groups.NeedAck"], ' +
@@ -77,7 +78,11 @@
           input.getAttribute('x-ng-model') ||
           '';
 
-        if (!/(^|\.)notify$/i.test(model.trim()) || !input.checked) return;
+        if (!/(^|\.)notify$/i.test(model.trim())) return;
+        const form = input.form || input.closest?.('form') || input;
+        if (initializedActionNotificationForms.has(form)) return;
+        initializedActionNotificationForms.add(form);
+        if (!input.checked) return;
 
         input.click();
 

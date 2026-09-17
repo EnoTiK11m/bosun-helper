@@ -214,17 +214,19 @@
         const writeGeneration = storageLoadGeneration;
         settingsStore.update({ [`actionTemplates.${type}`]: templates }).then(() => {
           if (writeGeneration !== storageLoadGeneration) return;
+          const restoreFocus = editorOwnsFocus();
           storageWritePending = false;
           onSuccess();
           setStorageStatus(successMessage, false);
-          closeEditor();
+          closeEditor({ restoreFocus });
         }).catch((error) => {
           if (writeGeneration !== storageLoadGeneration) return;
+          const restoreFocus = editorOwnsFocus();
           storageWritePending = false;
           warnStorage('Failed to save action templates.', error);
           setStorageStatus('Не удалось сохранить шаблоны', true);
           rerenderEditor();
-          focusEditorInput(0);
+          if (restoreFocus) focusEditorInput(0);
         });
         return;
       }
@@ -239,11 +241,12 @@
       const writeGeneration = storageLoadGeneration;
       const finishWithError = (error) => {
         if (writeGeneration !== storageLoadGeneration) return;
+        const restoreFocus = editorOwnsFocus();
         storageWritePending = false;
         warnStorage('Failed to save action templates.', error);
         setStorageStatus('Не удалось сохранить шаблоны', true);
         rerenderEditor();
-        focusEditorInput(0);
+        if (restoreFocus) focusEditorInput(0);
       };
       try {
         const callback = () => {
@@ -253,10 +256,11 @@
             finishWithError(error);
             return;
           }
+          const restoreFocus = editorOwnsFocus();
           storageWritePending = false;
           onSuccess();
           setStorageStatus(successMessage, false);
-          closeEditor();
+          closeEditor({ restoreFocus });
         };
         if (templates) {
           if (!storage.set) throw new Error('chrome.storage.local.set is unavailable');
@@ -387,6 +391,11 @@
       document.querySelector(`.${wrapClass} .bosun-action-templates-settings`)?.focus?.();
     }
 
+    function editorOwnsFocus() {
+      const active = document.activeElement;
+      return !active || active === document.body || getEditorNode()?.contains?.(active) === true;
+    }
+
     function setEditorBusy(isBusy) {
       const editor = getEditorNode();
       if (!editor) return;
@@ -409,13 +418,13 @@
       focusEditorInput(0);
     }
 
-    function closeEditor() {
+    function closeEditor(options = {}) {
       storageWritePending = false;
       editorOpen = false;
       editorType = '';
       draftTemplates = [];
       rerenderEditor();
-      focusSettingsButton();
+      if (options.restoreFocus !== false) focusSettingsButton();
     }
 
     function saveEditor() {

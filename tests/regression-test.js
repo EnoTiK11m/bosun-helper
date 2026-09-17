@@ -108,6 +108,11 @@ function createSharedCoordination(clock) {
     },
     get openChannelCount() {
       return Array.from(channels.values()).reduce((sum, peers) => sum + peers.size, 0);
+    },
+    get openChannelNames() {
+      return Array.from(channels.entries()).flatMap(([name, peers]) => {
+        return Array.from(peers, () => name);
+      });
     }
   };
 }
@@ -129,6 +134,7 @@ function createCoordinatorTab(name, clock, shared, options = {}) {
       if (documentListeners.get(event) === listener) documentListeners.delete(event);
     }
   };
+  const runtime = options.runtime || { lastError: null };
   const context = {
     console,
     globalThis: null,
@@ -136,8 +142,8 @@ function createCoordinatorTab(name, clock, shared, options = {}) {
     document,
     location: { origin: 'https://bosun.example.test' },
     chrome: {
-      runtime: { lastError: null },
-      storage: { local: shared.storage, onChanged: shared.storageChanges }
+      runtime,
+      storage: { local: options.storage || shared.storage, onChanged: shared.storageChanges }
     },
     crypto: { randomUUID: () => `${name}-uuid-${++uuidCount}` },
     BroadcastChannel: shared.BroadcastChannel,
@@ -185,6 +191,7 @@ function createCoordinatorTab(name, clock, shared, options = {}) {
     document,
     documentListeners,
     windowListeners,
+    runtime,
     setVisibility(value) {
       document.visibilityState = value;
       documentListeners.get('visibilitychange')?.();
@@ -275,6 +282,237 @@ async function testCoordinatorStopAbortsActiveFetch() {
   await flushMicrotasks();
   assert.strictEqual(aborted, true, 'Stopping coordinator must abort the active fetch');
   assert.strictEqual(tab.coordinator.getRole(), 'stopped');
+}
+
+function createDeferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createSoundRaceHarness() {
+  const audioByKind = new Map();
+  const diagnostics = [];
+  let now = 1_000_000;
+  class FakeDate extends Date {
+    static now() { return now; }
+  }
+  class FakeAudio {
+    constructor(url) {
+      this.kind = String(url).includes('alert.wav') ? 'alert' : 'soft';
+      this.currentTime = 0;
+      this.muted = false;
+      this.volume = 1;
+      this.plans = [];
+      this.pauseCount = 0;
+      this.activePlayCount = 0;
+      this.overlapPlayAttempts = 0;
+      this.pauseWhilePlaying = 0;
+      audioByKind.set(this.kind, this);
+    }
+    play() {
+      const plan = this.plans.shift();
+      if (!plan) throw new Error(`Missing ${this.kind} audio plan`);
+      if (this.activePlayCount > 0) this.overlapPlayAttempts += 1;
+      if (plan.type === 'throw') throw plan.error;
+      if (plan.type === 'value') return plan.value;
+      this.activePlayCount += 1;
+      return plan.deferred.promise.finally(() => { this.activePlayCount -= 1; });
+    }
+    pause() {
+      this.pauseCount += 1;
+      if (this.activePlayCount > 0) this.pauseWhilePlaying += 1;
+    }
+  }
+  const listeners = new Map();
+  const window = {
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type, listener) {
+      if (listeners.get(type) === listener) listeners.delete(type);
+    }
+  };
+  const context = {
+    console,
+    globalThis: null,
+    window,
+    chrome: { runtime: { getURL: (file) => `chrome-extension://test/${file}` } },
+    navigator: {},
+    Audio: FakeAudio,
+    Date: FakeDate,
+    Math,
+    Promise,
+    Error,
+    Number,
+    String,
+    Boolean,
+    Object,
+    Array,
+    JSON,
+    setTimeout(callback) { callback(); return 1; },
+    clearTimeout() {}
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/shared/sound.js'), 'utf8'), context, {
+    filename: 'src/shared/sound.js'
+  });
+  const api = context.BosunSilenceHiderSound.createSound({
+    alertFile: 'alert.wav',
+    softFile: 'soft.wav',
+    getEnabled: () => true,
+    reportDiagnostics(event, details) {
+      diagnostics.push({
+        event,
+        details,
+        alertMuted: audioByKind.get('alert')?.muted === true,
+        softMuted: audioByKind.get('soft')?.muted === true
+      });
+    }
+  });
+  api.ensureAudioObjects();
+  return {
+    api,
+    diagnostics,
+    audio(kind) { return audioByKind.get(kind); },
+    enqueueDeferred(kind, deferred) {
+      audioByKind.get(kind).plans.push({ type: 'deferred', deferred });
+    },
+    enqueueThrow(kind, error) {
+      audioByKind.get(kind).plans.push({ type: 'throw', error });
+    },
+    enqueueValue(kind, value) {
+      audioByKind.get(kind).plans.push({ type: 'value', value });
+    },
+    advance(milliseconds) { now += milliseconds; }
+  };
+}
+
+async function testSoundUnlockAndNotificationRacesRestoreMuteState() {
+  const unlockFirst = createSoundRaceHarness();
+  const unlockAlert = createDeferred();
+  const unlockSoft = createDeferred();
+  const overlappingNotification = createDeferred();
+  unlockFirst.enqueueDeferred('alert', unlockAlert);
+  unlockFirst.enqueueDeferred('soft', unlockSoft);
+  unlockFirst.enqueueDeferred('alert', overlappingNotification);
+  unlockFirst.api.unlockAudioOnce();
+  const overlappingPlay = unlockFirst.api.playNeedAckChimeUnlocked('alert');
+  overlappingNotification.resolve();
+  await flushMicrotasks();
+  unlockAlert.reject(Object.assign(new Error('synthetic unlock rejection'), { name: 'NotAllowedError' }));
+  unlockSoft.resolve();
+  const overlappingPlayResult = await Promise.resolve(overlappingPlay);
+  await flushMicrotasks();
+
+  unlockFirst.advance(1000);
+  const subsequentAfterRejectedUnlock = createDeferred();
+  unlockFirst.enqueueDeferred('alert', subsequentAfterRejectedUnlock);
+  const subsequentRejectedUnlockPlay = unlockFirst.api.playNeedAckChimeUnlocked('alert');
+  subsequentAfterRejectedUnlock.resolve();
+  const subsequentRejectedUnlockResult = await Promise.resolve(subsequentRejectedUnlockPlay);
+  await flushMicrotasks();
+
+  const notificationFirst = createSoundRaceHarness();
+  const initialNotification = createDeferred();
+  notificationFirst.enqueueDeferred('alert', initialNotification);
+  const notificationPending = notificationFirst.api.playNeedAckChimeUnlocked('alert');
+  const notificationFirstUnlock = notificationFirst.api.unlockAudioOnce();
+  initialNotification.resolve();
+  const notificationPendingResult = await Promise.resolve(notificationPending);
+  const notificationFirstUnlockResult = await Promise.resolve(notificationFirstUnlock);
+  await flushMicrotasks();
+  const notificationFirstPlayedBeforeRecovery = notificationFirst.diagnostics.filter((entry) => {
+    return entry.event === 'sound-played';
+  }).length;
+
+  notificationFirst.advance(1000);
+  const subsequentAfterThrownUnlock = createDeferred();
+  notificationFirst.enqueueDeferred('alert', subsequentAfterThrownUnlock);
+  const subsequentThrownUnlockPlay = notificationFirst.api.playNeedAckChimeUnlocked('alert');
+  subsequentAfterThrownUnlock.resolve();
+  const subsequentThrownUnlockResult = await Promise.resolve(subsequentThrownUnlockPlay);
+  await flushMicrotasks();
+  const notificationFirstPlayedAfterRecovery = notificationFirst.diagnostics.filter((entry) => {
+    return entry.event === 'sound-played';
+  }).length;
+
+  const thrownUnlock = createSoundRaceHarness();
+  thrownUnlock.enqueueThrow('alert', new Error('synthetic unlock throw'));
+  thrownUnlock.enqueueValue('soft', undefined);
+  const thrownUnlockResult = await thrownUnlock.api.unlockAudioOnce();
+  thrownUnlock.advance(1000);
+  const subsequentAfterStandaloneThrow = createDeferred();
+  thrownUnlock.enqueueDeferred('alert', subsequentAfterStandaloneThrow);
+  const standaloneThrowRecovery = thrownUnlock.api.playNeedAckChimeUnlocked('alert');
+  subsequentAfterStandaloneThrow.resolve();
+  const standaloneThrowRecoveryResult = await Promise.resolve(standaloneThrowRecovery);
+  await flushMicrotasks();
+
+  const normal = createSoundRaceHarness();
+  normal.enqueueValue('alert', undefined);
+  normal.enqueueValue('soft', undefined);
+  normal.api.unlockAudioOnce();
+  await flushMicrotasks();
+  normal.advance(1000);
+  normal.enqueueValue('alert', undefined);
+  await normal.api.playNeedAckChimeUnlocked('alert');
+
+  const actual = {
+    unlockFirstRestoredMute: unlockFirst.audio('alert').muted === false && unlockFirst.audio('soft').muted === false,
+    unlockFirstNeverReportedMutedPlayback: !unlockFirst.diagnostics.some((entry) => {
+      return entry.event === 'sound-played' && entry.alertMuted;
+    }),
+    notificationFirstRestoredMute: notificationFirst.audio('alert').muted === false &&
+      notificationFirst.audio('soft').muted === false,
+    notificationFirstNeverReportedMutedPlayback: !notificationFirst.diagnostics.some((entry) => {
+      return entry.event === 'sound-played' && entry.alertMuted;
+    }),
+    unlockFirstOperationsSucceeded: overlappingPlayResult === true && subsequentRejectedUnlockResult === true,
+    notificationFirstOperationsSucceeded: notificationPendingResult === true &&
+      notificationFirstUnlockResult === true && subsequentThrownUnlockResult === true,
+    unlockFirstSerialized: unlockFirst.audio('alert').overlapPlayAttempts === 0 &&
+      unlockFirst.audio('alert').pauseWhilePlaying === 0,
+    notificationFirstSerialized: notificationFirst.audio('alert').overlapPlayAttempts === 0 &&
+      notificationFirst.audio('alert').pauseWhilePlaying === 0,
+    unlockFirstPlansConsumed: unlockFirst.audio('alert').plans.length === 0 &&
+      unlockFirst.audio('soft').plans.length === 0,
+    notificationFirstPlansConsumed: notificationFirst.audio('alert').plans.length === 0 &&
+      notificationFirst.audio('soft').plans.length === 0,
+    rejectedUnlockRecovered: unlockFirst.diagnostics.filter((entry) => entry.event === 'sound-played').length === 2,
+    notificationFirstPlayedOnceBeforeRecovery: notificationFirstPlayedBeforeRecovery === 1,
+    notificationFirstRecoveryPlayedOnce: notificationFirstPlayedAfterRecovery ===
+      notificationFirstPlayedBeforeRecovery + 1,
+    standaloneThrowRestoredMute: thrownUnlock.audio('alert').muted === false &&
+      thrownUnlock.audio('soft').muted === false,
+    standaloneThrowRecovered: thrownUnlockResult === true && standaloneThrowRecoveryResult === true &&
+      thrownUnlock.diagnostics.filter((entry) => entry.event === 'sound-played').length === 1,
+    normalUnlockRestoredMute: normal.audio('alert').muted === false && normal.audio('soft').muted === false,
+    normalNotificationReported: normal.diagnostics.some((entry) => {
+      return entry.event === 'sound-played' && !entry.alertMuted;
+    })
+  };
+  assert.deepStrictEqual(actual, {
+    unlockFirstRestoredMute: true,
+    unlockFirstNeverReportedMutedPlayback: true,
+    notificationFirstRestoredMute: true,
+    notificationFirstNeverReportedMutedPlayback: true,
+    unlockFirstOperationsSucceeded: true,
+    notificationFirstOperationsSucceeded: true,
+    unlockFirstSerialized: true,
+    notificationFirstSerialized: true,
+    unlockFirstPlansConsumed: true,
+    notificationFirstPlansConsumed: true,
+    rejectedUnlockRecovered: true,
+    notificationFirstPlayedOnceBeforeRecovery: true,
+    notificationFirstRecoveryPlayedOnce: true,
+    standaloneThrowRestoredMute: true,
+    standaloneThrowRecovered: true,
+    normalUnlockRestoredMute: true,
+    normalNotificationReported: true
+  });
 }
 
 async function testAlertsDataBoundsAndAbort() {
@@ -568,6 +806,75 @@ async function testRefreshCoordinatorLeaderFailoverAndStop() {
   assert.strictEqual(second.windowListeners.size, 0);
   assert.strictEqual(shared.openChannelCount, 0);
   assert.strictEqual(clock.timerCount, 0);
+}
+
+async function testRefreshCoordinatorRejoinTracksRotatedToken() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  const followerRuntime = { lastError: null };
+  let failNextGet = false;
+  const followerStorage = {
+    get(keys, callback) {
+      if (!failNextGet) {
+        shared.storage.get(keys, callback);
+        return;
+      }
+      failNextGet = false;
+      followerRuntime.lastError = { message: 'synthetic rejoin storage failure' };
+      callback({});
+      followerRuntime.lastError = null;
+    },
+    set: shared.storage.set.bind(shared.storage),
+    remove: shared.storage.remove.bind(shared.storage)
+  };
+  const leader = createCoordinatorTab('rejoin-leader', clock, shared);
+  const follower = createCoordinatorTab('rejoin-follower', clock, shared, {
+    runtime: followerRuntime,
+    storage: followerStorage
+  });
+
+  leader.coordinator.start();
+  await clock.advance(0);
+  follower.coordinator.start();
+  await clock.advance(0);
+  assert.strictEqual(leader.coordinator.getRole(), 'leader');
+  assert.strictEqual(follower.coordinator.getRole(), 'follower');
+
+  failNextGet = true;
+  shared.storage.set({
+    'test-coordinator:token:https://bosun.example.test': 'rejoin-token-b'
+  });
+  await clock.advance(0);
+  await flushMicrotasks();
+  await clock.advance(5000);
+  await clock.advance(0);
+  assert.strictEqual(
+    follower.coordinator.getRole(),
+    'follower',
+    'Follower did not recover coordination after its transient storage failure'
+  );
+
+  const appliedBeforeSecondRotation = follower.applied.length;
+  shared.storage.set({
+    'test-coordinator:token:https://bosun.example.test': 'rejoin-token-c'
+  });
+  await clock.advance(0);
+  await clock.advance(240);
+  assert.ok(
+    follower.applied.length > appliedBeforeSecondRotation,
+    'Follower that rejoined token B stopped receiving snapshots after normal B-to-C rotation'
+  );
+  assert.deepStrictEqual(
+    Array.from(new Set(shared.openChannelNames)),
+    ['bosun-helper-alerts:rejoin-token-c'],
+    'Old coordination channel remained active after the post-rejoin rotation'
+  );
+
+  leader.coordinator.stop();
+  follower.coordinator.stop();
+  await flushMicrotasks();
+  await clock.advance(0);
+  assert.strictEqual(shared.openChannelCount, 0, 'Rejoined coordinator did not clean up its channel');
 }
 
 async function testRefreshCoordinatorResumesFromBfcache() {
@@ -2132,10 +2439,23 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
 }
 
 (async () => {
+  const focusedCase = process.env.BOSUN_HELPER_REGRESSION_CASE || '';
+  if (focusedCase) {
+    const focusedCases = {
+      A05: testRefreshCoordinatorRejoinTracksRotatedToken,
+      A13: testSoundUnlockAndNotificationRacesRestoreMuteState
+    };
+    assert.ok(focusedCases[focusedCase], `Unknown focused regression case: ${focusedCase}`);
+    await focusedCases[focusedCase]();
+    console.log(`Regression test passed (${focusedCase})`);
+    return;
+  }
   await testRefreshCoordinatorLeaderFailoverAndStop();
+  await testRefreshCoordinatorRejoinTracksRotatedToken();
   await testHiddenFollowerDefersSnapshotsUntilVisible();
   await testHiddenFollowerRejectsSnapshotFromExpiredLeader();
   await testCoordinatorStopAbortsActiveFetch();
+  await testSoundUnlockAndNotificationRacesRestoreMuteState();
   await testAlertsDataBoundsAndAbort();
   testAlertsDataRejectsAmbiguousChildIdentities();
   await testRefreshCoordinatorResumesFromBfcache();

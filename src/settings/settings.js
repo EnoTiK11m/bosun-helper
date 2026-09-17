@@ -437,6 +437,11 @@
             warn('Failed to verify settings version before migration.', error);
             throw error;
           }
+          for (const entry of SCHEMA) {
+            if (pathRevisions.get(entry.path) !== readPathRevisions.get(entry.path)) {
+              loaded[entry.path] = clone(readPath(snapshot, entry.path));
+            }
+          }
           if (Number(authoritativeVersion?.[VERSION_KEY]) > SCHEMA_VERSION) {
             mutationGeneration += 1;
             futureVersion = true;
