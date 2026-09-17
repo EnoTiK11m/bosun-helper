@@ -3297,10 +3297,7 @@
       return 'none';
     }
 
-    if (
-      hasStrongGroupMarkerIdentityFromDom(groupPanel) ||
-      (hasUniqueSubject && groupHasStrongIdentityBySubject.get(groupSubject) === true)
-    ) {
+    if (hasStrongGroupMarkerIdentityFromDom(groupPanel)) {
       return 'none';
     }
 

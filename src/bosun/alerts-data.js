@@ -147,7 +147,6 @@
 
       for (const group of groups) {
         let groupHasOldNoNote = false;
-        let groupHasAnyNote = false;
         let groupHasAnyUserComment = false;
         let groupHasStrongIdentity = false;
 
@@ -193,7 +192,6 @@
           }
 
           if (oldNoNote) groupHasOldNoNote = true;
-          if (hasNote) groupHasAnyNote = true;
           if (hasLastActionUserComment) groupHasAnyUserComment = true;
           if (hasStrongChildMarkerIdentityFromData?.(child, group)) {
             groupHasStrongIdentity = true;
@@ -203,10 +201,8 @@
         const groupKey = buildGroupMarkerKeyFromData(group);
         if (groupKey) {
           const prevOld = nextIndex.groupHasOldNoNoteByKey.get(groupKey) === true;
-          const prevNote = nextIndex.groupHasAnyNoteByKey.get(groupKey) === true;
           const prevUserComment = nextIndex.groupHasAnyUserCommentByKey.get(groupKey) === true;
           nextIndex.groupHasOldNoNoteByKey.set(groupKey, prevOld || groupHasOldNoNote);
-          nextIndex.groupHasAnyNoteByKey.set(groupKey, prevNote || groupHasAnyNote);
           nextIndex.groupHasAnyUserCommentByKey.set(groupKey, prevUserComment || groupHasAnyUserComment);
         }
 
@@ -217,15 +213,75 @@
             (nextIndex.groupCountBySubject.get(groupSubject) || 0) + 1
           );
           const prevOldBySubject = nextIndex.groupHasOldNoNoteBySubject.get(groupSubject) === true;
-          const prevNoteBySubject = nextIndex.groupHasAnyNoteBySubject.get(groupSubject) === true;
           const prevUserCommentBySubject = nextIndex.groupHasAnyUserCommentBySubject.get(groupSubject) === true;
           const prevStrongIdentityBySubject = nextIndex.groupHasStrongIdentityBySubject.get(groupSubject) === true;
           nextIndex.groupHasOldNoNoteBySubject.set(groupSubject, prevOldBySubject || groupHasOldNoNote);
-          nextIndex.groupHasAnyNoteBySubject.set(groupSubject, prevNoteBySubject || groupHasAnyNote);
           nextIndex.groupHasAnyUserCommentBySubject.set(groupSubject, prevUserCommentBySubject || groupHasAnyUserComment);
           nextIndex.groupHasStrongIdentityBySubject.set(
             groupSubject,
             prevStrongIdentityBySubject || groupHasStrongIdentity
+          );
+        }
+      }
+
+      function readResolvedChildState(key, identityType) {
+        if (!key) return null;
+        const maps = identityType === 'id'
+          ? [
+              nextIndex.childOldNoNoteById,
+              nextIndex.childHasNoteById,
+              nextIndex.childHasUserCommentById
+            ]
+          : [
+              nextIndex.childOldNoNoteByKey,
+              nextIndex.childHasNoteByKey,
+              nextIndex.childHasUserCommentByKey
+            ];
+        if (!maps.every((map) => map.has(key))) return null;
+        return maps.map((map) => map.get(key) === true);
+      }
+
+      function resolvedChildHasNote(child, group) {
+        const childId = child?.State?.Id != null ? String(child.State.Id) : null;
+        const childKey = buildChildMarkerKeyFromData(child, group);
+        if (childId) {
+          if (
+            nextIndex.ambiguousChildIds.has(childId) ||
+            !childKey ||
+            nextIndex.ambiguousChildKeys.has(childKey)
+          ) return false;
+          const byId = readResolvedChildState(childId, 'id');
+          const byKey = readResolvedChildState(childKey, 'key');
+          if (!byId || !byKey || byId.some((value, index) => value !== byKey[index])) return false;
+          return byId[1] === true;
+        }
+
+        if (!childKey || nextIndex.ambiguousChildKeys.has(childKey)) return false;
+        return readResolvedChildState(childKey, 'key')?.[1] === true;
+      }
+
+      // Group Note markers must aggregate only child states that survived the
+      // final ambiguity checks above. Raw action data must not bypass child
+      // identity resolution merely because the group row is collapsed.
+      nextIndex.groupHasAnyNoteByKey.clear();
+      nextIndex.groupHasAnyNoteBySubject.clear();
+      for (const group of groups) {
+        const children = typeof normalizeNeedAckChildren === 'function'
+          ? normalizeNeedAckChildren(group?.Children)
+          : (Array.isArray(group?.Children) ? group.Children : []);
+        const hasResolvedNote = children.some((child) => resolvedChildHasNote(child, group));
+        const groupKey = buildGroupMarkerKeyFromData(group);
+        if (groupKey) {
+          nextIndex.groupHasAnyNoteByKey.set(
+            groupKey,
+            nextIndex.groupHasAnyNoteByKey.get(groupKey) === true || hasResolvedNote
+          );
+        }
+        const groupSubject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
+        if (groupSubject) {
+          nextIndex.groupHasAnyNoteBySubject.set(
+            groupSubject,
+            nextIndex.groupHasAnyNoteBySubject.get(groupSubject) === true || hasResolvedNote
           );
         }
       }
