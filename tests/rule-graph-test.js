@@ -181,6 +181,92 @@ async function run() {
     'Vector arithmetic without proven matching labels must fail closed'
   );
 
+  function arithmeticConfig(name, leftQuery, rightQuery) {
+    return alertRule(name, [
+      `  $left = ${promras(leftQuery)}`,
+      `  $right = ${promras(rightQuery)}`,
+      '  $usage_graph = ($left / $right) * 100',
+      '  warn = 1'
+    ].join('\n'));
+  }
+
+  const prefixGroupedConfig = arithmeticConfig(
+    'synthetic.prefix-grouped',
+    'sum by (service, region) (rate(left_total[5m]))',
+    'sum by (service, region) (rate(right_total[5m]))'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(prefixGroupedConfig, 'synthetic.prefix-grouped').ok,
+    true,
+    'Equivalent prefix-grouped output labels must allow vector arithmetic'
+  );
+
+  const postfixGroupedConfig = arithmeticConfig(
+    'synthetic.postfix-grouped',
+    'sum(rate(left_total[5m])) by (service, region)',
+    'sum(rate(right_total[5m])) by (service, region)'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(postfixGroupedConfig, 'synthetic.postfix-grouped').ok,
+    true,
+    'Equivalent postfix-grouped output labels must allow vector arithmetic'
+  );
+
+  const reorderedLabelsConfig = arithmeticConfig(
+    'synthetic.reordered-labels',
+    'sum by (service, region) (rate(left_total[5m]))',
+    'sum by (region, service) (rate(right_total[5m]))'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(reorderedLabelsConfig, 'synthetic.reordered-labels').ok,
+    true,
+    'Grouping label order must not change the proven output signature'
+  );
+
+  const groupedVsUngroupedConfig = arithmeticConfig(
+    'synthetic.grouped-vs-ungrouped',
+    'sum by (service) (rate(left_total[5m]))',
+    'sum(rate(right_total[5m]))'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(groupedVsUngroupedConfig, 'synthetic.grouped-vs-ungrouped').reason,
+    'computed_graph',
+    'Grouped and ungrouped outputs must not be treated as equivalent'
+  );
+
+  const withoutConfig = arithmeticConfig(
+    'synthetic.without-grouping',
+    'sum without (instance) (rate(shared_total[5m]))',
+    'sum without (instance) (rate(shared_total[5m]))'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(withoutConfig, 'synthetic.without-grouping').reason,
+    'computed_graph',
+    'without grouping must remain fail closed even for identical queries'
+  );
+
+  const nestedGroupedConfig = arithmeticConfig(
+    'synthetic.nested-grouping',
+    'sum by (service) (sum by (service) (left_total))',
+    'sum by (service) (sum by (service) (right_total))'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(nestedGroupedConfig, 'synthetic.nested-grouping').reason,
+    'computed_graph',
+    'Nested aggregation structure must remain fail closed'
+  );
+
+  const binaryMatchingConfig = arithmeticConfig(
+    'synthetic.binary-matching',
+    'sum by (service) (left_total / on(service) right_total)',
+    'sum by (service) (other_left_total / on(service) other_right_total)'
+  );
+  assert.strictEqual(
+    api.resolveAlertGraph(binaryMatchingConfig, 'synthetic.binary-matching').reason,
+    'computed_graph',
+    'Nested binary matching must remain fail closed'
+  );
+
   const precedenceConfig = alertRule('synthetic.precedence', [
     `  $q = ${promras('foo + bar')}`,
     '  $usage_graph = $q * 100',
