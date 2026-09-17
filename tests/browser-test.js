@@ -2080,7 +2080,7 @@ async function runBrowserAssertions(client) {
       Children: [{ Subject: 'snapshot child', Ago: '1m', State: { Actions: [note] } }]
     }], groupPanel('Key Subject', [childPanel('', 'different child', '1m')]));
 
-    const knownGroupMismatch = resolve([{
+    const collapsedKnownGroup = resolve([{
       Subject: 'Known Group',
       Children: [{ Subject: 'snapshot child', Ago: '1m', State: { Id: 301, Actions: [note] } }]
     }], groupPanel('Known Group', []));
@@ -2129,7 +2129,7 @@ async function runBrowserAssertions(client) {
     return {
       idMismatch,
       keyMismatch,
-      knownGroupMismatch,
+      collapsedKnownGroup,
       subjectOnlyFallback,
       ambiguousSubject,
       exactStrongIdentity,
@@ -2140,13 +2140,192 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(strongIdentityMismatchResult, {
     idMismatch: 'none',
     keyMismatch: 'none',
-    knownGroupMismatch: 'none',
+    collapsedKnownGroup: 'note',
     subjectOnlyFallback: 'note',
     ambiguousSubject: 'none',
     exactStrongIdentity: 'note',
     staleIconStrongMismatch: 'none',
     duplicateDerivedKey: 'none'
   }, 'Group marker resolution fell back to Subject after a strong identity mismatch');
+
+  const collapsedGroupNoteIndicatorResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${alertsDataSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    const note = { Type: 'Note', User: 'operator', Message: 'synthetic note' };
+
+    function mountGroup(subject, children = []) {
+      document.body.innerHTML = '';
+      const root = document.createElement('div');
+      root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+      const list = document.createElement('div');
+      list.className = 'panel-group';
+      const group = document.createElement('div');
+      group.className = 'panel';
+      const groupHeading = document.createElement('div');
+      groupHeading.className = 'panel-heading';
+      const groupTitle = document.createElement('div');
+      groupTitle.className = 'panel-title';
+      const groupSubject = document.createElement('span');
+      groupSubject.setAttribute('ng-bind', 'group.Subject');
+      groupSubject.textContent = subject;
+      groupTitle.appendChild(groupSubject);
+      groupHeading.appendChild(groupTitle);
+      group.appendChild(groupHeading);
+
+      for (const child of children) {
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.setAttribute('ng-repeat', 'child in group.Children');
+        const heading = document.createElement('div');
+        heading.className = 'panel-heading';
+        heading.setAttribute('ng-click', 'toggle()');
+        const title = document.createElement('div');
+        title.className = 'panel-title';
+        const id = document.createElement('span');
+        id.setAttribute('ng-show', 'state.Id');
+        id.textContent = '#' + child.id;
+        const childSubject = document.createElement('span');
+        childSubject.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+        childSubject.textContent = child.subject;
+        const ago = document.createElement('span');
+        ago.setAttribute('ts-since', 'child.Ago');
+        ago.textContent = child.ago;
+        title.append(id, childSubject, ago);
+        heading.appendChild(title);
+        panel.appendChild(heading);
+        group.appendChild(panel);
+      }
+
+      list.appendChild(group);
+      root.appendChild(list);
+      document.body.appendChild(root);
+      return group;
+    }
+
+    function child(id, subject, actions = []) {
+      return { Subject: subject, Ago: '1m', State: { Id: id, Actions: actions } };
+    }
+
+    const singleCollapsed = mountGroup('single note');
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{
+      Subject: 'single note',
+      Children: [child(101, 'noted child', [note])]
+    }] } });
+    const singleCollapsedIcons = singleCollapsed.querySelectorAll(
+      '.bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+
+    const multiCollapsed = mountGroup('multi note');
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{
+      Subject: 'multi note',
+      Children: [child(201, 'plain child'), child(202, 'noted child', [note])]
+    }] } });
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const multiCollapsedIcons = multiCollapsed.querySelectorAll(
+      '.bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+
+    const noNote = mountGroup('no note');
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{
+      Subject: 'no note',
+      Children: [child(301, 'plain child')]
+    }] } });
+    const noNoteIcons = noNote.querySelectorAll('.bosun-has-note-icon.bosun-parent-marker').length;
+
+    const ambiguous = mountGroup('ambiguous');
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{
+      Subject: 'ambiguous',
+      Children: [child(401, 'first'), child(401, 'second', [note])]
+    }] } });
+    const ambiguousIcons = ambiguous.querySelectorAll(
+      '.bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+
+    const mismatch = mountGroup('mismatch', [{ id: 502, subject: 'child', ago: '1m' }]);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{
+      Subject: 'mismatch',
+      Children: [child(501, 'child', [note])]
+    }] } });
+    const mismatchIcons = mismatch.querySelectorAll('.bosun-has-note-icon').length;
+
+    const expanded = mountGroup('expanded', [
+      { id: 601, subject: 'noted child', ago: '1m' },
+      { id: 602, subject: 'plain child', ago: '1m' }
+    ]);
+    const expandedPayload = { Groups: { NeedAck: [{
+      Subject: 'expanded',
+      Children: [child(601, 'noted child', [note]), child(602, 'plain child')]
+    }] } };
+    hooks.applyAlertsPayload(expandedPayload);
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const expandedGroupIcons = expanded.querySelectorAll(
+      ':scope > .panel-heading .bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+    const expandedChildren = expanded.querySelectorAll('[ng-repeat="child in group.Children"]');
+    const notedChildIcons = expandedChildren[0].querySelectorAll(
+      '.bosun-has-note-icon:not(.bosun-parent-marker)'
+    ).length;
+    const plainChildIcons = expandedChildren[1].querySelectorAll(
+      '.bosun-has-note-icon:not(.bosun-parent-marker)'
+    ).length;
+
+    expandedChildren.forEach((panel) => panel.remove());
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const collapsedAfterExpandIcons = expanded.querySelectorAll(
+      '.bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+    expandedChildren.forEach((panel) => expanded.appendChild(panel));
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const reexpandedGroupIcons = expanded.querySelectorAll(
+      ':scope > .panel-heading .bosun-has-note-icon.bosun-parent-marker'
+    ).length;
+    const reexpandedNotedChildIcons = expandedChildren[0].querySelectorAll(
+      '.bosun-has-note-icon:not(.bosun-parent-marker)'
+    ).length;
+    const reexpandedPlainChildIcons = expandedChildren[1].querySelectorAll(
+      '.bosun-has-note-icon:not(.bosun-parent-marker)'
+    ).length;
+
+    return {
+      singleCollapsedIcons,
+      multiCollapsedIcons,
+      noNoteIcons,
+      ambiguousIcons,
+      mismatchIcons,
+      expandedGroupIcons,
+      notedChildIcons,
+      plainChildIcons,
+      collapsedAfterExpandIcons,
+      reexpandedGroupIcons,
+      reexpandedNotedChildIcons,
+      reexpandedPlainChildIcons
+    };
+  })()`);
+  assert.deepStrictEqual(collapsedGroupNoteIndicatorResult, {
+    singleCollapsedIcons: 1,
+    multiCollapsedIcons: 1,
+    noNoteIcons: 0,
+    ambiguousIcons: 0,
+    mismatchIcons: 0,
+    expandedGroupIcons: 1,
+    notedChildIcons: 1,
+    plainChildIcons: 0,
+    collapsedAfterExpandIcons: 1,
+    reexpandedGroupIcons: 1,
+    reexpandedNotedChildIcons: 1,
+    reexpandedPlainChildIcons: 0
+  }, 'Collapsed group Note indicator did not preserve safe child identity semantics');
 
   const usageGraphResolverResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
