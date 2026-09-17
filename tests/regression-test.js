@@ -896,6 +896,177 @@ function createGrafanaMonacoHarness(options) {
   };
 }
 
+async function testGrafanaRetriesSafePreMutationFailureForSameOperation() {
+  const model = createTrackedMonacoModel('up');
+  const dom = createMonacoDom();
+  const editor = {
+    getDomNode: () => dom.root,
+    getModel: () => model.api
+  };
+  let mounted = false;
+  const rig = createGrafanaMonacoHarness({
+    doms: [dom],
+    getEditors: () => mounted ? [editor] : [],
+    models: [model.api]
+  });
+  const deadlineAt = Date.now() + 10_000;
+
+  const first = await dispatchGrafanaApply(
+    rig.harness,
+    'delayed-editor-operation',
+    'sum(new_metric)',
+    true,
+    deadlineAt
+  );
+  assert.deepStrictEqual(
+    { ok: first?.ok, reason: first?.reason, value: model.value, runClicks: rig.runClicks },
+    { ok: false, reason: 'editor-binding-not-found', value: 'up', runClicks: 0 },
+    'The first delayed-mount attempt was not a safe pre-mutation failure'
+  );
+
+  const collision = await dispatchGrafanaApply(
+    rig.harness,
+    'delayed-editor-operation',
+    'different query',
+    true,
+    deadlineAt
+  );
+  assert.strictEqual(collision?.reason, 'operation-id-collision', 'Retryable operation lost collision protection');
+
+  mounted = true;
+  const retry = await dispatchGrafanaApply(
+    rig.harness,
+    'delayed-editor-operation',
+    'sum(new_metric)',
+    true,
+    deadlineAt
+  );
+  assert.deepStrictEqual(
+    { ok: retry?.ok, value: model.value, runClicks: rig.runClicks },
+    { ok: true, value: 'sum(new_metric)', runClicks: 1 },
+    'The same operationId did not retry after the editor mounted'
+  );
+
+  const duplicate = await dispatchGrafanaApply(
+    rig.harness,
+    'delayed-editor-operation',
+    'sum(new_metric)',
+    true,
+    deadlineAt
+  );
+  assert.strictEqual(duplicate?.ok, true, 'A completed operation did not retain its final result');
+  assert.strictEqual(rig.runClicks, 1, 'A duplicate completed operation clicked Run queries again');
+
+  const expired = await dispatchGrafanaApply(
+    rig.harness,
+    'expired-operation',
+    'sum(expired_metric)',
+    true,
+    Date.now() - 1
+  );
+  assert.strictEqual(expired?.ok, false, 'An expired operation was accepted');
+  assert.strictEqual(expired?.reason, 'invalid-operation-deadline');
+  assert.strictEqual(model.value, 'sum(new_metric)', 'An expired operation mutated the editor');
+  assert.strictEqual(rig.runClicks, 1, 'An expired operation clicked Run queries');
+
+  const consumedModel = createTrackedMonacoModel('original query');
+  const consumedDom = createMonacoDom();
+  let setValueCalls = 0;
+  const originalSetValue = consumedModel.api.setValue;
+  consumedModel.api.setValue = (value) => {
+    setValueCalls += 1;
+    originalSetValue(value);
+  };
+  const consumedEditor = {
+    getDomNode: () => consumedDom.root,
+    getModel: () => consumedModel.api
+  };
+  let exposeRunButton = false;
+  let consumedRunClicks = 0;
+  const runButton = {
+    textContent: 'Run queries',
+    click() { consumedRunClicks += 1; }
+  };
+  const consumedHarness = createGrafanaPageContext({
+    monaco: { editor: { getEditors: () => [consumedEditor], getModels: () => [consumedModel.api] } },
+    querySelectorAll(selector) {
+      if (selector.includes('textarea.inputarea')) return [consumedDom.textarea];
+      if (selector.includes('.monaco-editor')) return [consumedDom.root];
+      if (selector === 'button') return exposeRunButton ? [runButton] : [];
+      return [];
+    }
+  });
+  const consumedDeadline = Date.now() + 10_000;
+  const terminal = await dispatchGrafanaApply(
+    consumedHarness,
+    'terminal-after-mutation',
+    'consumed query',
+    true,
+    consumedDeadline
+  );
+  assert.strictEqual(terminal?.reason, 'run-button-not-found');
+  const valueAfterTerminal = consumedModel.value;
+  const callsAfterTerminal = setValueCalls;
+  exposeRunButton = true;
+  const terminalDuplicate = await dispatchGrafanaApply(
+    consumedHarness,
+    'terminal-after-mutation',
+    'consumed query',
+    true,
+    consumedDeadline
+  );
+  assert.strictEqual(terminalDuplicate?.reason, 'run-button-not-found');
+  assert.strictEqual(consumedModel.value, valueAfterTerminal, 'A consumed terminal operation changed editor state on retry');
+  assert.strictEqual(setValueCalls, callsAfterTerminal, 'A consumed terminal operation mutated the editor again');
+  assert.strictEqual(consumedRunClicks, 0, 'A consumed terminal operation became executable on retry');
+
+  const unknownModel = createTrackedMonacoModel('original unknown query');
+  const unknownDom = createMonacoDom();
+  const unknownEditor = {
+    getDomNode: () => unknownDom.root,
+    getModel: () => unknownModel.api
+  };
+  let unknownRunAttempts = 0;
+  let throwFromRun = true;
+  const unknownRunButton = {
+    textContent: 'Run queries',
+    click() {
+      unknownRunAttempts += 1;
+      if (throwFromRun) throw new Error('synthetic unknown Run outcome');
+    }
+  };
+  const unknownHarness = createGrafanaPageContext({
+    monaco: { editor: { getEditors: () => [unknownEditor], getModels: () => [unknownModel.api] } },
+    querySelectorAll(selector) {
+      if (selector.includes('textarea.inputarea')) return [unknownDom.textarea];
+      if (selector.includes('.monaco-editor')) return [unknownDom.root];
+      if (selector === 'button') return [unknownRunButton];
+      return [];
+    }
+  });
+  const unknownDeadline = Date.now() + 10_000;
+  const unknown = await dispatchGrafanaApply(
+    unknownHarness,
+    'unknown-run-outcome',
+    'unknown outcome query',
+    true,
+    unknownDeadline
+  );
+  assert.strictEqual(unknown?.ok, false, 'Unknown Run outcome reported success');
+  const unknownReason = unknown?.reason;
+  assert.strictEqual(unknownRunAttempts, 1, 'Synthetic unknown Run outcome was not reached');
+  throwFromRun = false;
+  const unknownDuplicate = await dispatchGrafanaApply(
+    unknownHarness,
+    'unknown-run-outcome',
+    'unknown outcome query',
+    true,
+    unknownDeadline
+  );
+  assert.strictEqual(unknownDuplicate?.reason, unknownReason, 'Unknown Run outcome did not retain its final result');
+  assert.strictEqual(unknownRunAttempts, 1, 'Unknown Run outcome was executed again automatically');
+}
+
 async function settleGrafanaOperationWithTimers(pending, timers, description) {
   let settled = false;
   let outcome;
@@ -1722,6 +1893,7 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   await testVisibleFollowerImmediatelyTakesLeadership();
   await testNewAlertTrackerPersistsUntilNote();
   await testNewAlertTrackerRestoreRaceAndSaveRetry();
+  await testGrafanaRetriesSafePreMutationFailureForSameOperation();
   await testGrafanaMonacoUsesVisibleEditorModelBinding();
   await testGrafanaMonacoRejectsMissingBindingApis();
   await testGrafanaMonacoRejectsMismatchedDomBinding();
