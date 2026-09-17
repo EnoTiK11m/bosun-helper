@@ -86,6 +86,7 @@ function createHarness(url, options = {}) {
   const postedMessages = [];
   const styleNodes = [];
   const timeoutCallbacks = [];
+  const clearedTimeouts = new Set();
   const intervalCallbacks = [];
   const clearedIntervals = new Set();
   let fetchCount = 0;
@@ -296,7 +297,7 @@ function createHarness(url, options = {}) {
       timeoutCallbacks.push({ callback, delay });
       return timeoutCallbacks.length;
     },
-    clearTimeout() {},
+    clearTimeout(id) { clearedTimeouts.add(id); },
     setInterval(callback, delay) {
       intervalCallbacks.push({ callback, delay });
       return intervalCallbacks.length;
@@ -325,6 +326,7 @@ function createHarness(url, options = {}) {
     storageData,
     styleNodes,
     timeoutCallbacks,
+    clearedTimeouts,
     intervalCallbacks,
     get fetchCount() { return fetchCount; },
     get reloadCount() { return reloadCount; },
@@ -340,6 +342,10 @@ function runFiles(harness, files) {
       filename: file
     });
   }
+}
+
+function runSource(harness, source, filename) {
+  vm.runInNewContext(source, harness.context, { filename });
 }
 
 async function flushMicrotasks() {
@@ -612,7 +618,48 @@ async function testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot() {
 }
 
 async function testGrafanaBridgeAuthenticationAndSingleton() {
+  const pageSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8');
+
+  function installCodeMirror(harness) {
+    let value = 'old query';
+    const rootNode = createElement('div');
+    const contentNode = createElement('div');
+    rootNode.isConnected = true;
+    contentNode.isConnected = true;
+    contentNode.parentElement = rootNode;
+    contentNode.closest = (selector) => selector === '.cm-editor' ? rootNode : null;
+    rootNode.contains = (node) => node === contentNode;
+    rootNode.querySelectorAll = (selector) => selector.includes('.cm-content') ? [contentNode] : [];
+
+    function createDoc() {
+      return { toString: () => value };
+    }
+    const view = {
+      state: { doc: createDoc() },
+      dispatch(transaction) {
+        value = String(transaction?.changes?.insert ?? value);
+        this.state = { doc: createDoc() };
+        contentNode.innerText = value;
+        contentNode.textContent = value;
+      }
+    };
+    rootNode.cmView = { view };
+    contentNode.innerText = value;
+    contentNode.textContent = value;
+    harness.document.querySelectorAll = (selector) => {
+      if (selector.includes('.cm-content')) return [contentNode];
+      return [];
+    };
+    return { get value() { return value; } };
+  }
+
+  async function dispatch(listener, event) {
+    await listener(event);
+    await flushMicrotasks();
+  }
+
   const harness = createHarness('https://grafana.example.com/d/test?editPanel=1');
+  const editor = installCodeMirror(harness);
   const bridgeScript = createElement('script');
   bridgeScript.dataset.channelToken = 'secret-token';
   harness.document.currentScript = bridgeScript;
@@ -624,37 +671,186 @@ async function testGrafanaBridgeAuthenticationAndSingleton() {
   const listeners = harness.windowListeners.get('message') || [];
   assert.strictEqual(listeners.length, 1, 'Grafana bridge must install only one message listener');
 
+  const deadlineAt = Date.now() + 10_000;
   const baseEvent = {
     source: harness.window,
     origin: harness.location.origin,
     data: {
       type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY',
+      channelToken: 'secret-token',
       requestId: 'request-1',
+      operationId: 'operation-1',
+      deadlineAt,
+      run: false,
       query: 'up'
     }
   };
 
-  await listeners[0]({
+  async function assertNoResponse(event, description) {
+    const responseCount = harness.postedMessages.length;
+    await dispatch(listeners[0], event);
+    assert.strictEqual(harness.postedMessages.length, responseCount, description);
+  }
+
+  await assertNoResponse({
     ...baseEvent,
     data: { ...baseEvent.data, channelToken: 'wrong-token' }
-  });
-  const beforeValidRequest = harness.postedMessages.length;
-
-  await listeners[0]({
+  }, 'Wrong token produced a bridge response');
+  await assertNoResponse({
     ...baseEvent,
-    data: { ...baseEvent.data, channelToken: 'secret-token' }
+    source: {}
+  }, 'Wrong source produced a bridge response');
+  await assertNoResponse({
+    ...baseEvent,
+    origin: 'https://attacker.example.test'
+  }, 'Wrong origin produced a bridge response');
+
+  const valueBeforeInvalidOperations = editor.value;
+  await dispatch(listeners[0], {
+    ...baseEvent,
+    data: { ...baseEvent.data, requestId: 'missing-operation', operationId: '' }
   });
-  await flushMicrotasks();
+  let response = harness.postedMessages.at(-1);
+  assert.strictEqual(response.message.requestId, 'missing-operation');
+  assert.strictEqual(response.message.result?.ok, false);
+  assert.strictEqual(response.message.result?.reason, 'invalid-operation-id');
+  assert.strictEqual(editor.value, valueBeforeInvalidOperations, 'Missing operationId mutated the editor');
+
+  await dispatch(listeners[0], {
+    ...baseEvent,
+    data: {
+      ...baseEvent.data,
+      requestId: 'expired-operation',
+      operationId: 'expired-operation',
+      deadlineAt: Date.now() - 1
+    }
+  });
+  response = harness.postedMessages.at(-1);
+  assert.strictEqual(response.message.requestId, 'expired-operation');
+  assert.strictEqual(response.message.result?.ok, false);
+  assert.strictEqual(response.message.result?.reason, 'invalid-operation-deadline');
+  assert.strictEqual(editor.value, valueBeforeInvalidOperations, 'Expired operation mutated the editor');
+
+  const beforeValidRequest = harness.postedMessages.length;
+  await dispatch(listeners[0], baseEvent);
 
   assert.strictEqual(
     harness.postedMessages.length,
     beforeValidRequest + 1,
     'Authenticated bridge request must produce one response'
   );
-  const response = harness.postedMessages.at(-1);
+  response = harness.postedMessages.at(-1);
   assert.strictEqual(response.targetOrigin, harness.location.origin);
   assert.strictEqual(response.message.channelToken, 'secret-token');
   assert.strictEqual(response.message.requestId, 'request-1');
+  assert.strictEqual(response.message.operationId, 'operation-1');
+  assert.strictEqual(response.message.result?.ok, true);
+  assert.strictEqual(response.message.result?.via, 'codemirror-view');
+  assert.strictEqual(editor.value, 'up', 'Authenticated bridge request did not update the editor');
+
+  const mutatedSource = pageSource.replace(
+    "event.data?.channelToken !== CHANNEL_TOKEN",
+    'false'
+  );
+  assert.notStrictEqual(mutatedSource, pageSource, 'Token-check mutation did not alter the bridge source');
+  const mutationHarness = createHarness('https://grafana.example.com/d/test?editPanel=1');
+  const mutationScript = createElement('script');
+  mutationScript.dataset.channelToken = 'secret-token';
+  mutationHarness.document.currentScript = mutationScript;
+  runSource(mutationHarness, mutatedSource, 'grafana-page-token-check-disabled.js');
+  const mutationListener = mutationHarness.windowListeners.get('message')?.[0];
+  const beforeMutationRequest = mutationHarness.postedMessages.length;
+  await dispatch(mutationListener, {
+    ...baseEvent,
+    source: mutationHarness.window,
+    origin: mutationHarness.location.origin,
+    data: { ...baseEvent.data, channelToken: 'wrong-token' }
+  });
+  assert.strictEqual(
+    mutationHarness.postedMessages.length,
+    beforeMutationRequest + 1,
+    'Mutation control did not prove that bypassing token validation violates no-response behavior'
+  );
+}
+
+async function testGrafanaContentBridgeCorrelationAndCleanup() {
+  const source = fs.readFileSync(path.join(root, 'src/grafana/grafana-content.js'), 'utf8');
+  const closing = source.lastIndexOf('})();');
+  assert.ok(closing > 0, 'Unable to instrument Grafana content bridge');
+  const instrumented = `${source.slice(0, closing)}
+    globalThis.__testApplyViaBridge = applyViaBridge;
+  ${source.slice(closing)}`;
+
+  function createBridgeHarness() {
+    const harness = createHarness(createConfiguredGrafanaUrl());
+    runSource(harness, instrumented, 'src/grafana/grafana-content.js');
+    return harness;
+  }
+
+  const expired = createBridgeHarness();
+  const expiredResult = await expired.context.__testApplyViaBridge(
+    'up', false, 'expired-operation', Date.now() - 1
+  );
+  assert.strictEqual(expiredResult, false, 'Expired content operation did not fail closed');
+  assert.strictEqual(expired.postedMessages.length, 0, 'Expired content operation posted a request');
+  assert.strictEqual(expired.windowListeners.get('message')?.length || 0, 0);
+
+  const harness = createBridgeHarness();
+  const pending = harness.context.__testApplyViaBridge(
+    'up', false, 'operation-correlation', Date.now() + 10_000
+  );
+  const apply = harness.postedMessages.at(-1)?.message;
+  assert.strictEqual(apply?.type, 'BOSUN_HELPER_APPLY_GRAFANA_QUERY');
+  const listener = harness.windowListeners.get('message')?.[0];
+  assert.ok(listener, 'Content bridge did not install its pending response listener');
+  const timeoutId = harness.timeoutCallbacks.length;
+
+  const invalidResponses = [
+    { ...apply, type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT', requestId: '' },
+    { ...apply, type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT', requestId: 'mismatched-request' },
+    { ...apply, type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT', operationId: '' },
+    { ...apply, type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT', operationId: 'mismatched-operation' }
+  ];
+  for (const data of invalidResponses) {
+    listener({
+      source: harness.window,
+      origin: harness.location.origin,
+      data: { ...data, result: { ok: true } }
+    });
+    await flushMicrotasks();
+    assert.strictEqual(
+      harness.windowListeners.get('message')?.length || 0,
+      1,
+      'Malformed correlation fields settled the pending bridge request'
+    );
+    assert.strictEqual(harness.clearedTimeouts.has(timeoutId), false);
+  }
+
+  listener({
+    source: harness.window,
+    origin: harness.location.origin,
+    data: {
+      type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT',
+      channelToken: apply.channelToken,
+      requestId: apply.requestId,
+      operationId: apply.operationId,
+      result: { ok: true }
+    }
+  });
+  assert.strictEqual(await pending, true, 'Valid correlated bridge response was not accepted');
+  assert.strictEqual(harness.windowListeners.get('message')?.length || 0, 0);
+  assert.strictEqual(harness.clearedTimeouts.has(timeoutId), true);
+
+  const timeoutHarness = createBridgeHarness();
+  const timedOut = timeoutHarness.context.__testApplyViaBridge(
+    'up', false, 'timeout-operation', Date.now() + 10_000
+  );
+  const timeoutListenerCount = timeoutHarness.windowListeners.get('message')?.length || 0;
+  assert.strictEqual(timeoutListenerCount, 1);
+  const timeoutEntry = timeoutHarness.timeoutCallbacks.at(-1);
+  timeoutEntry.callback();
+  assert.strictEqual(await timedOut, false, 'Bridge timeout did not fail closed');
+  assert.strictEqual(timeoutHarness.windowListeners.get('message')?.length || 0, 0);
 }
 
 function createActionPageHarness() {
@@ -1120,6 +1316,7 @@ async function testGrafanaHandoffDestroyCancelsDelayedSave() {
   await testGrafanaContentPassesCreatedAtHardDeadline();
   await testGrafanaContentConsumesOnceAndVerifiesUniqueVisibleRoot();
   await testGrafanaBridgeAuthenticationAndSingleton();
+  await testGrafanaContentBridgeCorrelationAndCleanup();
   await testActionTemplatesFollowTextareaRemount();
   await testFeatureModuleLifecycleCleanup();
   await testNewAlertTrackerDestroyInvalidatesAsyncWork();
