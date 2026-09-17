@@ -38,6 +38,7 @@
   const ALERT_MARKER_CACHE_MAX_UNCHANGED_AGE_MS = 5 * 60 * 1000;
   const ALERT_MARKER_CACHE_MAX_RAW_LENGTH = 5 * 1024 * 1024;
   const ALERT_MARKER_CACHE_MAX_KEY_LENGTH = 1000;
+  const ALERT_MARKER_CACHE_SCHEMA_VERSION = 2;
   const SOUND_FILE_ALERT = 'assets/sounds/bosun_notification_alert_chime.wav';
   const SOUND_FILE_SOFT = 'assets/sounds/bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
@@ -196,6 +197,8 @@
   const childHasNoteByKey = new Map();
   const childHasUserCommentById = new Map();
   const childHasUserCommentByKey = new Map();
+  const ambiguousChildIds = new Set();
+  const ambiguousChildKeys = new Set();
 
   // group maps
   const groupHasOldNoNoteByKey = new Map();
@@ -204,6 +207,7 @@
   const groupHasOldNoNoteBySubject = new Map();
   const groupHasAnyNoteBySubject = new Map();
   const groupHasAnyUserCommentBySubject = new Map();
+  const groupHasStrongIdentityBySubject = new Map();
   const groupCountBySubject = new Map();
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
@@ -1218,45 +1222,78 @@
     setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
   }
 
-  function resolveChildHasUserComment(panel, parentGroupPanel = null) {
+  function readChildIndexedState(key, identityType) {
+    if (!key) return null;
+    const maps = identityType === 'id'
+      ? [childOldNoNoteById, childHasNoteById, childHasUserCommentById]
+      : [childOldNoNoteByKey, childHasNoteByKey, childHasUserCommentByKey];
+    if (!maps.every((map) => map.has(key))) return null;
+    return {
+      oldNoNote: maps[0].get(key) === true,
+      hasNote: maps[1].get(key) === true,
+      hasUserComment: maps[2].get(key) === true
+    };
+  }
+
+  function childIndexedStatesMatch(first, second) {
+    return first && second &&
+      first.oldNoNote === second.oldNoNote &&
+      first.hasNote === second.hasNote &&
+      first.hasUserComment === second.hasUserComment;
+  }
+
+  function resolveChildIndexedState(panel, parentGroupPanel = null) {
     const heading = getChildHeading(panel);
-    if (!heading) return true;
+    if (!heading) return null;
 
     const panelId = getPanelIdFromHeading(heading);
     const groupPanel = parentGroupPanel || findParentGroupPanelForChild(panel);
     const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
-    let hasLastActionUserComment = false;
 
-    if (panelId && childHasUserCommentById.has(panelId)) {
-      hasLastActionUserComment = childHasUserCommentById.get(panelId) === true;
+    if (panelId) {
+      if (ambiguousChildIds.has(panelId) || (childKey && ambiguousChildKeys.has(childKey))) {
+        return null;
+      }
+      const byId = readChildIndexedState(panelId, 'id');
+      const byKey = readChildIndexedState(childKey, 'key');
+      return childIndexedStatesMatch(byId, byKey) ? byId : null;
     }
 
-    if (!hasLastActionUserComment && childKey && childHasUserCommentByKey.has(childKey)) {
-      hasLastActionUserComment = childHasUserCommentByKey.get(childKey) === true;
-    }
+    if (!childKey || ambiguousChildKeys.has(childKey)) return null;
+    return readChildIndexedState(childKey, 'key');
+  }
 
-    return hasLastActionUserComment;
+  function resolveChildHasUserComment(panel, parentGroupPanel = null) {
+    if (!getChildHeading(panel)) return true;
+    return resolveChildIndexedState(panel, parentGroupPanel)?.hasUserComment === true;
   }
 
   function resolveGroupHasUserComment(groupPanel) {
     const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
     const groupSubject = getGroupSubjectFromPanel(groupPanel);
-    let hasLastActionUserComment = false;
+    const hasUniqueSubject = Boolean(
+      groupSubject && groupCountBySubject.get(groupSubject) === 1
+    );
 
     if (groupKey && groupHasAnyUserCommentByKey.has(groupKey)) {
-      hasLastActionUserComment = groupHasAnyUserCommentByKey.get(groupKey) === true;
+      return groupHasAnyUserCommentByKey.get(groupKey) === true;
     }
 
     if (
-      !hasLastActionUserComment &&
-      groupSubject &&
-      groupCountBySubject.get(groupSubject) === 1 &&
-      groupHasAnyUserCommentBySubject.has(groupSubject)
+      hasStrongGroupMarkerIdentityFromDom(groupPanel) ||
+      (hasUniqueSubject && groupHasStrongIdentityBySubject.get(groupSubject) === true)
     ) {
-      hasLastActionUserComment = groupHasAnyUserCommentBySubject.get(groupSubject) === true;
+      return false;
     }
 
-    return hasLastActionUserComment;
+    if (
+      hasUniqueSubject &&
+      groupHasAnyUserCommentBySubject.has(groupSubject)
+    ) {
+      return groupHasAnyUserCommentBySubject.get(groupSubject) === true;
+    }
+
+    return false;
   }
 
   function shouldShowAlertByUserCommentFilter(panel, parentGroupPanel = null) {
@@ -1605,6 +1642,7 @@
       groupHasOldNoNoteBySubject,
       groupHasAnyNoteBySubject,
       groupHasAnyUserCommentBySubject,
+      groupHasStrongIdentityBySubject,
       groupCountBySubject
     };
   }
@@ -1634,7 +1672,7 @@
       ) return;
       const savedAt = Date.now();
       window.sessionStorage.setItem(ALERT_MARKER_CACHE_SESSION_KEY, JSON.stringify({
-        version: 1,
+        version: ALERT_MARKER_CACHE_SCHEMA_VERSION,
         savedAt,
         maps
       }));
@@ -1666,7 +1704,7 @@
       const cached = JSON.parse(raw);
       const ageMs = Date.now() - Number(cached?.savedAt);
       if (
-        cached?.version !== 1 ||
+        cached?.version !== ALERT_MARKER_CACHE_SCHEMA_VERSION ||
         !cached.maps ||
         typeof cached.maps !== 'object' ||
         !Number.isFinite(ageMs) ||
@@ -1677,19 +1715,37 @@
         return false;
       }
 
-      for (const [name, map] of Object.entries(getAlertMarkerCacheMaps())) {
+      const cacheMaps = getAlertMarkerCacheMaps();
+      if (Object.keys(cacheMaps).some((name) => !Array.isArray(cached.maps[name]))) {
+        window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+        return false;
+      }
+
+      const restoredMaps = new Map();
+      for (const [name] of Object.entries(cacheMaps)) {
         const entries = cached.maps[name];
-        if (!Array.isArray(entries)) continue;
-        map.clear();
+        const restoredMap = new Map();
         for (const entry of entries.slice(0, ALERT_MARKER_CACHE_MAX_ENTRIES_PER_MAP)) {
-          if (!Array.isArray(entry) || entry.length !== 2) continue;
+          if (!Array.isArray(entry) || entry.length !== 2) {
+            window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+            return false;
+          }
           const [key, value] = entry;
           const validKey = typeof key === 'number' || (
             typeof key === 'string' && key.length <= ALERT_MARKER_CACHE_MAX_KEY_LENGTH
           );
           const validValue = typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value));
-          if (validKey && validValue) map.set(key, value);
+          if (!validKey || !validValue) {
+            window.sessionStorage.removeItem(ALERT_MARKER_CACHE_SESSION_KEY);
+            return false;
+          }
+          restoredMap.set(key, value);
         }
+        restoredMaps.set(name, restoredMap);
+      }
+      for (const [name, map] of Object.entries(cacheMaps)) {
+        map.clear();
+        for (const [key, value] of restoredMaps.get(name)) map.set(key, value);
       }
       lastAlertMarkerCacheSerializedMaps = JSON.stringify(cached.maps);
       lastAlertMarkerCacheSavedAt = Number(cached.savedAt);
@@ -2744,6 +2800,31 @@
     return ageNode?.textContent?.replace(/\s+/g, ' ').trim() || null;
   }
 
+  function hasStrongChildMarkerIdentity(id, childSubject) {
+    if (id != null && String(id).trim()) return true;
+    return typeof childSubject === 'string' && Boolean(childSubject.trim());
+  }
+
+  function hasStrongChildMarkerIdentityFromData(child) {
+    const childSubject = (typeof child?.Subject === 'string' && child.Subject.trim())
+      ? child.Subject
+      : (typeof child?.AlertKey === 'string' ? child.AlertKey : '');
+    return hasStrongChildMarkerIdentity(child?.State?.Id, childSubject);
+  }
+
+  function hasStrongChildMarkerIdentityFromHeading(heading) {
+    return hasStrongChildMarkerIdentity(
+      getPanelIdFromHeading(heading),
+      getPanelSubjectFromHeading(heading)
+    );
+  }
+
+  function hasStrongGroupMarkerIdentityFromDom(groupPanel) {
+    return getGroupChildPanels(groupPanel).some((childPanel) => (
+      hasStrongChildMarkerIdentityFromHeading(getChildHeading(childPanel))
+    ));
+  }
+
   function buildChildMarkerKeyFromData(child, group) {
     return buildChildMarkerKey(
       child?.State?.Id,
@@ -2993,6 +3074,7 @@
     const nextIndex = alertsDataApi?.rebuildAlertDataIndex?.(payload, {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
+      hasStrongChildMarkerIdentityFromData,
       normalizeNeedAckChildren: (raw) => {
         if (sharedUtils?.normalizeNeedAckChildren) {
           return sharedUtils.normalizeNeedAckChildren(raw);
@@ -3007,12 +3089,15 @@
       childHasNoteByKey: new Map(),
       childHasUserCommentById: new Map(),
       childHasUserCommentByKey: new Map(),
+      ambiguousChildIds: new Set(),
+      ambiguousChildKeys: new Set(),
       groupHasOldNoNoteByKey: new Map(),
       groupHasAnyNoteByKey: new Map(),
       groupHasAnyUserCommentByKey: new Map(),
       groupHasOldNoNoteBySubject: new Map(),
       groupHasAnyNoteBySubject: new Map(),
       groupHasAnyUserCommentBySubject: new Map(),
+      groupHasStrongIdentityBySubject: new Map(),
       groupCountBySubject: new Map()
     };
     childOldNoNoteById.clear();
@@ -3021,12 +3106,15 @@
     childHasNoteByKey.clear();
     childHasUserCommentById.clear();
     childHasUserCommentByKey.clear();
+    ambiguousChildIds.clear();
+    ambiguousChildKeys.clear();
     groupHasOldNoNoteByKey.clear();
     groupHasAnyNoteByKey.clear();
     groupHasAnyUserCommentByKey.clear();
     groupHasOldNoNoteBySubject.clear();
     groupHasAnyNoteBySubject.clear();
     groupHasAnyUserCommentBySubject.clear();
+    groupHasStrongIdentityBySubject.clear();
     groupCountBySubject.clear();
     for (const [key, value] of nextIndex.childOldNoNoteById) childOldNoNoteById.set(key, value);
     for (const [key, value] of nextIndex.childOldNoNoteByKey) childOldNoNoteByKey.set(key, value);
@@ -3034,12 +3122,17 @@
     for (const [key, value] of nextIndex.childHasNoteByKey) childHasNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.childHasUserCommentById || []) childHasUserCommentById.set(key, value);
     for (const [key, value] of nextIndex.childHasUserCommentByKey || []) childHasUserCommentByKey.set(key, value);
+    for (const key of nextIndex.ambiguousChildIds || []) ambiguousChildIds.add(key);
+    for (const key of nextIndex.ambiguousChildKeys || []) ambiguousChildKeys.add(key);
     for (const [key, value] of nextIndex.groupHasOldNoNoteByKey) groupHasOldNoNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteByKey) groupHasAnyNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyUserCommentByKey || []) groupHasAnyUserCommentByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasOldNoNoteBySubject) groupHasOldNoNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteBySubject) groupHasAnyNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyUserCommentBySubject || []) groupHasAnyUserCommentBySubject.set(key, value);
+    for (const [key, value] of nextIndex.groupHasStrongIdentityBySubject || []) {
+      groupHasStrongIdentityBySubject.set(key, value);
+    }
     for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
     alertDataIndexReady = true;
     rebuildGrafanaQueryIndex(payload);
@@ -3151,28 +3244,9 @@
   }
 
   function resolveChildState(panel, parentGroupPanel = null) {
-    const heading = getChildHeading(panel);
-    if (!heading) return 'none';
-
-    const panelId = getPanelIdFromHeading(heading);
-    const groupPanel = parentGroupPanel || findParentGroupPanelForChild(panel);
-    const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
-
-    let oldNoNote = false;
-    let hasNote = false;
-
-    if (panelId) {
-      if (childOldNoNoteById.has(panelId)) oldNoNote = childOldNoNoteById.get(panelId) === true;
-      if (childHasNoteById.has(panelId)) hasNote = childHasNoteById.get(panelId) === true;
-    }
-
-    if (!oldNoNote && !hasNote && childKey) {
-      if (childOldNoNoteByKey.has(childKey)) oldNoNote = childOldNoNoteByKey.get(childKey) === true;
-      if (childHasNoteByKey.has(childKey)) hasNote = childHasNoteByKey.get(childKey) === true;
-    }
-
-    if (oldNoNote) return 'warning';
-    if (hasNote) return 'note';
+    const state = resolveChildIndexedState(panel, parentGroupPanel);
+    if (state?.oldNoNote) return 'warning';
+    if (state?.hasNote) return 'note';
     return 'none';
   }
 
@@ -3205,23 +3279,35 @@
   function resolveGroupState(groupPanel) {
     const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
     const groupSubject = getGroupSubjectFromPanel(groupPanel);
+    const hasUniqueSubject = Boolean(
+      groupSubject && groupCountBySubject.get(groupSubject) === 1
+    );
+
+    if (
+      groupKey && (
+        groupHasOldNoNoteByKey.has(groupKey) ||
+        groupHasAnyNoteByKey.has(groupKey)
+      )
+    ) {
+      const hasOldNoNote = groupHasOldNoNoteByKey.get(groupKey) === true;
+      const hasAnyNote = groupHasAnyNoteByKey.get(groupKey) === true;
+
+      if (hasOldNoNote) return 'warning';
+      if (hasAnyNote) return 'note';
+      return 'none';
+    }
+
+    if (
+      hasStrongGroupMarkerIdentityFromDom(groupPanel) ||
+      (hasUniqueSubject && groupHasStrongIdentityBySubject.get(groupSubject) === true)
+    ) {
+      return 'none';
+    }
 
     const domState = resolveGroupStateFromDom(groupPanel);
     if (domState !== 'none') return domState;
 
-    if (groupKey) {
-      const hasOldNoNote = groupHasOldNoNoteByKey.get(groupKey) === true;
-      const hasAnyNote = groupHasAnyNoteByKey.get(groupKey) === true;
-
-      if (hasOldNoNote) {
-        return 'warning';
-      }
-      if (hasAnyNote) {
-        return 'note';
-      }
-    }
-
-    if (groupSubject && groupCountBySubject.get(groupSubject) === 1) {
+    if (hasUniqueSubject) {
       const hasOldNoNoteBySubject = groupHasOldNoNoteBySubject.get(groupSubject) === true;
       const hasAnyNoteBySubject = groupHasAnyNoteBySubject.get(groupSubject) === true;
 

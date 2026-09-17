@@ -262,6 +262,10 @@ function instrumentContentSource(source) {
     runDomRefreshPass,
     getLastActionMessageText,
     applyAlertsPayload,
+    rebuildAlertDataIndex,
+    resolveChildState,
+    resolveGroupState,
+    resolveChildHasUserComment,
     rebuildGrafanaQueryIndex,
     refreshRuleGraphDefinitions,
     ruleGraphResolver,
@@ -359,6 +363,7 @@ async function runBrowserAssertions(client) {
   const actionSource = fs.readFileSync(path.join(root, 'src/bosun/action-templates.js'), 'utf8');
   const needAckBaselineSource = fs.readFileSync(path.join(root, 'src/bosun/needack-baseline.js'), 'utf8');
   const singleAlertAgeSource = fs.readFileSync(path.join(root, 'src/bosun/single-alert-age.js'), 'utf8');
+  const alertsDataSource = fs.readFileSync(path.join(root, 'src/bosun/alerts-data.js'), 'utf8');
   const pageUtilsSource = fs.readFileSync(path.join(root, 'src/bosun/page-utils.js'), 'utf8');
   const stylesSource = fs.readFileSync(path.join(root, 'src/shared/styles.js'), 'utf8');
   const handoffSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-handoff.js'), 'utf8');
@@ -1858,6 +1863,144 @@ async function runBrowserAssertions(client) {
     uniqueButtonCount: 1
   });
 
+  const strongIdentityMismatchResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${alertsDataSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+
+    function childPanel(id, subject, ago) {
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      panel.setAttribute('ng-repeat', 'child in group.Children');
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      if (id) {
+        const idNode = document.createElement('span');
+        idNode.setAttribute('ng-show', 'state.Id');
+        idNode.textContent = '#' + id;
+        heading.appendChild(idNode);
+      }
+      if (subject) {
+        const subjectNode = document.createElement('span');
+        subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+        subjectNode.textContent = subject;
+        heading.appendChild(subjectNode);
+      }
+      if (ago) {
+        const agoNode = document.createElement('span');
+        agoNode.setAttribute('ts-since', 'child.Ago');
+        agoNode.textContent = ago;
+        heading.appendChild(agoNode);
+      }
+      panel.appendChild(heading);
+      return panel;
+    }
+
+    function groupPanel(subject, children) {
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'group.Subject');
+      subjectNode.textContent = subject;
+      heading.appendChild(subjectNode);
+      panel.appendChild(heading);
+      for (const child of children || []) panel.appendChild(child);
+      return panel;
+    }
+
+    const note = { Type: 'Note', User: 'operator', Message: 'synthetic note' };
+    function resolve(groups, panel) {
+      hooks.rebuildAlertDataIndex({ Groups: { NeedAck: groups } });
+      return hooks.resolveGroupState(panel);
+    }
+
+    const idMismatch = resolve([{
+      Subject: 'Same Subject',
+      Children: [{ Subject: 'same child', Ago: '1m', State: { Id: 101, Actions: [note] } }]
+    }], groupPanel('Same Subject', [childPanel('202', 'same child', '1m')]));
+
+    const keyMismatch = resolve([{
+      Subject: 'Key Subject',
+      Children: [{ Subject: 'snapshot child', Ago: '1m', State: { Actions: [note] } }]
+    }], groupPanel('Key Subject', [childPanel('', 'different child', '1m')]));
+
+    const knownGroupMismatch = resolve([{
+      Subject: 'Known Group',
+      Children: [{ Subject: 'snapshot child', Ago: '1m', State: { Id: 301, Actions: [note] } }]
+    }], groupPanel('Known Group', []));
+
+    const subjectOnlyFallback = resolve([{
+      Subject: 'Subject Only',
+      Children: [{ State: { Actions: [note] } }]
+    }], groupPanel('Subject Only', []));
+
+    const ambiguousSubject = resolve([
+      {
+        Subject: 'Repeated Subject',
+        Children: [{ Subject: 'first', Ago: '1m', State: { Id: 401, Actions: [note] } }]
+      },
+      {
+        Subject: 'Repeated Subject',
+        Children: [{ Subject: 'second', Ago: '1m', State: { Id: 402, Actions: [] } }]
+      }
+    ], groupPanel('Repeated Subject', [childPanel('499', 'other', '1m')]));
+
+    const exactStrongIdentity = resolve([{
+      Subject: 'Exact Subject',
+      Children: [{ Subject: 'exact child', Ago: '1m', State: { Id: 501, Actions: [note] } }]
+    }], groupPanel('Exact Subject', [childPanel('501', 'exact child', '1m')]));
+
+    const staleIconPanel = groupPanel('Stale Icon Subject', [
+      childPanel('602', 'stale child', '1m')
+    ]);
+    const staleIcon = document.createElement('span');
+    staleIcon.className = 'bosun-has-note-icon';
+    staleIconPanel.querySelector('[ng-repeat="child in group.Children"] .panel-heading')
+      .appendChild(staleIcon);
+    const staleIconStrongMismatch = resolve([{
+      Subject: 'Stale Icon Subject',
+      Children: [{ Subject: 'stale child', Ago: '1m', State: { Id: 601, Actions: [note] } }]
+    }], staleIconPanel);
+
+    const duplicateDerivedKey = resolve([{
+      Subject: 'Duplicate Key Subject',
+      Children: [
+        { Subject: 'same key', Ago: '1m', State: { Actions: [] } },
+        { Subject: 'same key', Ago: '1m', State: { Actions: [note] } }
+      ]
+    }], groupPanel('Duplicate Key Subject', [childPanel('', 'same key', '1m')]));
+
+    return {
+      idMismatch,
+      keyMismatch,
+      knownGroupMismatch,
+      subjectOnlyFallback,
+      ambiguousSubject,
+      exactStrongIdentity,
+      staleIconStrongMismatch,
+      duplicateDerivedKey
+    };
+  })()`);
+  assert.deepStrictEqual(strongIdentityMismatchResult, {
+    idMismatch: 'none',
+    keyMismatch: 'none',
+    knownGroupMismatch: 'none',
+    subjectOnlyFallback: 'note',
+    ambiguousSubject: 'none',
+    exactStrongIdentity: 'note',
+    staleIconStrongMismatch: 'none',
+    duplicateDerivedKey: 'none'
+  }, 'Group marker resolution fell back to Subject after a strong identity mismatch');
+
   const usageGraphResolverResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
@@ -2715,6 +2858,13 @@ async function runBrowserAssertions(client) {
     history.replaceState({}, '', '/');
     hooks.handleRouteChange();
     const markerAfterDashboardReturn = hooks.markerState();
+    sessionStorage.setItem('bosunAlertMarkerCacheV1', JSON.stringify({
+      version: 2,
+      savedAt: Date.now(),
+      maps: { childHasNoteById: [['cached-alert', true]] }
+    }));
+    hooks.clearMarkerState();
+    const incompleteMarkerCache = hooks.restoreMarkerCache();
     return {
       noteSemantics,
       noteRemovedAfterTransition: !childTitle.querySelector('.bosun-has-note-icon'),
@@ -2743,7 +2893,8 @@ async function runBrowserAssertions(client) {
       refreshIntervals: hooks.refreshIntervals,
       restoredMarker,
       markerOnActionRoute,
-      markerAfterDashboardReturn
+      markerAfterDashboardReturn,
+      incompleteMarkerCache
     };
   })()`);
 
@@ -2805,6 +2956,11 @@ async function runBrowserAssertions(client) {
   });
   assert.deepStrictEqual(accessibilityResult.markerOnActionRoute, { ready: false, note: false });
   assert.deepStrictEqual(accessibilityResult.markerAfterDashboardReturn, { ready: true, note: true });
+  assert.deepStrictEqual(
+    accessibilityResult.incompleteMarkerCache,
+    { restored: false, note: false, warning: false },
+    'Incomplete marker cache schema was restored instead of being rejected atomically'
+  );
 
   const grafanaEditorBindingResult = await evaluate(client, `(async () => {
     const channelToken = 'browser-ambiguous-editor-token';
