@@ -16,6 +16,7 @@
     'sum', 'avg', 'min', 'max', 'count', 'group',
     'stddev', 'stdvar', 'topk', 'bottomk', 'quantile', 'count_values'
   ]);
+  const OUTPUT_LABEL_FUNCTIONS = new Set(['label_replace', 'label_join']);
   const MAX_PROM_QUERY_LENGTH = 16 * 1024;
   const MAX_EXPR_LENGTH = 64 * 1024;
   const MAX_TAG_SOURCE_LENGTH = 8 * 1024;
@@ -477,6 +478,171 @@
     return query.slice(index + 1, end).toLowerCase();
   }
 
+  function skipPromTrivia(source, startIndex, endIndex = source.length) {
+    let index = startIndex;
+    while (index < endIndex) {
+      if (/\s/.test(source[index])) {
+        index += 1;
+        continue;
+      }
+      if (source[index] !== '#') break;
+      while (index < endIndex && source[index] !== '\n') index += 1;
+    }
+    return index;
+  }
+
+  function parseFunctionArguments(source, openIndex) {
+    const argumentsFound = [];
+    const delimiters = ['('];
+    let argumentStart = openIndex + 1;
+    let quote = '';
+    let escaped = false;
+    let comment = false;
+
+    for (let index = openIndex + 1; index < source.length; index += 1) {
+      const char = source[index];
+      if (comment) {
+        if (char === '\n') comment = false;
+        continue;
+      }
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (quote) {
+        if (char === '\\' && quote !== '`') escaped = true;
+        else if (char === quote) quote = '';
+        continue;
+      }
+      if (char === '#') {
+        comment = true;
+        continue;
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char;
+        continue;
+      }
+      if (char === '(' || char === '[' || char === '{') {
+        delimiters.push(char);
+        continue;
+      }
+      if (char === ')' || char === ']' || char === '}') {
+        const expected = char === ')' ? '(' : char === ']' ? '[' : '{';
+        if (delimiters[delimiters.length - 1] !== expected) return null;
+        if (char === ')' && delimiters.length === 1) {
+          argumentsFound.push({ start: argumentStart, end: index });
+          return argumentsFound;
+        }
+        delimiters.pop();
+        continue;
+      }
+      if (char === ',' && delimiters.length === 1) {
+        argumentsFound.push({ start: argumentStart, end: index });
+        argumentStart = index + 1;
+      }
+    }
+
+    return null;
+  }
+
+  function parseDestinationLabel(source, argument) {
+    if (!argument) return '';
+    let index = skipPromTrivia(source, argument.start, argument.end);
+    const quote = source[index];
+    if (quote !== '"' && quote !== "'" && quote !== '`') return '';
+
+    const valueStart = index + 1;
+    let escaped = false;
+    let hasEscape = false;
+    index += 1;
+    for (; index < argument.end; index += 1) {
+      const char = source[index];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\' && quote !== '`') {
+        escaped = true;
+        hasEscape = true;
+        continue;
+      }
+      if (char !== quote) continue;
+
+      const value = source.slice(valueStart, index);
+      const tail = skipPromTrivia(source, index + 1, argument.end);
+      if (
+        tail !== argument.end ||
+        hasEscape ||
+        !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)
+      ) return '';
+      return value;
+    }
+
+    return '';
+  }
+
+  function collectOutputDerivedLabels(source) {
+    const labels = new Set();
+    let index = 0;
+    let quote = '';
+    let escaped = false;
+    let comment = false;
+
+    while (index < source.length) {
+      const char = source[index];
+      if (comment) {
+        if (char === '\n') comment = false;
+        index += 1;
+        continue;
+      }
+      if (escaped) {
+        escaped = false;
+        index += 1;
+        continue;
+      }
+      if (quote) {
+        if (char === '\\' && quote !== '`') escaped = true;
+        else if (char === quote) quote = '';
+        index += 1;
+        continue;
+      }
+      if (char === '#') {
+        comment = true;
+        index += 1;
+        continue;
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char;
+        index += 1;
+        continue;
+      }
+      if (!isIdentifierStart(char)) {
+        index += 1;
+        continue;
+      }
+
+      const start = index;
+      index += 1;
+      while (index < source.length && isIdentifierPart(source[index])) index += 1;
+      const identifier = source.slice(start, index).toLowerCase();
+      const previousChar = source[start - 1] || '';
+      if (
+        !OUTPUT_LABEL_FUNCTIONS.has(identifier) ||
+        previousChar === '$' ||
+        previousChar === '.'
+      ) continue;
+
+      const openIndex = skipPromTrivia(source, index);
+      if (source[openIndex] !== '(') continue;
+      const argumentsFound = parseFunctionArguments(source, openIndex);
+      const destinationLabel = parseDestinationLabel(source, argumentsFound?.[1]);
+      if (!destinationLabel) return null;
+      labels.add(destinationLabel);
+    }
+
+    return labels;
+  }
+
   function applyAlertTagsToPromQuery(query, rawTags, alertKey = '') {
     const source = typeof query === 'string' ? query : '';
     if (
@@ -488,6 +654,11 @@
     if (!parsedTags.valid) return '';
     const tags = parsedTags.tags;
     if (!tags.length) return source;
+    const outputDerivedLabels = collectOutputDerivedLabels(source);
+    if (
+      !outputDerivedLabels ||
+      tags.some((tag) => outputDerivedLabels.has(tag.name))
+    ) return '';
 
     let result = '';
     let index = 0;
