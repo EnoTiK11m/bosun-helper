@@ -578,25 +578,104 @@
     return -1;
   }
 
+  function getGroupingLabelSignature(source) {
+    const labels = String(source || '')
+      .split(',')
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (
+      !labels.length ||
+      labels.some((label) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(label)) ||
+      new Set(labels).size !== labels.length
+    ) return null;
+    return `labels:${labels.slice().sort().join(',')}`;
+  }
+
+  function getVisibleAggregationBody(source) {
+    let result = '';
+    let quote = '';
+    let escaped = false;
+    const delimiters = [];
+    for (const char of String(source || '')) {
+      if (escaped) {
+        escaped = false;
+        result += ' ';
+        continue;
+      }
+      if (quote) {
+        if (char === '\\') escaped = true;
+        else if (char === quote) quote = '';
+        result += ' ';
+        continue;
+      }
+      if (char === '"' || char === "'" || char === '`') {
+        quote = char;
+        result += ' ';
+        continue;
+      }
+      if (char === '{' || char === '[') {
+        delimiters.push(char);
+        result += ' ';
+        continue;
+      }
+      if (char === '}' || char === ']') {
+        const expected = char === '}' ? '{' : '[';
+        if (delimiters.pop() !== expected) return '';
+        result += ' ';
+        continue;
+      }
+      result += delimiters.length ? ' ' : char;
+    }
+    return quote || delimiters.length ? '' : result;
+  }
+
+  function hasConservativeAggregationBody(source) {
+    const visible = getVisibleAggregationBody(source);
+    if (!visible.trim()) return false;
+    if (/[#;@]/.test(visible)) return false;
+    if (/(?:==|!=|<=|>=|[+\-*/%^<>])/.test(visible)) return false;
+    if (/\b(?:and|or|unless|atan2|by|without|on|ignoring|group_left|group_right|bool)\b/i.test(visible)) {
+      return false;
+    }
+    for (const match of visible.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      if (SAFE_AGGREGATIONS.has(match[1].toLowerCase())) return false;
+    }
+    return true;
+  }
+
   function getQueryOutputSignature(query) {
     const source = String(query || '').trim();
     if (!source) return null;
-    const grouped = source.match(/^([A-Za-z_][A-Za-z0-9_]*)\s+by\s*\(([^)]*)\)\s*\(/i);
-    if (grouped && SAFE_AGGREGATIONS.has(grouped[1].toLowerCase())) {
-      const labels = grouped[2].split(',').map((label) => label.trim()).filter(Boolean);
-      if (
-        !labels.length ||
-        labels.some((label) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(label)) ||
-        new Set(labels).size !== labels.length
-      ) return null;
-      const openIndex = grouped[0].lastIndexOf('(');
-      if (findMatchingParenthesis(source, openIndex) !== source.length - 1) return null;
-      return null;
+    const visibleSource = getVisibleAggregationBody(source);
+    if (!visibleSource || /\bwithout\s*\(/i.test(visibleSource)) return null;
+    const prefixGrouped = source.match(
+      /^([A-Za-z_][A-Za-z0-9_]*)\s+(by|without)\s*\(([^)]*)\)\s*\(/i
+    );
+    if (prefixGrouped && SAFE_AGGREGATIONS.has(prefixGrouped[1].toLowerCase())) {
+      if (prefixGrouped[2].toLowerCase() !== 'by') return null;
+      const signature = getGroupingLabelSignature(prefixGrouped[3]);
+      if (!signature) return null;
+      const openIndex = prefixGrouped[0].lastIndexOf('(');
+      const closeIndex = findMatchingParenthesis(source, openIndex);
+      if (closeIndex !== source.length - 1) return null;
+      const body = source.slice(openIndex + 1, closeIndex);
+      return hasConservativeAggregationBody(body) ? signature : null;
     }
-    const ungrouped = source.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
-    if (ungrouped && SAFE_AGGREGATIONS.has(ungrouped[1].toLowerCase())) {
-      const openIndex = ungrouped[0].lastIndexOf('(');
-      if (findMatchingParenthesis(source, openIndex) === source.length - 1) return 'labels:';
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s+(?:by|without)\b/i.test(source)) return null;
+
+    const aggregateCall = source.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*\(/);
+    if (aggregateCall && SAFE_AGGREGATIONS.has(aggregateCall[1].toLowerCase())) {
+      const openIndex = aggregateCall[0].lastIndexOf('(');
+      const closeIndex = findMatchingParenthesis(source, openIndex);
+      if (closeIndex < 0) return null;
+      const suffix = source.slice(closeIndex + 1).trim();
+      if (!suffix) return 'labels:';
+      const postfixGrouped = suffix.match(/^by\s*\(([^)]*)\)$/i);
+      if (!postfixGrouped) return null;
+      const signature = getGroupingLabelSignature(postfixGrouped[1]);
+      if (!signature) return null;
+      const body = source.slice(openIndex + 1, closeIndex);
+      return hasConservativeAggregationBody(body) ? signature : null;
     }
     return `exact:${source}`;
   }
