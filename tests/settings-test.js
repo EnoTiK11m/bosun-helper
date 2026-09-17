@@ -292,6 +292,53 @@ async function main() {
   assert.strictEqual(delayedStore.get('features.copyButtons'), false, 'stale initial get rolled back a live leaf');
   assert.strictEqual(delayedStore.get('preferences.showSilenced'), true, 'live leaf caused an unrelated persisted leaf to be lost');
 
+  const migrationReadRaceHarness = createStorageHarness({
+    bosunShowSilenced: true,
+    'bosunSettingsV1:features.copyButtons': true
+  });
+  const originalMigrationReadRaceGet = migrationReadRaceHarness.storage.get.bind(migrationReadRaceHarness.storage);
+  let migrationReadRaceGetCount = 0;
+  let releaseMigrationVerificationRead = null;
+  migrationReadRaceHarness.storage.get = (keys, callback) => {
+    migrationReadRaceGetCount += 1;
+    if (migrationReadRaceGetCount !== 2) {
+      originalMigrationReadRaceGet(keys, callback);
+      return;
+    }
+    const captured = {};
+    for (const key of keys) {
+      if (Object.prototype.hasOwnProperty.call(migrationReadRaceHarness.data, key)) {
+        captured[key] = migrationReadRaceHarness.data[key];
+      }
+    }
+    releaseMigrationVerificationRead = () => callback(captured);
+  };
+  const migrationReadRaceStore = api.createSettingsStore({
+    storage: migrationReadRaceHarness.storage,
+    storageChanges: migrationReadRaceHarness.onChanged,
+    getLastError: () => null
+  });
+  const migrationReadRaceStart = migrationReadRaceStore.start();
+  while (!releaseMigrationVerificationRead) await Promise.resolve();
+  migrationReadRaceHarness.data.bosunShowSilenced = false;
+  migrationReadRaceHarness.data['bosunSettingsV1:features.copyButtons'] = false;
+  migrationReadRaceHarness.emit({
+    bosunShowSilenced: { oldValue: true, newValue: false },
+    'bosunSettingsV1:features.copyButtons': { oldValue: true, newValue: false }
+  });
+  releaseMigrationVerificationRead();
+  await migrationReadRaceStart;
+  assert.strictEqual(
+    migrationReadRaceStore.get('preferences.showSilenced'),
+    false,
+    'stale migration verification read rolled back a newer migrating leaf'
+  );
+  assert.strictEqual(
+    migrationReadRaceStore.get('features.copyButtons'),
+    false,
+    'stale migration verification read rolled back a newer non-migrating leaf'
+  );
+
   const futureRaceHarness = createStorageHarness({ [api.VERSION_KEY]: 1 });
   let releaseFutureRaceGet = null;
   futureRaceHarness.storage.get = (keys, callback) => {

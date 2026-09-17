@@ -440,6 +440,7 @@
         const nextChannel = new globalThis.BroadcastChannel(`bosun-helper-alerts:${token}`);
         nextChannel.addEventListener('message', onChannelMessage);
         channel = nextChannel;
+        currentChannelToken = token;
         fallbackMode = false;
         role = 'starting';
         term = '';

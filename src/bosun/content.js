@@ -3756,10 +3756,10 @@
     installStorageChangeTracking();
     restoreNeedAckSoundBaselineFromSession();
     restoreAlertMarkerCacheFromSession();
-    window.addEventListener('pagehide', () => {
+    window.addEventListener('pagehide', (event) => {
       ruleGraphLifecycleGeneration += 1;
       ruleGraphResolver?.stop?.();
-      settingsUi?.destroy?.();
+      if (event?.persisted !== true) settingsUi?.destroy?.();
       if (alertMarkerCachePersistTimer) {
         clearTimeout(alertMarkerCachePersistTimer);
         alertMarkerCachePersistTimer = null;

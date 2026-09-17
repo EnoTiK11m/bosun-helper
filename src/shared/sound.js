@@ -18,6 +18,8 @@
     let softChimeAudio = null;
     let unlockTrackingHandler = null;
     let retryTrackingHandler = null;
+    let unlockInFlight = null;
+    let notificationPlayInFlight = null;
     let lifecycleGeneration = 0;
     const crossTabDedupMs = 2000;
 
@@ -37,13 +39,18 @@
       }
     }
 
-    function unlockAudioOnce() {
-      if (audioUnlocked) return;
-      const generation = lifecycleGeneration;
+    function finishUnlockAttempt(audio, succeeded) {
+      try { audio.pause(); } catch (_) {}
+      try { audio.currentTime = 0; } catch (_) {}
+      try { audio.muted = false; } catch (_) {}
+      return succeeded;
+    }
+
+    function performAudioUnlock(generation) {
       ensureAudioObjects();
 
       const candidates = [alertChimeAudio, softChimeAudio].filter(Boolean);
-      if (!candidates.length) return;
+      if (!candidates.length) return Promise.resolve(false);
 
       const unlockPromises = candidates.map((audio) => {
         try {
@@ -52,26 +59,42 @@
           const playPromise = audio.play();
           if (playPromise && typeof playPromise.then === 'function') {
             return playPromise
-              .then(() => {
-                audio.pause();
-                audio.currentTime = 0;
-                audio.muted = false;
-                return true;
-              })
-              .catch(() => false);
+              .then(
+                () => finishUnlockAttempt(audio, true),
+                () => finishUnlockAttempt(audio, false)
+              );
           }
-          audio.pause();
-          audio.currentTime = 0;
-          audio.muted = false;
-          return Promise.resolve(true);
-        } catch (_) {}
-        return Promise.resolve(false);
+          return Promise.resolve(finishUnlockAttempt(audio, true));
+        } catch (_) {
+          return Promise.resolve(finishUnlockAttempt(audio, false));
+        }
       });
 
-      Promise.all(unlockPromises).then((results) => {
-        if (generation !== lifecycleGeneration) return;
+      return Promise.all(unlockPromises).then((results) => {
+        if (generation !== lifecycleGeneration) return false;
         audioUnlocked = results.some(Boolean);
+        return audioUnlocked;
       });
+    }
+
+    function unlockAudioOnce() {
+      if (audioUnlocked) return Promise.resolve(true);
+      if (unlockInFlight) return unlockInFlight;
+      const generation = lifecycleGeneration;
+      const precedingNotification = notificationPlayInFlight?.promise || null;
+      const operation = precedingNotification
+        ? precedingNotification.then(() => {
+            if (generation !== lifecycleGeneration) return false;
+            if (audioUnlocked) return true;
+            return performAudioUnlock(generation);
+          })
+        : performAudioUnlock(generation);
+      unlockInFlight = operation;
+      operation.then(
+        () => { if (unlockInFlight === operation) unlockInFlight = null; },
+        () => { if (unlockInFlight === operation) unlockInFlight = null; }
+      );
+      return operation;
     }
 
     function installAudioUnlockTracking() {
@@ -157,14 +180,11 @@
       }
     }
 
-    function playNeedAckChimeUnlocked(kind) {
-      if (!getEnabled()) return;
-      const generation = lifecycleGeneration;
-
+    function playNeedAckChimeNow(kind, generation) {
       const now = Date.now();
       if (now - lastNeedAckChimeAt < 450) {
         reportDiagnostics('sound-throttled', `kind=${kind}`);
-        return;
+        return Promise.resolve(false);
       }
       lastNeedAckChimeAt = now;
 
@@ -172,22 +192,32 @@
 
       const file = kind === 'alert' ? alertFile : softFile;
       const audio = kind === 'alert' ? alertChimeAudio : softChimeAudio;
-      if (!audio) return;
+      if (!audio) return Promise.resolve(false);
 
       try {
         audio.pause();
         audio.currentTime = 0;
+        audio.muted = false;
 
         const playPromise = audio.play();
         if (playPromise && typeof playPromise.then === 'function') {
-          return playPromise
+          let operation = null;
+          operation = playPromise
             .then(() => {
-              if (generation !== lifecycleGeneration) return false;
+              if (
+                generation !== lifecycleGeneration ||
+                notificationPlayInFlight?.promise !== operation ||
+                audio.muted === true
+              ) return false;
+              audioUnlocked = true;
               reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
               return true;
             })
             .catch((err) => {
-              if (generation !== lifecycleGeneration) return false;
+              if (
+                generation !== lifecycleGeneration ||
+                notificationPlayInFlight?.promise !== operation
+              ) return false;
               const reason = err?.name || err?.message || 'play-error';
               if (!isAutoplayBlockReason(reason)) {
                 console.warn('[Bosun plugin] Sound play blocked or failed:', formatPlayError(err), err);
@@ -197,7 +227,18 @@
               reportDiagnostics('sound-blocked', `kind=${kind}, reason=${reason}`);
               return false;
             });
+          notificationPlayInFlight = { audio, promise: operation };
+          operation.then(
+            () => {
+              if (notificationPlayInFlight?.promise === operation) notificationPlayInFlight = null;
+            },
+            () => {
+              if (notificationPlayInFlight?.promise === operation) notificationPlayInFlight = null;
+            }
+          );
+          return operation;
         }
+        audioUnlocked = true;
         reportDiagnostics('sound-played', `kind=${kind}, file=${file}`);
         return Promise.resolve(true);
       } catch (err) {
@@ -211,6 +252,19 @@
         reportDiagnostics('sound-blocked', `kind=${kind}, reason=${reason}`);
         return Promise.resolve(false);
       }
+    }
+
+    function playNeedAckChimeUnlocked(kind) {
+      if (!getEnabled()) return;
+      const generation = lifecycleGeneration;
+      const pendingUnlock = unlockInFlight;
+      if (pendingUnlock) {
+        return pendingUnlock.then(() => {
+          if (generation !== lifecycleGeneration || !getEnabled()) return false;
+          return playNeedAckChimeNow(kind, generation);
+        });
+      }
+      return playNeedAckChimeNow(kind, generation);
     }
 
     function playNeedAckChime(kind) {
@@ -256,8 +310,11 @@
       }
       pendingNeedAckRetryAttached = false;
       pendingNeedAckChimeKind = null;
+      unlockInFlight = null;
+      notificationPlayInFlight = null;
       for (const audio of [alertChimeAudio, softChimeAudio]) {
         try { audio?.pause?.(); } catch (_) {}
+        try { if (audio) audio.muted = false; } catch (_) {}
       }
       alertChimeAudio = null;
       softChimeAudio = null;
