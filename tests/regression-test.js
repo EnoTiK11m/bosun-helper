@@ -371,6 +371,141 @@ async function testAlertsDataBoundsAndAbort() {
   assert.strictEqual(fetchCalls, 3, 'Lifecycle abort must not be retried');
 }
 
+function createAlertsDataIndexApi() {
+  const context = {
+    console,
+    globalThis: null,
+    Date,
+    Math,
+    Promise,
+    Error,
+    Number,
+    String,
+    Boolean,
+    Object,
+    Array,
+    Map,
+    Set,
+    JSON
+  };
+  context.globalThis = context;
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/alerts-data.js'), 'utf8'), context, {
+    filename: 'src/bosun/alerts-data.js'
+  });
+  return context.BosunSilenceHiderAlertsData.createAlertsData({ oldNoNoteMinutes: 60 });
+}
+
+function buildSyntheticAlertIndex(api, groups) {
+  return api.rebuildAlertDataIndex({ Groups: { NeedAck: groups } }, {
+    buildChildMarkerKeyFromData(child) {
+      return typeof child?.MarkerKey === 'string' ? child.MarkerKey : null;
+    },
+    buildGroupMarkerKeyFromData(group) {
+      return typeof group?.MarkerKey === 'string' ? group.MarkerKey : null;
+    },
+    normalizeNeedAckChildren(value) {
+      return Array.isArray(value) ? value : [];
+    }
+  });
+}
+
+function indexedChildState(index, identityType, identity) {
+  const suffix = identityType === 'id' ? 'ById' : 'ByKey';
+  return {
+    note: index[`childHasNote${suffix}`].get(identity) === true,
+    oldNoNote: index[`childOldNoNote${suffix}`].get(identity) === true,
+    userComment: index[`childHasUserComment${suffix}`].get(identity) === true
+  };
+}
+
+function createSyntheticIndexedChild({ id, markerKey, note = false }) {
+  return {
+    MarkerKey: markerKey,
+    Ago: '2020-01-01T00:00:00.000Z',
+    State: {
+      ...(id == null ? {} : { Id: id }),
+      Actions: note
+        ? [{ Type: 'Note', User: 'operator', Message: 'synthetic investigation note' }]
+        : []
+    }
+  };
+}
+
+function testAlertsDataRejectsAmbiguousChildIdentities() {
+  const api = createAlertsDataIndexApi();
+  const noState = { note: false, oldNoNote: false, userComment: false };
+
+  for (const children of [
+    [
+      createSyntheticIndexedChild({ id: 41, markerKey: 'key:first' }),
+      createSyntheticIndexedChild({ id: 41, markerKey: 'key:second', note: true })
+    ],
+    [
+      createSyntheticIndexedChild({ id: 41, markerKey: 'key:second', note: true }),
+      createSyntheticIndexedChild({ id: 41, markerKey: 'key:first' })
+    ]
+  ]) {
+    const index = buildSyntheticAlertIndex(api, [{ Subject: 'same parent', Children: children }]);
+    assert.deepStrictEqual(
+      indexedChildState(index, 'id', '41'),
+      noState,
+      'A duplicate child ID transferred state from one alert entity to another'
+    );
+  }
+
+  for (const children of [
+    [
+      createSyntheticIndexedChild({ markerKey: 'key:shared' }),
+      createSyntheticIndexedChild({ markerKey: 'key:shared', note: true })
+    ],
+    [
+      createSyntheticIndexedChild({ markerKey: 'key:shared', note: true }),
+      createSyntheticIndexedChild({ markerKey: 'key:shared' })
+    ]
+  ]) {
+    const index = buildSyntheticAlertIndex(api, [{ Subject: 'same parent', Children: children }]);
+    assert.deepStrictEqual(
+      indexedChildState(index, 'key', 'key:shared'),
+      noState,
+      'A duplicate child key transferred state from one alert entity to another'
+    );
+  }
+
+  const crossParent = buildSyntheticAlertIndex(api, [
+    {
+      Subject: 'parent A',
+      Children: [createSyntheticIndexedChild({ id: 61, markerKey: 'key:parent-a' })]
+    },
+    {
+      Subject: 'parent B',
+      Children: [createSyntheticIndexedChild({ id: 61, markerKey: 'key:parent-b', note: true })]
+    }
+  ]);
+  assert.deepStrictEqual(
+    indexedChildState(crossParent, 'id', '61'),
+    noState,
+    'The same child ID under different parent identities was treated as unambiguous'
+  );
+
+  const unique = buildSyntheticAlertIndex(api, [{
+    Subject: 'unique parent',
+    Children: [
+      createSyntheticIndexedChild({ id: 71, markerKey: 'key:unique-id', note: true }),
+      createSyntheticIndexedChild({ markerKey: 'key:unique-key', note: true })
+    ]
+  }]);
+  assert.deepStrictEqual(indexedChildState(unique, 'id', '71'), {
+    note: true,
+    oldNoNote: false,
+    userComment: true
+  }, 'A unique child ID no longer resolved its state');
+  assert.deepStrictEqual(indexedChildState(unique, 'key', 'key:unique-key'), {
+    note: true,
+    oldNoNote: false,
+    userComment: true
+  }, 'A unique child key no longer resolved its state');
+}
+
 async function testRefreshCoordinatorLeaderFailoverAndStop() {
   const clock = createFakeClock();
   const shared = createSharedCoordination(clock);
@@ -567,6 +702,119 @@ async function testNewAlertTrackerPersistsUntilNote() {
   await restored.reconcile(reconciledPayload);
   assert.strictEqual(changes.length, notificationCount, 'Unchanged tracker state was announced again');
   restored.destroy();
+}
+
+async function testNewAlertTrackerUsesStructuredLastActionType() {
+  const storageData = {};
+  const context = {
+    console,
+    globalThis: null,
+    chrome: { runtime: { lastError: null } },
+    Date,
+    Math,
+    JSON,
+    Map,
+    Set,
+    Promise,
+    Error,
+    Number,
+    String,
+    Boolean,
+    Object,
+    Array
+  };
+  context.globalThis = context;
+  for (const file of ['src/bosun/alerts-data.js', 'src/bosun/new-alert-tracker.js']) {
+    vm.runInNewContext(fs.readFileSync(path.join(root, file), 'utf8'), context, { filename: file });
+  }
+  const storage = {
+    get(keys, callback) {
+      const result = {};
+      for (const key of keys || []) result[key] = storageData[key];
+      callback(result);
+    },
+    set(values, callback) { Object.assign(storageData, values); callback?.(); }
+  };
+  const alertsApi = context.BosunSilenceHiderAlertsData.createAlertsData({ oldNoNoteMinutes: 60 });
+  const tracker = context.BosunHelperNewAlertTracker.createNewAlertTracker({
+    storageKey: 'test-last-action-types',
+    getStorage: () => storage,
+    getLastError: () => null,
+    storageChanges: null,
+    collectCurrentIdsAndSeverity(payload) {
+      const currentIds = new Set(payload.currentIds);
+      return {
+        currentIds,
+        idToSeverity: new Map(Array.from(currentIds, (id) => [id, 'warning']))
+      };
+    },
+    normalizeChildren: (value) => Array.isArray(value) ? value : [],
+    getChildStableKey: (child) => `id:${child.State.Id}`,
+    getGroupStableKey: () => null,
+    hasNoteFromActions: alertsApi.hasNoteFromActions
+  });
+  await tracker.start();
+  const ids = [
+    'id:ack-string',
+    'id:ack-object',
+    'id:close-string',
+    'id:unknown-string',
+    'id:note-string',
+    'id:note-object'
+  ];
+  await tracker.add(ids, new Map(ids.map((id) => [id, 'warning'])));
+  await tracker.reconcile({
+    currentIds: ids,
+    Groups: {
+      NeedAck: [{
+        Children: [
+          {
+            State: {
+              Id: 'ack-string',
+              LastAction: 'Ack by operator at (2026-09-17 10:00:00): investigate\nNote: copied from runbook'
+            }
+          },
+          {
+            State: {
+              Id: 'ack-object',
+              LastAction: { Type: 'Ack', User: 'operator', Message: 'investigate\nNote: copied from runbook' }
+            }
+          },
+          {
+            State: {
+              Id: 'close-string',
+              LastAction: 'Close by operator at (2026-09-17 10:00:00): resolved\nNote: final context'
+            }
+          },
+          {
+            State: {
+              Id: 'unknown-string',
+              LastAction: 'Arbitrary message body with Note: incidental text'
+            }
+          },
+          {
+            State: {
+              Id: 'note-string',
+              LastAction: 'Note by operator at (2026-09-17 10:00:00): real note'
+            }
+          },
+          {
+            State: {
+              Id: 'note-object',
+              LastAction: { Type: 'Note', User: 'operator', Message: 'real structured note' }
+            }
+          }
+        ]
+      }]
+    }
+  });
+
+  assert.deepStrictEqual(
+    storageData['test-last-action-types'].alerts.map((alert) => alert.id).sort(),
+    ['id:ack-object', 'id:ack-string', 'id:close-string', 'id:unknown-string'],
+    'Tracker inferred Note from message text instead of the LastAction type'
+  );
+  tracker.destroy();
 }
 
 async function testNewAlertTrackerRestoreRaceAndSaveRetry() {
@@ -1889,9 +2137,11 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   await testHiddenFollowerRejectsSnapshotFromExpiredLeader();
   await testCoordinatorStopAbortsActiveFetch();
   await testAlertsDataBoundsAndAbort();
+  testAlertsDataRejectsAmbiguousChildIdentities();
   await testRefreshCoordinatorResumesFromBfcache();
   await testVisibleFollowerImmediatelyTakesLeadership();
   await testNewAlertTrackerPersistsUntilNote();
+  await testNewAlertTrackerUsesStructuredLastActionType();
   await testNewAlertTrackerRestoreRaceAndSaveRetry();
   await testGrafanaRetriesSafePreMutationFailureForSameOperation();
   await testGrafanaMonacoUsesVisibleEditorModelBinding();

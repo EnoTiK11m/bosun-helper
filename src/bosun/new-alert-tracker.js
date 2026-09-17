@@ -160,11 +160,7 @@
     }
 
     function entityHasNote(entity) {
-      const actions = getEntityActions(entity);
-      if (hasNoteFromActions(actions)) return true;
-      return actions.some((action) => {
-        return typeof action === 'string' && /\bNote\b[\s\S]*?:\s*\S/i.test(action);
-      });
+      return hasNoteFromActions(getEntityActions(entity));
     }
 
     function collectIdsWithNote(payload) {
