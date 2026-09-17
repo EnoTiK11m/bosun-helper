@@ -384,7 +384,7 @@
     }
   }
 
-  async function applyQueryViaMonaco(query, run, deadlineAt) {
+  async function applyQueryViaMonaco(query, run, deadlineAt, operation) {
     const binding = findPrometheusMonacoBinding();
     const model = binding?.model;
     const textarea = binding?.textarea;
@@ -409,6 +409,7 @@
 
     let writtenVersion;
     try {
+      operation.mutationAttempted = true;
       model.setValue(query);
       const writtenState = readMonacoModelState(model);
       writtenVersion = writtenState?.version;
@@ -486,6 +487,7 @@
           terminal: true
         };
       }
+      operation.runAttempted = true;
       runButton.click();
 
       return {
@@ -519,7 +521,7 @@
     return { ok: false, reason: 'focused-editor-mutation-unsupported', terminal: true };
   }
 
-  async function applyQuery(query, run, deadlineAt) {
+  async function applyQuery(query, run, deadlineAt, operation) {
     if (!isBeforeDeadline(deadlineAt)) {
       return { ok: false, reason: 'operation-deadline-expired', terminal: true };
     }
@@ -533,6 +535,7 @@
       if (!isBeforeDeadline(deadlineAt)) {
         return { ok: false, reason: 'operation-deadline-expired', terminal: true };
       }
+      operation.mutationAttempted = true;
       view.dispatch({
         changes: { from: 0, to: oldText.length, insert: query },
         selection: { anchor: query.length },
@@ -561,6 +564,7 @@
           if (!isBeforeDeadline(deadlineAt)) {
             return { ok: false, reason: 'operation-deadline-expired', terminal: true };
           }
+          operation.runAttempted = true;
           runButton.click();
         }
         return {
@@ -577,7 +581,7 @@
       });
     }
 
-    const monacoResult = await applyQueryViaMonaco(query, run, deadlineAt);
+    const monacoResult = await applyQueryViaMonaco(query, run, deadlineAt, operation);
     if (monacoResult.ok) return monacoResult;
     if (monacoResult.terminal) return monacoResult;
 
@@ -620,27 +624,57 @@
       ) {
         return Promise.resolve({ ok: false, reason: 'operation-id-collision' });
       }
+      if (existing.status === 'retryable') return startOperationAttempt(existing);
       return existing.promise;
     }
     if (operations.size >= MAX_OPERATION_CACHE) {
       return Promise.resolve({ ok: false, reason: 'bridge-busy' });
     }
 
-    const operation = { query, run, deadlineAt, promise: null, finishedAt: 0 };
+    const operation = {
+      query,
+      run,
+      deadlineAt,
+      promise: null,
+      finishedAt: 0,
+      status: 'pending',
+      mutationAttempted: false,
+      runAttempted: false
+    };
+    operations.set(operationId, operation);
+    return startOperationAttempt(operation);
+  }
+
+  function startOperationAttempt(operation) {
+    operation.status = 'pending';
+    operation.finishedAt = 0;
     operation.promise = operationQueue
       .catch(() => undefined)
-      .then(() => applyQuery(query, run, deadlineAt))
+      .then(() => applyQuery(
+        operation.query,
+        operation.run,
+        operation.deadlineAt,
+        operation
+      ))
       .catch((err) => ({
         ok: false,
         reason: 'unexpected-apply-error',
         message: err?.message || String(err)
       }))
+      .then((result) => {
+        operation.status = (
+          result?.reason === 'editor-binding-not-found' &&
+          !operation.mutationAttempted &&
+          !operation.runAttempted &&
+          isBeforeDeadline(operation.deadlineAt)
+        ) ? 'retryable' : 'final';
+        return result;
+      })
       .finally(() => {
         operation.finishedAt = Date.now();
         pruneOperations();
       });
     operationQueue = operation.promise.then(() => undefined, () => undefined);
-    operations.set(operationId, operation);
     return operation.promise;
   }
 
