@@ -2094,6 +2094,109 @@ async function runBrowserAssertions(client) {
     buttonsAfterConflictingIdentity: 0
   });
 
+  const outputDerivedLabelResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    globalThis.BosunHelperGrafanaHandoff = {
+      createGrafanaHandoff() {
+        return { openQuery() {}, cleanupExpired() {}, destroy() {} };
+      }
+    };
+    const alertName = 'synthetic.output.derived.label';
+    const ruleConfig = ${JSON.stringify(`alert synthetic.output.derived.label {
+  $usage_graph = promras('''label_replace(up, "cluster", "prod", "job", ".*")''', '5m', '2h', '')
+  warn = $usage_graph > 0
+}`)};
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (url === '/api/config/running_hash') {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => JSON.stringify({ Hash: 'A02-H1' }),
+          json: async () => ({ Hash: 'A02-H1' })
+        };
+      }
+      if (url === '/api/config?hash=') {
+        return {
+          ok: true,
+          status: 200,
+          headers: { get() { return null; } },
+          text: async () => ruleConfig
+        };
+      }
+      throw new Error('unexpected synthetic URL: ' + url);
+    };
+
+    try {
+      ${promqlSource}
+      ${ruleGraphSource}
+      ${contentSource}
+      const hooks = globalThis.__BosunHelperBrowserTest;
+      const root = document.createElement('div');
+      root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      heading.setAttribute('ng-click', 'toggle()');
+      const idNode = document.createElement('span');
+      idNode.setAttribute('ng-show', 'state.Id');
+      idNode.textContent = '#702';
+      heading.appendChild(idNode);
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+      subjectNode.textContent = alertName + '{cluster=prod}';
+      heading.appendChild(subjectNode);
+      const agoNode = document.createElement('span');
+      agoNode.setAttribute('ts-since', 'child.Ago');
+      agoNode.textContent = '4m';
+      heading.appendChild(agoNode);
+      panel.appendChild(heading);
+      root.appendChild(panel);
+      document.body.appendChild(root);
+
+      const payload = { Groups: { NeedAck: [{
+        Subject: 'synthetic group',
+        Children: [{
+          Alert: alertName,
+          AlertKey: alertName + '{cluster=prod}',
+          Subject: alertName + '{cluster=prod}',
+          Ago: '4m',
+          State: {
+            Id: 702,
+            Alert: alertName,
+            AlertKey: alertName + '{cluster=prod}',
+            Tags: 'cluster=prod'
+          }
+        }]
+      }] } };
+      hooks.applyAlertsPayload(payload);
+      const sourceState = await hooks.ruleGraphResolver.refresh([alertName]);
+      const resolution = hooks.ruleGraphResolver.getResolution(alertName);
+      return {
+        sourceAvailable: sourceState.available,
+        resolvedQuery: resolution?.query || '',
+        grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
+        grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
+      };
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  })()`);
+  assert.deepStrictEqual(outputDerivedLabelResult, {
+    sourceAvailable: true,
+    resolvedQuery: 'label_replace(up, "cluster", "prod", "job", ".*")',
+    grafanaQuery: '',
+    grafanaButtonCount: 0
+  });
+
   const concurrentRuleSnapshotResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';

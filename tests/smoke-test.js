@@ -709,6 +709,99 @@ assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery('sum by (host) (rate(cpu_total[5m]))', { host: 'db' }),
   'sum by (host) (rate(cpu_total{host="db"}[5m]))'
 );
+for (const testCase of [
+  {
+    name: 'label_replace-created destination label',
+    query: 'label_replace(up, "cluster", "prod", "job", ".*")',
+    tags: { cluster: 'prod' }
+  },
+  {
+    name: 'label_replace-overwritten destination label',
+    query: 'label_replace(up, "cluster", "$1", "instance", "(.*)")',
+    tags: { cluster: 'prod' }
+  },
+  {
+    name: 'label_join-created destination label',
+    query: 'label_join(up, "cluster", "-", "region", "zone")',
+    tags: { cluster: 'prod' }
+  },
+  {
+    name: 'nested output-derived destination label',
+    query: [
+      'sum by (cluster) (',
+      '  label_replace(rate(foo_total[5m]), "cluster", "$1", "instance", "(.*)")',
+      ')'
+    ].join('\n'),
+    tags: { cluster: 'prod' }
+  },
+  {
+    name: 'destination label created deeper in multiple function calls',
+    query: [
+      'sum(',
+      '  label_join(',
+      '    label_replace(rate(foo_total[5m]), "derived", "$1", "instance", "(.*)"),',
+      '    "cluster", "-", "region", "zone"',
+      '  )',
+      ')'
+    ].join('\n'),
+    tags: { derived: 'prod' }
+  },
+  {
+    name: 'mixed safe and output-derived alert tags',
+    query: 'label_replace(up, "cluster", "prod", "job", ".*")',
+    tags: { env: 'prod', cluster: 'prod' }
+  },
+  {
+    name: 'comments, whitespace, and nested parentheses around the destination label',
+    query: [
+      'sum by (cluster) (',
+      '  (',
+      '    label_replace (',
+      '      rate(foo_total[5m]), # source expression',
+      '      "cluster",',
+      '      "$1",',
+      '      "instance",',
+      '      "(.*)"',
+      '    )',
+      '  )',
+      ')'
+    ].join('\n'),
+    tags: { cluster: 'prod' }
+  }
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(testCase.query, testCase.tags),
+    '',
+    `PromQL transformation must fail closed for ${testCase.name}`
+  );
+}
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    'label_replace(up, "cluster", "literal \\"label_join(fake, env)\\"", "job", ".*")',
+    { env: 'prod' }
+  ),
+  'label_replace(up{env="prod"}, "cluster", "literal \\"label_join(fake, env)\\"", "job", ".*")',
+  'Function-like text in string literals must not create output-derived labels'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery(
+    [
+      '# label_replace(fake, "env", "x", "source", ".*")',
+      'label_replace(up, "cluster", "prod", "job", ".*")'
+    ].join('\n'),
+    { env: 'prod' }
+  ),
+  [
+    '# label_replace(fake, "env", "x", "source", ".*")',
+    'label_replace(up{env="prod"}, "cluster", "prod", "job", ".*")'
+  ].join('\n'),
+  'Function-like text in comments must not create output-derived labels'
+);
+assert.strictEqual(
+  promqlApi.applyAlertTagsToPromQuery('rate(http_requests_total[5m])', { env: 'prod' }),
+  'rate(http_requests_total{env="prod"}[5m])',
+  'Ordinary selectors without output-derived labels must remain supported'
+);
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(
     'sum by(zone,name)(rr_imsi_success_response_percent)',
