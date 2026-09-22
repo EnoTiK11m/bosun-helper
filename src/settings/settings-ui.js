@@ -32,6 +32,19 @@
       ])
     }),
     Object.freeze({
+      title: 'Priority Alerts',
+      prioritySection: true,
+      fields: Object.freeze([
+        Object.freeze({ path: 'features.priorityAlerts', label: 'Включить Priority Alerts' }),
+        Object.freeze({ path: 'preferences.priorityCritical', label: 'Считать Critical приоритетными' }),
+        Object.freeze({
+          path: 'priorityRules.exactAlertNames',
+          label: 'Точные имена алертов',
+          type: 'exactAlertNames'
+        })
+      ])
+    }),
+    Object.freeze({
       title: 'Уведомления',
       fields: Object.freeze([
         Object.freeze({ path: 'features.soundNotifications', label: 'Звуковые уведомления' })
@@ -168,6 +181,10 @@
         }
         control.disabled = pendingByPath.has(path) || resetOperation !== 0;
       }
+      const priorityReset = modal.querySelector('[data-priority-section-reset]');
+      if (priorityReset) {
+        priorityReset.disabled = resetOperation !== 0 || pendingByPath.size > 0;
+      }
       if (resetButton) resetButton.disabled = resetOperation !== 0 || pendingByPath.size > 0;
     }
 
@@ -211,8 +228,8 @@
         return;
       }
       if (control.tagName === 'TEXTAREA') {
-        const templates = control.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
-        updateSetting(path, templates);
+        const lines = control.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+        updateSetting(path, lines);
         return;
       }
       updateSetting(path, control.value);
@@ -222,6 +239,45 @@
       const defaultButton = event.target?.closest?.('[data-template-default-path]');
       if (!defaultButton || !modal?.contains(defaultButton)) return;
       updateSetting(defaultButton.dataset.templateDefaultPath, null);
+    }
+
+    async function handlePrioritySectionReset() {
+      const paths = [
+        'features.priorityAlerts',
+        'preferences.priorityCritical',
+        'priorityRules.exactAlertNames'
+      ];
+      if (
+        destroyed || resetOperation !== 0 || pendingByPath.size > 0 ||
+        paths.some((path) => !availablePaths.has(path))
+      ) return;
+      const focusTarget = document.activeElement;
+      const operation = ++updateSequence;
+      for (const path of paths) pendingByPath.set(path, operation);
+      setStatus('Сохранение…');
+      renderSnapshot();
+      try {
+        const next = await settingsStore.update({
+          'features.priorityAlerts': false,
+          'preferences.priorityCritical': true,
+          'priorityRules.exactAlertNames': []
+        });
+        if (destroyed || paths.some((path) => pendingByPath.get(path) !== operation)) return;
+        setStatus('Сохранено');
+        renderSnapshot(next);
+      } catch (error) {
+        if (destroyed || paths.some((path) => pendingByPath.get(path) !== operation)) return;
+        reportSaveFailure(error);
+        renderSnapshot();
+      } finally {
+        if (!destroyed) {
+          for (const path of paths) {
+            if (pendingByPath.get(path) === operation) pendingByPath.delete(path);
+          }
+          renderSnapshot();
+          restoreOperationFocus(focusTarget);
+        }
+      }
     }
 
     function close(closeOptions = {}) {
@@ -377,9 +433,24 @@
       return wrapper;
     }
 
+    function createExactAlertNamesField(field) {
+      const wrapper = createElement('div', 'bosun-settings-template');
+      const label = createElement('label', 'bosun-settings-template-label', field.label);
+      const textarea = createElement('textarea', 'bosun-settings-template-input');
+      textarea.id = 'bosun-settings-priority-names';
+      textarea.rows = 3;
+      textarea.dataset.settingPath = field.path;
+      textarea.placeholder = 'Одно точное имя алерта на строку';
+      label.htmlFor = textarea.id;
+      wrapper.appendChild(label);
+      wrapper.appendChild(textarea);
+      return wrapper;
+    }
+
     function createField(field) {
       if (field.type === 'number') return createNumberField(field);
       if (field.type === 'templates') return createTemplateField(field);
+      if (field.type === 'exactAlertNames') return createExactAlertNamesField(field);
       return createBooleanField(field);
     }
 
@@ -422,6 +493,18 @@
             group.title
           ));
           for (const field of fields) section.appendChild(createField(field));
+          if (group.prioritySection) {
+            section.appendChild(createElement(
+              'p',
+              'bosun-settings-field-hint',
+              'Priority Alerts только выделяет выбранные алерты. Она не меняет severity или состояние в Bosun.'
+            ));
+            const priorityReset = createElement('button', 'bosun-settings-small-button', 'Сбросить Priority Alerts');
+            priorityReset.type = 'button';
+            priorityReset.dataset.prioritySectionReset = 'true';
+            priorityReset.addEventListener('click', handlePrioritySectionReset);
+            section.appendChild(priorityReset);
+          }
           body.appendChild(section);
         }
         panel.appendChild(body);

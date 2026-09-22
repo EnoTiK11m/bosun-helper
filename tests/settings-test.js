@@ -85,11 +85,26 @@ async function main() {
   assert.deepStrictEqual(plain(defaultsStore.getSnapshot()), plain(api.DEFAULTS));
   assert.strictEqual(defaultsStore.get('features.grafanaIntegration'), true);
   assert.strictEqual(defaultsStore.get('preferences.autoRefreshIdleSeconds'), 60);
+  assert.strictEqual(defaultsStore.get('features.priorityAlerts'), false);
+  assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), true);
+  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), []);
+  assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: 1 }], 'fresh start must not materialize every default leaf');
+  await defaultsStore.update({
+    'features.priorityAlerts': true,
+    'priorityRules.exactAlertNames': [' alpha.alert ', '', 'beta.alert', 'alpha.alert', 7]
+  });
+  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
+  await defaultsStore.update({ 'features.priorityAlerts': false, 'preferences.priorityCritical': false });
+  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
+  await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': 'alpha.alert' }), /Invalid setting/);
+  await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': ['x'.repeat(257)] }), /Invalid setting/);
+  await assert.rejects(defaultsStore.update({
+    'priorityRules.exactAlertNames': Array.from({ length: 51 }, (_unused, index) => `alert.${index}`)
+  }), /Invalid setting/);
   assert.throws(() => defaultsStore.get('unknown.path'), /Unknown setting/);
   const immutable = defaultsStore.getSnapshot();
   immutable.features.copyButtons = false;
   assert.strictEqual(defaultsStore.get('features.copyButtons'), true);
-  assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: 1 }], 'fresh start must not materialize every default leaf');
 
   const legacy = {
     bosunShowSilenced: true,
@@ -245,6 +260,7 @@ async function main() {
     'bosunSettingsV1:features.copyButtons': 'yes',
     'bosunSettingsV1:preferences.showSilenced': true,
     'bosunSettingsV1:preferences.autoRefreshIdleSeconds': 'broken',
+    'bosunSettingsV1:priorityRules.exactAlertNames': { nope: true },
     'bosunSettingsV1:actionTemplates.note': { nope: true }
   });
   const damagedStore = api.createSettingsStore({
@@ -256,6 +272,7 @@ async function main() {
   assert.strictEqual(damagedStore.get('features.copyButtons'), true);
   assert.strictEqual(damagedStore.get('preferences.showSilenced'), true);
   assert.strictEqual(damagedStore.get('preferences.autoRefreshIdleSeconds'), 60);
+  assert.deepStrictEqual(plain(damagedStore.get('priorityRules.exactAlertNames')), []);
   assert.strictEqual(damagedStore.get('actionTemplates.note'), null);
   for (const invalidIdle of [null, true, false, [], [30], {}, '   ', '30seconds']) {
     await assert.rejects(
@@ -632,6 +649,9 @@ async function main() {
   assert.strictEqual(storeB.get('preferences.autoRefreshIdleSeconds'), 89);
   assert.strictEqual(shared.data.bosunAutoRefreshIdleSeconds, 89, 'canonical updates dual-write legacy keys');
   assert.ok(eventsB.some((paths) => paths.includes('features.copyButtons')));
+  await storeA.update({ 'priorityRules.exactAlertNames': [' shared.alert '], 'features.priorityAlerts': true });
+  assert.deepStrictEqual(plain(storeB.get('priorityRules.exactAlertNames')), ['shared.alert']);
+  assert.strictEqual(storeB.get('features.priorityAlerts'), true);
 
   await new Promise((resolve) => shared.storage.set({ bosunSoundAlertsEnabled: false }, resolve));
   await new Promise((resolve) => setImmediate(resolve));

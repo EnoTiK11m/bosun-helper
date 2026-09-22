@@ -1077,4 +1077,43 @@ function createBaselineHarness(options = {}) {
   assert.ok(!events.some((entry) => entry.event === 'chime'));
 }
 
+{
+  const priorityContext = { globalThis: null };
+  priorityContext.globalThis = priorityContext;
+  vm.runInNewContext(
+    fs.readFileSync(path.join(root, 'src/bosun/priority-alerts.js'), 'utf8'),
+    priorityContext,
+    { filename: 'src/bosun/priority-alerts.js' }
+  );
+  const classify = priorityContext.BosunHelperPriorityAlerts.classify;
+  const settings = {
+    features: { priorityAlerts: true },
+    preferences: { priorityCritical: true },
+    priorityRules: { exactAlertNames: ['sms.channel.bound.bad'] }
+  };
+  const child = { identity: 'resolved', alertName: 'other.alert', severity: 'critical' };
+  const check = (state, options = settings) => JSON.parse(JSON.stringify(classify(state, options)));
+  assert.deepStrictEqual(check(child, { ...settings, features: { priorityAlerts: false } }), {
+    priority: false, reasons: []
+  });
+  assert.deepStrictEqual(check(child), { priority: true, reasons: ['critical'] });
+  assert.deepStrictEqual(check({ ...child, severity: 'warning' }), { priority: false, reasons: [] });
+  assert.deepStrictEqual(check({ ...child, severity: 'warning', alertName: 'sms.channel.bound.bad' }), {
+    priority: true, reasons: ['exact-alert-name']
+  });
+  assert.deepStrictEqual(check(child, { ...settings, preferences: { priorityCritical: false } }), {
+    priority: false, reasons: []
+  });
+  assert.deepStrictEqual(check({ ...child, alertName: 'sms.channel.bound.bad' }), {
+    priority: true, reasons: ['critical', 'exact-alert-name']
+  });
+  assert.strictEqual(check({ ...child, severity: 'warning', alertName: 'sms.channel.bound.bad.extra' }).priority, false);
+  for (const identity of ['ambiguous', 'conflicting', 'unresolved', undefined]) {
+    assert.strictEqual(check({ ...child, identity }).priority, false);
+  }
+  assert.strictEqual(check({ ...child, severity: 'unknown' }).priority, false);
+  assert.strictEqual(check({ ...child, alertName: '' }).priority, false);
+  assert.strictEqual(check({ ...child, alertName: ' SMS.CHANNEL.BOUND.BAD ', severity: 'warning' }).priority, false);
+}
+
 console.log('Smoke test passed');
