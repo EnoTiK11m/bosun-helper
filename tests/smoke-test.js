@@ -4,6 +4,12 @@ const vm = require('vm');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '..');
+const bosunScripts = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')).content_scripts[0].js;
+assert.strictEqual(bosunScripts.filter((file) => file === 'src/bosun/priority-alerts.js').length, 1);
+assert.ok(
+  bosunScripts.indexOf('src/bosun/priority-alerts.js') < bosunScripts.indexOf('src/bosun/content.js'),
+  'Priority classifier must load before Bosun content script'
+);
 
 const listeners = {};
 const documentStub = {
@@ -120,6 +126,7 @@ for (const file of [
   'src/grafana/grafana-handoff.js',
   'src/bosun/new-alert-tracker.js',
   'src/shared/refresh-coordinator.js',
+  'src/bosun/priority-alerts.js',
   'src/bosun/content.js'
 ]) {
   const code = fs.readFileSync(path.join(root, file), 'utf8');
@@ -143,6 +150,7 @@ const checks = [
   ['action-templates', !!context.BosunHelperActionTemplates],
   ['grafana-handoff', !!context.BosunHelperGrafanaHandoff],
   ['new-alert-tracker', !!context.BosunHelperNewAlertTracker],
+  ['priority-alerts', !!context.BosunHelperPriorityAlerts],
   ['refresh-coordinator', !!context.BosunHelperRefreshCoordinator],
 ];
 

@@ -52,6 +52,7 @@
         "src/grafana/grafana-handoff.js",
         "src/bosun/new-alert-tracker.js",
         "src/shared/refresh-coordinator.js",
+        "src/bosun/priority-alerts.js",
         "src/bosun/content.js"
       ],
       "run_at": "document_end"

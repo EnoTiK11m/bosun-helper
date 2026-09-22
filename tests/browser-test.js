@@ -254,6 +254,7 @@ function instrumentContentSource(source) {
   globalThis.__BosunHelperBrowserTest = {
     ensureStateIcon,
     ensureParentStateIcon,
+    injectStyles,
     ensureToggleExists,
     destroySettingsUi: () => settingsUi?.destroy?.(),
     ensureAutoRefreshControls,
@@ -262,6 +263,7 @@ function instrumentContentSource(source) {
     runDomRefreshPass,
     getLastActionMessageText,
     applyAlertsPayload,
+    applySettingsSnapshot,
     rebuildAlertDataIndex,
     resolveChildState,
     resolveGroupState,
@@ -365,6 +367,8 @@ async function runBrowserAssertions(client) {
   const needAckBaselineSource = fs.readFileSync(path.join(root, 'src/bosun/needack-baseline.js'), 'utf8');
   const singleAlertAgeSource = fs.readFileSync(path.join(root, 'src/bosun/single-alert-age.js'), 'utf8');
   const alertsDataSource = fs.readFileSync(path.join(root, 'src/bosun/alerts-data.js'), 'utf8');
+  const needAckSeveritySource = fs.readFileSync(path.join(root, 'src/bosun/needack-severity.js'), 'utf8');
+  const prioritySource = fs.readFileSync(path.join(root, 'src/bosun/priority-alerts.js'), 'utf8');
   const pageUtilsSource = fs.readFileSync(path.join(root, 'src/bosun/page-utils.js'), 'utf8');
   const stylesSource = fs.readFileSync(path.join(root, 'src/shared/styles.js'), 'utf8');
   const handoffSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-handoff.js'), 'utf8');
@@ -2326,6 +2330,130 @@ async function runBrowserAssertions(client) {
     reexpandedNotedChildIcons: 1,
     reexpandedPlainChildIcons: 0
   }, 'Collapsed group Note indicator did not preserve safe child identity semantics');
+
+  const priorityMarkers = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'], grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    ${settingsSource}
+    ${alertsDataSource}
+    ${needAckSeveritySource}
+    ${prioritySource}
+    ${stylesSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    hooks.injectStyles();
+    const snapshot = JSON.parse(JSON.stringify(BosunHelperSettings.DEFAULTS));
+    snapshot.features.priorityAlerts = true;
+    const change = (path, value) => {
+      const before = JSON.parse(JSON.stringify(snapshot));
+      const [section, name] = path.split('.');
+      snapshot[section][name] = value;
+      hooks.applySettingsSnapshot(JSON.parse(JSON.stringify(snapshot)), { previous: before, changedPaths: [path] });
+    };
+    hooks.applySettingsSnapshot(snapshot, { initial: true });
+    function child(id, alert, status, note = false) {
+      return { Alert: alert, Subject: alert, Ago: '1m', State: {
+        Id: id, CurrentStatus: status,
+        Actions: note ? [{ Type: 'Note', User: 'operator', Message: 'synthetic' }] : []
+      } };
+    }
+    function mount(subject, rows = [], acknowledged = false) {
+      document.body.innerHTML = '';
+      const root = document.createElement('div');
+      root.setAttribute('ts-ack-group', acknowledged ? 'schedule.Groups.Acknowledged' : 'schedule.Groups.NeedAck');
+      const list = document.createElement('div'); list.className = 'panel-group';
+      const group = document.createElement('div'); group.className = 'panel';
+      const heading = document.createElement('div'); heading.className = 'panel-heading';
+      const title = document.createElement('div'); title.className = 'panel-title';
+      const subjectNode = document.createElement('span');
+      subjectNode.setAttribute('ng-bind', 'group.Subject'); subjectNode.textContent = subject;
+      title.appendChild(subjectNode); heading.appendChild(title); group.appendChild(heading);
+      const children = rows.map((row) => {
+        const panel = document.createElement('div'); panel.className = 'panel';
+        panel.setAttribute('ng-repeat', 'child in group.Children');
+        const h = document.createElement('div'); h.className = 'panel-heading'; h.setAttribute('ng-click', 'toggle()');
+        const t = document.createElement('div'); t.className = 'panel-title';
+        const id = document.createElement('span'); id.setAttribute('ng-show', 'state.Id'); id.textContent = '#' + row.State.Id;
+        const name = document.createElement('span'); name.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+        name.textContent = row.Subject;
+        const ago = document.createElement('span'); ago.setAttribute('ts-since', 'child.Ago'); ago.textContent = row.Ago;
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox';
+        t.append(id, name, ago, checkbox); h.appendChild(t); panel.appendChild(h); return panel;
+      });
+      list.appendChild(group); root.appendChild(list); document.body.appendChild(root);
+      return { group, children, expand() { children.forEach((panel) => group.appendChild(panel)); },
+        collapse() { children.forEach((panel) => panel.remove()); } };
+    }
+    const count = (element, parent = false) => element.querySelectorAll(
+      parent ? ':scope > .panel-heading .bosun-priority-marker.bosun-parent-marker'
+        : ':scope > .panel-heading .bosun-priority-marker:not(.bosun-parent-marker)'
+    ).length;
+    const critical = child(101, 'critical.alert', 'critical', true);
+    const warning = child(102, 'warning.alert', 'warning');
+    const mounted = mount('priority group', [critical, warning]);
+    const payload = { Groups: { NeedAck: [{ Subject: 'priority group', Children: [critical, warning] }] } };
+    hooks.applyAlertsPayload(payload);
+    const collapsed = count(mounted.group, true);
+    mounted.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const childCounts = mounted.children.map((panel) => count(panel));
+    const noteCoexist = mounted.children[0].querySelectorAll('.bosun-has-note-icon').length;
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    mounted.collapse(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    mounted.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const repeated = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    const marker = mounted.children[0].querySelector('.bosun-priority-marker');
+    const label = [marker?.title, marker?.getAttribute('aria-label')];
+    const narrowStyle = [Math.ceil(marker.getBoundingClientRect().width) <= 24,
+      getComputedStyle(marker).pointerEvents === 'none'];
+    let clicks = 0; mounted.children[0].querySelector('input').addEventListener('click', () => { clicks += 1; });
+    mounted.children[0].querySelector('input').click();
+    change('features.priorityAlerts', false);
+    const disabled = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    change('features.priorityAlerts', true);
+    const reenabled = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    change('preferences.priorityCritical', false);
+    const criticalOff = [count(mounted.group, true), count(mounted.children[0])];
+    change('priorityRules.exactAlertNames', ['warning.alert']);
+    const exactOn = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    change('priorityRules.exactAlertNames', []);
+    const exactOff = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    change('preferences.priorityCritical', true);
+    const remounted = mount('priority group', [critical, warning]);
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    remounted.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const domReplacement = [count(remounted.group, true), ...remounted.children.map((panel) => count(panel))];
+    const replacement = mount('replacement', [child(201, 'other.alert', 'warning')]);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'replacement', Children: [child(201, 'other.alert', 'warning')] }] } });
+    replacement.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const replaced = [count(replacement.group, true), count(replacement.children[0])];
+    const ambiguous = mount('ambiguous', [child(301, 'first.alert', 'critical')]);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'ambiguous', Children: [
+      child(301, 'first.alert', 'critical'), child(301, 'second.alert', 'critical')
+    ] }] } });
+    ambiguous.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ambiguousCounts = [count(ambiguous.group, true), count(ambiguous.children[0])];
+    const mismatch = mount('mismatch', [child(402, 'same.alert', 'critical')]);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'mismatch', Children: [child(401, 'same.alert', 'critical')] }] } });
+    mismatch.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const mismatchCounts = [count(mismatch.group, true), count(mismatch.children[0])];
+    const acknowledged = mount('acknowledged', [child(501, 'ack.alert', 'critical')], true);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'acknowledged', Children: [child(501, 'ack.alert', 'critical')] }] } });
+    acknowledged.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const acknowledgedCounts = [count(acknowledged.group, true), count(acknowledged.children[0])];
+    return { collapsed, childCounts, noteCoexist, repeated, label, narrowStyle, clicks, disabled, reenabled,
+      criticalOff, exactOn, exactOff, domReplacement, replaced, ambiguousCounts, mismatchCounts, acknowledgedCounts };
+  })()`);
+  assert.deepStrictEqual(priorityMarkers, {
+    collapsed: 1, childCounts: [1, 0], noteCoexist: 1, repeated: [1, 1, 0],
+    label: ['Приоритет', 'Приоритет'], narrowStyle: [true, true], clicks: 1,
+    disabled: [0, 0, 0], reenabled: [1, 1, 0], criticalOff: [0, 0],
+    exactOn: [1, 0, 1], exactOff: [0, 0, 0], domReplacement: [1, 1, 0], replaced: [0, 0],
+    ambiguousCounts: [0, 0], mismatchCounts: [0, 0], acknowledgedCounts: [0, 0]
+  }, 'Priority markers must follow resolved NeedAck children and live settings');
 
   const usageGraphResolverResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
