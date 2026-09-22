@@ -105,7 +105,7 @@
       return isActiveUserNote(action);
     }
 
-    function rebuildAlertDataIndex(payload, helpers) {
+    function rebuildAlertDataIndex(payload, helpers, section = 'NeedAck') {
       const {
         buildChildMarkerKeyFromData,
         buildGroupMarkerKeyFromData,
@@ -146,7 +146,7 @@
         for (const [map, value] of entries) map.set(key, value);
       }
 
-      const groups = payload?.Groups?.NeedAck;
+      const groups = payload?.Groups?.[section];
       if (!Array.isArray(groups)) return nextIndex;
 
       const priorityGroupKeyCounts = new Map();

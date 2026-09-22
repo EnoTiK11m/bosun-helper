@@ -286,7 +286,7 @@ async function main() {
       grafanaIntegration: true,
       priorityAlerts: false
     },
-    preferences: { autoRefreshIdleSeconds: 45, priorityCritical: true },
+    preferences: { autoRefreshIdleSeconds: 45, priorityCritical: true, priorityShowAcknowledged: false },
     priorityRules: { exactAlertNames: ['saved.alert'] },
     actionTemplates: { note: ['synthetic note'], ack: null, close: [] }
   };
@@ -297,6 +297,7 @@ async function main() {
     'features.grafanaIntegration',
     'features.priorityAlerts',
     'preferences.priorityCritical',
+    'preferences.priorityShowAcknowledged',
     'priorityRules.exactAlertNames',
     'preferences.autoRefreshIdleSeconds',
     'actionTemplates.note',
@@ -329,8 +330,10 @@ async function main() {
   const soundToggle = harness.document.querySelector('[data-setting-path="features.soundNotifications"]');
   const priorityToggle = harness.document.querySelector('[data-setting-path="features.priorityAlerts"]');
   const criticalToggle = harness.document.querySelector('[data-setting-path="preferences.priorityCritical"]');
+  const acknowledgedToggle = harness.document.querySelector('[data-setting-path="preferences.priorityShowAcknowledged"]');
   const priorityNames = harness.document.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
-  assert.ok(priorityToggle && criticalToggle && priorityNames, 'Priority controls must render');
+  assert.ok(priorityToggle && criticalToggle && acknowledgedToggle && priorityNames, 'Priority controls must render');
+  assert.strictEqual(acknowledgedToggle.checked, false);
   assert.strictEqual(priorityNames.value, 'saved.alert');
   assert.ok(harness.document.querySelector('[data-priority-section-reset]'));
   assert.ok(harness.document.querySelectorAll('.bosun-settings-group-title')
@@ -353,6 +356,13 @@ async function main() {
   assert.strictEqual(harness.document.activeElement, soundToggle, 'Delayed save must not steal unrelated focus');
   store.external('priorityRules.exactAlertNames', ['external.alert']);
   assert.strictEqual(priorityNames.value, 'external.alert');
+  acknowledgedToggle.click();
+  await flush();
+  assert.strictEqual(store.getSnapshot().preferences.priorityShowAcknowledged, true);
+  store.external('preferences.priorityShowAcknowledged', false);
+  assert.strictEqual(acknowledgedToggle.checked, false, 'External-tab change must update Acknowledged checkbox');
+  acknowledgedToggle.click();
+  await flush();
   priorityToggle.click();
   await flush();
   assert.deepStrictEqual(store.getSnapshot().priorityRules.exactAlertNames, ['external.alert']);
@@ -360,6 +370,7 @@ async function main() {
   await flush();
   assert.strictEqual(priorityToggle.checked, false);
   assert.strictEqual(criticalToggle.checked, true);
+  assert.strictEqual(acknowledgedToggle.checked, false, 'Priority section reset must disable Acknowledged markers');
   assert.strictEqual(priorityNames.value, '');
   assert.strictEqual(copyToggle.checked, false, 'Initial value must come from the store snapshot');
   assert.ok(harness.document.querySelector('.bosun-settings-reload-hint'));

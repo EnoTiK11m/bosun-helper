@@ -36,6 +36,7 @@
       acknowledgedCollapsed: false,
       soundEnabled: true,
       priorityCritical: true,
+      priorityShowAcknowledged: false,
       autoRefreshEnabled: true,
       autoRefreshIdleSeconds: 60
     }),
@@ -124,6 +125,7 @@
     entry('preferences.autoRefreshEnabled', true, normalizeBoolean, 'bosunAutoRefreshEnabled'),
     entry('preferences.autoRefreshIdleSeconds', 60, normalizeIdleSeconds, 'bosunAutoRefreshIdleSeconds'),
     entry('preferences.priorityCritical', true, normalizeBoolean),
+    entry('preferences.priorityShowAcknowledged', false, normalizeBoolean),
     entry('priorityRules.exactAlertNames', [], normalizeExactAlertNames)
   );
   for (const type of ACTION_TYPES) {
