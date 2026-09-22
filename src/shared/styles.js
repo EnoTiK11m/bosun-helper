@@ -311,6 +311,23 @@
       .${oldNoNoteIconClass} { color: #ff9800 !important; }
       .${hasNoteIconClass} { color: #9ea19d !important; }
 
+      .bosun-priority-marker {
+        display: inline-block;
+        box-sizing: border-box;
+        margin-right: 4px;
+        padding: 0 3px;
+        border: 1px solid #5279b8;
+        border-radius: 3px;
+        color: #315d9c;
+        background: #eef4ff;
+        font-size: 10px;
+        line-height: 1.3;
+        vertical-align: middle;
+        white-space: nowrap;
+        user-select: none;
+        pointer-events: none;
+      }
+
       div#${topBarId}.bosun-toolbar-fallback {
         width: 95%;
         margin: 10px auto 14px auto;

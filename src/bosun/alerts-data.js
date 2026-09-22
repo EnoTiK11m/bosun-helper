@@ -120,13 +120,17 @@
         childHasNoteByKey: new Map(),
         childHasUserCommentById: new Map(),
         childHasUserCommentByKey: new Map(),
+        childPriorityById: new Map(),
+        childPriorityByKey: new Map(),
         ambiguousChildIds: new Set(),
         ambiguousChildKeys: new Set(),
         groupHasOldNoNoteByKey: new Map(),
         groupHasAnyNoteByKey: new Map(),
+        groupHasPriorityByKey: new Map(),
         groupHasAnyUserCommentByKey: new Map(),
         groupHasOldNoNoteBySubject: new Map(),
         groupHasAnyNoteBySubject: new Map(),
+        groupHasPriorityBySubject: new Map(),
         groupHasAnyUserCommentBySubject: new Map(),
         groupHasStrongIdentityBySubject: new Map(),
         groupCountBySubject: new Map()
@@ -145,6 +149,7 @@
       const groups = payload?.Groups?.NeedAck;
       if (!Array.isArray(groups)) return nextIndex;
 
+      const priorityGroupKeyCounts = new Map();
       for (const group of groups) {
         let groupHasOldNoNote = false;
         let groupHasAnyUserComment = false;
@@ -200,6 +205,7 @@
 
         const groupKey = buildGroupMarkerKeyFromData(group);
         if (groupKey) {
+          priorityGroupKeyCounts.set(groupKey, (priorityGroupKeyCounts.get(groupKey) || 0) + 1);
           const prevOld = nextIndex.groupHasOldNoNoteByKey.get(groupKey) === true;
           const prevUserComment = nextIndex.groupHasAnyUserCommentByKey.get(groupKey) === true;
           nextIndex.groupHasOldNoNoteByKey.set(groupKey, prevOld || groupHasOldNoNote);
@@ -260,6 +266,21 @@
         return readResolvedChildState(childKey, 'key')?.[1] === true;
       }
 
+      function resolvedChildIdentity(child, group) {
+        const childId = child?.State?.Id != null ? String(child.State.Id) : null;
+        const childKey = buildChildMarkerKeyFromData(child, group);
+        if (childId) {
+          if (!childKey || nextIndex.ambiguousChildIds.has(childId) ||
+            nextIndex.ambiguousChildKeys.has(childKey)) return null;
+          const byId = readResolvedChildState(childId, 'id');
+          const byKey = readResolvedChildState(childKey, 'key');
+          if (!byId || !byKey || byId.some((value, index) => value !== byKey[index])) return null;
+          return { childId, childKey };
+        }
+        return childKey && !nextIndex.ambiguousChildKeys.has(childKey) &&
+          readResolvedChildState(childKey, 'key') ? { childId: null, childKey } : null;
+      }
+
       // Group Note markers must aggregate only child states that survived the
       // final ambiguity checks above. Raw action data must not bypass child
       // identity resolution merely because the group row is collapsed.
@@ -270,11 +291,24 @@
           ? normalizeNeedAckChildren(group?.Children)
           : (Array.isArray(group?.Children) ? group.Children : []);
         const hasResolvedNote = children.some((child) => resolvedChildHasNote(child, group));
+        let hasResolvedPriority = false;
+        for (const child of children) {
+          const identity = resolvedChildIdentity(child, group);
+          if (!identity) continue;
+          const priority = helpers.classifyPriorityChild?.(child, group) === true;
+          if (identity.childId) nextIndex.childPriorityById.set(identity.childId, priority);
+          nextIndex.childPriorityByKey.set(identity.childKey, priority);
+          if (priority) hasResolvedPriority = true;
+        }
         const groupKey = buildGroupMarkerKeyFromData(group);
         if (groupKey) {
           nextIndex.groupHasAnyNoteByKey.set(
             groupKey,
             nextIndex.groupHasAnyNoteByKey.get(groupKey) === true || hasResolvedNote
+          );
+          nextIndex.groupHasPriorityByKey.set(
+            groupKey,
+            nextIndex.groupHasPriorityByKey.get(groupKey) === true || hasResolvedPriority
           );
         }
         const groupSubject = typeof group?.Subject === 'string' ? group.Subject.trim() : '';
@@ -283,7 +317,16 @@
             groupSubject,
             nextIndex.groupHasAnyNoteBySubject.get(groupSubject) === true || hasResolvedNote
           );
+          nextIndex.groupHasPriorityBySubject.set(
+            groupSubject,
+            nextIndex.groupHasPriorityBySubject.get(groupSubject) === true || hasResolvedPriority
+          );
         }
+      }
+
+      // Duplicate group keys cannot identify a single collapsed row.
+      for (const [key, count] of priorityGroupKeyCounts) {
+        if (count > 1) nextIndex.groupHasPriorityByKey.delete(key);
       }
 
       return nextIndex;

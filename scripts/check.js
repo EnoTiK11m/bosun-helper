@@ -59,6 +59,7 @@ for (const provider of [
   'src/bosun/action-templates.js',
   'src/grafana/grafana-handoff.js',
   'src/bosun/new-alert-tracker.js',
+  'src/bosun/priority-alerts.js',
   'src/shared/refresh-coordinator.js'
 ]) {
   const providerIndex = bosunScripts.indexOf(provider);

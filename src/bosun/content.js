@@ -105,6 +105,7 @@
 
   const OLD_NO_NOTE_ICON_CLASS = 'bosun-old-no-note-icon';
   const HAS_NOTE_ICON_CLASS = 'bosun-has-note-icon';
+  const PRIORITY_MARKER_CLASS = 'bosun-priority-marker';
 
   const DATA_REFRESH_MS = 4000;
   const DATA_REFRESH_HIDDEN_MS = 10000;
@@ -197,15 +198,19 @@
   const childHasNoteByKey = new Map();
   const childHasUserCommentById = new Map();
   const childHasUserCommentByKey = new Map();
+  const childPriorityById = new Map();
+  const childPriorityByKey = new Map();
   const ambiguousChildIds = new Set();
   const ambiguousChildKeys = new Set();
 
   // group maps
   const groupHasOldNoNoteByKey = new Map();
   const groupHasAnyNoteByKey = new Map();
+  const groupHasPriorityByKey = new Map();
   const groupHasAnyUserCommentByKey = new Map();
   const groupHasOldNoNoteBySubject = new Map();
   const groupHasAnyNoteBySubject = new Map();
+  const groupHasPriorityBySubject = new Map();
   const groupHasAnyUserCommentBySubject = new Map();
   const groupHasStrongIdentityBySubject = new Map();
   const groupCountBySubject = new Map();
@@ -238,6 +243,7 @@
   const alertsDataApi = globalThis.BosunSilenceHiderAlertsData?.createAlertsData?.({
     oldNoNoteMinutes: OLD_NO_NOTE_MINUTES
   }) || null;
+  const priorityApi = globalThis.BosunHelperPriorityAlerts || null;
   const needAckSeverityApi = globalThis.BosunSilenceHiderNeedAckSeverity?.createNeedAckSeverity?.({
     normalizeNeedAckChildren: (raw) => {
       if (sharedUtils?.normalizeNeedAckChildren) {
@@ -1137,7 +1143,7 @@
     singleAlertAgeApi?.clear?.();
     alertDataIndexReady = false;
     document.querySelectorAll(
-      `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}`
+      `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}`
     ).forEach((element) => element.remove());
   }
 
@@ -1228,10 +1234,12 @@
       ? [childOldNoNoteById, childHasNoteById, childHasUserCommentById]
       : [childOldNoNoteByKey, childHasNoteByKey, childHasUserCommentByKey];
     if (!maps.every((map) => map.has(key))) return null;
+    const priorityMap = identityType === 'id' ? childPriorityById : childPriorityByKey;
     return {
       oldNoNote: maps[0].get(key) === true,
       hasNote: maps[1].get(key) === true,
-      hasUserComment: maps[2].get(key) === true
+      hasUserComment: maps[2].get(key) === true,
+      priority: priorityMap.get(key) === true
     };
   }
 
@@ -1239,7 +1247,8 @@
     return first && second &&
       first.oldNoNote === second.oldNoNote &&
       first.hasNote === second.hasNote &&
-      first.hasUserComment === second.hasUserComment;
+      first.hasUserComment === second.hasUserComment &&
+      first.priority === second.priority;
   }
 
   function resolveChildIndexedState(panel, parentGroupPanel = null) {
@@ -1926,6 +1935,14 @@
       updateAutoRefreshControls();
     }
     if (initial || changedPaths.includes('internal.diagnosticsEnabled')) updateDiagnosticsControl();
+    if (initial || [
+      'features.priorityAlerts',
+      'preferences.priorityCritical',
+      'priorityRules.exactAlertNames'
+    ].some((path) => changedPaths.includes(path))) {
+      if (latestAlertsPayload) rebuildAlertDataIndex(latestAlertsPayload, { skipGrafanaQueryIndex: true });
+      applyPriorityMarkers();
+    }
   }
 
   function loadState(callback) {
@@ -3070,11 +3087,16 @@
     return null;
   }
 
-  function rebuildAlertDataIndex(payload) {
+  function rebuildAlertDataIndex(payload, options = {}) {
     const nextIndex = alertsDataApi?.rebuildAlertDataIndex?.(payload, {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
       hasStrongChildMarkerIdentityFromData,
+      classifyPriorityChild: (child, group) => priorityApi?.classify?.({
+        identity: 'resolved',
+        alertName: getExactAlertName(child),
+        severity: needAckSeverityApi?.getNeedAckSeverityBucket?.(child, group) || 'unknown'
+      }, settingsSnapshot)?.priority === true,
       normalizeNeedAckChildren: (raw) => {
         if (sharedUtils?.normalizeNeedAckChildren) {
           return sharedUtils.normalizeNeedAckChildren(raw);
@@ -3089,13 +3111,17 @@
       childHasNoteByKey: new Map(),
       childHasUserCommentById: new Map(),
       childHasUserCommentByKey: new Map(),
+      childPriorityById: new Map(),
+      childPriorityByKey: new Map(),
       ambiguousChildIds: new Set(),
       ambiguousChildKeys: new Set(),
       groupHasOldNoNoteByKey: new Map(),
       groupHasAnyNoteByKey: new Map(),
+      groupHasPriorityByKey: new Map(),
       groupHasAnyUserCommentByKey: new Map(),
       groupHasOldNoNoteBySubject: new Map(),
       groupHasAnyNoteBySubject: new Map(),
+      groupHasPriorityBySubject: new Map(),
       groupHasAnyUserCommentBySubject: new Map(),
       groupHasStrongIdentityBySubject: new Map(),
       groupCountBySubject: new Map()
@@ -3106,13 +3132,17 @@
     childHasNoteByKey.clear();
     childHasUserCommentById.clear();
     childHasUserCommentByKey.clear();
+    childPriorityById.clear();
+    childPriorityByKey.clear();
     ambiguousChildIds.clear();
     ambiguousChildKeys.clear();
     groupHasOldNoNoteByKey.clear();
     groupHasAnyNoteByKey.clear();
+    groupHasPriorityByKey.clear();
     groupHasAnyUserCommentByKey.clear();
     groupHasOldNoNoteBySubject.clear();
     groupHasAnyNoteBySubject.clear();
+    groupHasPriorityBySubject.clear();
     groupHasAnyUserCommentBySubject.clear();
     groupHasStrongIdentityBySubject.clear();
     groupCountBySubject.clear();
@@ -3122,20 +3152,24 @@
     for (const [key, value] of nextIndex.childHasNoteByKey) childHasNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.childHasUserCommentById || []) childHasUserCommentById.set(key, value);
     for (const [key, value] of nextIndex.childHasUserCommentByKey || []) childHasUserCommentByKey.set(key, value);
+    for (const [key, value] of nextIndex.childPriorityById || []) childPriorityById.set(key, value);
+    for (const [key, value] of nextIndex.childPriorityByKey || []) childPriorityByKey.set(key, value);
     for (const key of nextIndex.ambiguousChildIds || []) ambiguousChildIds.add(key);
     for (const key of nextIndex.ambiguousChildKeys || []) ambiguousChildKeys.add(key);
     for (const [key, value] of nextIndex.groupHasOldNoNoteByKey) groupHasOldNoNoteByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteByKey) groupHasAnyNoteByKey.set(key, value);
+    for (const [key, value] of nextIndex.groupHasPriorityByKey || []) groupHasPriorityByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyUserCommentByKey || []) groupHasAnyUserCommentByKey.set(key, value);
     for (const [key, value] of nextIndex.groupHasOldNoNoteBySubject) groupHasOldNoNoteBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyNoteBySubject) groupHasAnyNoteBySubject.set(key, value);
+    for (const [key, value] of nextIndex.groupHasPriorityBySubject || []) groupHasPriorityBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasAnyUserCommentBySubject || []) groupHasAnyUserCommentBySubject.set(key, value);
     for (const [key, value] of nextIndex.groupHasStrongIdentityBySubject || []) {
       groupHasStrongIdentityBySubject.set(key, value);
     }
     for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
     alertDataIndexReady = true;
-    rebuildGrafanaQueryIndex(payload);
+    if (!options.skipGrafanaQueryIndex) rebuildGrafanaQueryIndex(payload);
   }
 
   function ensureStateIcon(title, type) {
@@ -3318,6 +3352,49 @@
     return 'none';
   }
 
+  function ensurePriorityMarker(title, isGroup, priority) {
+    if (!title) return;
+    const selector = `:scope > .${PRIORITY_MARKER_CLASS}${isGroup ? '.bosun-parent-marker' : ':not(.bosun-parent-marker)'}`;
+    const markers = Array.from(title.querySelectorAll(selector));
+    if (!priority) {
+      markers.forEach((marker) => marker.remove());
+      return;
+    }
+    markers.slice(1).forEach((marker) => marker.remove());
+    if (markers.length) return;
+    const marker = document.createElement('span');
+    marker.className = `${PRIORITY_MARKER_CLASS}${isGroup ? ' bosun-parent-marker' : ''} ${NO_SELECT_CLASS}`;
+    marker.textContent = '★';
+    marker.title = 'Приоритет';
+    marker.setAttribute('role', 'img');
+    marker.setAttribute('aria-label', 'Приоритет');
+    title.insertBefore(marker, title.firstChild);
+  }
+
+  function resolveGroupPriority(groupPanel) {
+    const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
+    if (groupKey && groupHasPriorityByKey.has(groupKey)) {
+      return groupHasPriorityByKey.get(groupKey) === true;
+    }
+    if (hasStrongGroupMarkerIdentityFromDom(groupPanel)) return false;
+    const subject = getGroupSubjectFromPanel(groupPanel);
+    return Boolean(subject && groupCountBySubject.get(subject) === 1 &&
+      groupHasPriorityBySubject.get(subject) === true);
+  }
+
+  function applyPriorityMarkers() {
+    const enabled = isFeatureEnabled('priorityAlerts') && alertDataIndexReady;
+    for (const panel of getChildAlertPanels()) {
+      const title = getChildHeading(panel)?.querySelector('.panel-title');
+      const priority = enabled && resolveChildIndexedState(panel)?.priority === true;
+      ensurePriorityMarker(title, false, priority);
+    }
+    for (const panel of getGroupPanels()) {
+      const title = getPanelHeading(panel)?.querySelector('.panel-title');
+      ensurePriorityMarker(title, true, enabled && resolveGroupPriority(panel));
+    }
+  }
+
   function applyNeedsAckMarkersFromData(options = {}) {
     const preserveExistingOnNone = options.preserveExistingOnNone === true;
 
@@ -3340,6 +3417,7 @@
         ensureParentStateIcon(groupPanel, 'none');
       }
     }
+    applyPriorityMarkers();
   }
 
   function repaintNeedsAckMarkersFast() {
@@ -3507,7 +3585,7 @@
         node.id === TOP_BAR_ID ||
         node.closest?.(`#${TOP_BAR_ID}`) ||
         node.matches?.(
-          `.${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${SILENCED_BADGE_CLASS}, ` +
+          `.${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}, .${SILENCED_BADGE_CLASS}, ` +
           `.${COPY_BUTTON_CLASS}, .${COPY_ALL_BUTTON_CLASS}, .${COPY_LAST_ACTION_BUTTON_CLASS}, ` +
           `.${LAST_ACTION_LINK_CLASS}, .${LAST_ACTION_TIME_TEXT_CLASS}, ` +
           `.${GRAFANA_QUERY_BUTTON_CLASS}`
@@ -3579,6 +3657,7 @@
       if (node.id === TOP_BAR_ID || node.closest?.(`#${TOP_BAR_ID}`)) return false;
       if (node.classList?.contains(OLD_NO_NOTE_ICON_CLASS) || node.closest?.(`.${OLD_NO_NOTE_ICON_CLASS}`)) return false;
       if (node.classList?.contains(HAS_NOTE_ICON_CLASS) || node.closest?.(`.${HAS_NOTE_ICON_CLASS}`)) return false;
+      if (node.classList?.contains(PRIORITY_MARKER_CLASS) || node.closest?.(`.${PRIORITY_MARKER_CLASS}`)) return false;
 
       if (
         node === document.body ||
