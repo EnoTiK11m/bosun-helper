@@ -87,6 +87,7 @@ async function main() {
   assert.strictEqual(defaultsStore.get('preferences.autoRefreshIdleSeconds'), 60);
   assert.strictEqual(defaultsStore.get('features.priorityAlerts'), false);
   assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), true);
+  assert.strictEqual(defaultsStore.get('preferences.priorityShowAcknowledged'), false);
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), []);
   assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: 1 }], 'fresh start must not materialize every default leaf');
   await defaultsStore.update({
@@ -96,6 +97,11 @@ async function main() {
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
   await defaultsStore.update({ 'features.priorityAlerts': false, 'preferences.priorityCritical': false });
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
+  await defaultsStore.update({ 'preferences.priorityShowAcknowledged': true });
+  assert.strictEqual(defaultsStore.get('preferences.priorityShowAcknowledged'), true);
+  await defaultsStore.update({ 'preferences.priorityShowAcknowledged': false });
+  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
+  assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), false);
   await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': 'alpha.alert' }), /Invalid setting/);
   await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': ['x'.repeat(257)] }), /Invalid setting/);
   await assert.rejects(defaultsStore.update({
@@ -652,6 +658,8 @@ async function main() {
   await storeA.update({ 'priorityRules.exactAlertNames': [' shared.alert '], 'features.priorityAlerts': true });
   assert.deepStrictEqual(plain(storeB.get('priorityRules.exactAlertNames')), ['shared.alert']);
   assert.strictEqual(storeB.get('features.priorityAlerts'), true);
+  await storeA.update({ 'preferences.priorityShowAcknowledged': true });
+  assert.strictEqual(storeB.get('preferences.priorityShowAcknowledged'), true);
 
   await new Promise((resolve) => shared.storage.set({ bosunSoundAlertsEnabled: false }, resolve));
   await new Promise((resolve) => setImmediate(resolve));

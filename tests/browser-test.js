@@ -789,6 +789,7 @@ async function runBrowserAssertions(client) {
     const panel = document.querySelector('.bosun-settings-panel');
     const body = document.querySelector('.bosun-settings-body');
     const collapsedHeight = panel.getBoundingClientRect().height;
+    const collapsedGroupHeight = details.getBoundingClientRect().height;
     summary.focus();
     summary.click();
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -805,6 +806,10 @@ async function runBrowserAssertions(client) {
     summary.click();
     summary.click();
     const draftPreserved = note.value === 'unsaved visual draft';
+    body.scrollTop = body.scrollHeight;
+    const verticalContentReachable = body.scrollHeight <= body.clientHeight ||
+      (['auto', 'scroll'].includes(getComputedStyle(body).overflowY) &&
+        body.scrollTop >= body.scrollHeight - body.clientHeight - 1);
     globalThis.__settingsLayoutTest = { api, store, subscribers };
     return {
       columnCount: getComputedStyle(body).columnCount,
@@ -813,6 +818,10 @@ async function runBrowserAssertions(client) {
       templatesHeight: templates.height,
       collapsedHeight,
       expandedHeight: panel.getBoundingClientRect().height,
+      collapsedGroupHeight,
+      expandedGroupHeight: details.getBoundingClientRect().height,
+      panelFitsViewport: panel.getBoundingClientRect().height <= window.innerHeight - 20,
+      verticalContentReachable,
       templatesOpen: details.open,
       summaryFocusedBeforeToggle: document.activeElement === summary,
       draftPreserved,
@@ -854,7 +863,9 @@ async function runBrowserAssertions(client) {
     wideSettingsLayout.integrationHeight + 40 < wideSettingsLayout.templatesHeight,
     'Integration card was stretched to match the templates card'
   );
-  assert.ok(wideSettingsLayout.collapsedHeight < wideSettingsLayout.expandedHeight);
+  assert.ok(wideSettingsLayout.collapsedGroupHeight < wideSettingsLayout.expandedGroupHeight);
+  assert.strictEqual(wideSettingsLayout.panelFitsViewport, true);
+  assert.strictEqual(wideSettingsLayout.verticalContentReachable, true);
   assert.strictEqual(wideSettingsLayout.templatesOpen, true);
   assert.strictEqual(wideSettingsLayout.summaryFocusedBeforeToggle, true);
   assert.strictEqual(wideSettingsLayout.draftPreserved, true);
@@ -2361,8 +2372,8 @@ async function runBrowserAssertions(client) {
         Actions: note ? [{ Type: 'Note', User: 'operator', Message: 'synthetic' }] : []
       } };
     }
-    function mount(subject, rows = [], acknowledged = false) {
-      document.body.innerHTML = '';
+    function mount(subject, rows = [], acknowledged = false, preserve = false) {
+      if (!preserve) document.body.innerHTML = '';
       const root = document.createElement('div');
       root.setAttribute('ts-ack-group', acknowledged ? 'schedule.Groups.Acknowledged' : 'schedule.Groups.NeedAck');
       const list = document.createElement('div'); list.className = 'panel-group';
@@ -2444,15 +2455,101 @@ async function runBrowserAssertions(client) {
     hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'acknowledged', Children: [child(501, 'ack.alert', 'critical')] }] } });
     acknowledged.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     const acknowledgedCounts = [count(acknowledged.group, true), count(acknowledged.children[0])];
+    const needLiveChild = child(601, 'need.live', 'critical');
+    const ackLiveCritical = child(601, 'ack.critical', 'critical', true);
+    const ackLiveWarning = child(602, 'ack.warning', 'warning');
+    const needLive = mount('need live', [needLiveChild]);
+    const ackLive = mount('ack live', [ackLiveCritical, ackLiveWarning], true, true);
+    const dualPayload = { Groups: {
+      NeedAck: [{ Subject: 'need live', Children: [needLiveChild] }],
+      Acknowledged: [{ Subject: 'ack live', Children: [ackLiveCritical, ackLiveWarning] }]
+    } };
+    hooks.applyAlertsPayload(dualPayload);
+    const ackDefaultOff = [count(needLive.group, true), count(ackLive.group, true)];
+    change('preferences.priorityShowAcknowledged', true);
+    const ackEnabledCollapsed = [count(needLive.group, true), count(ackLive.group, true)];
+    ackLive.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackExpanded = [count(ackLive.group, true), ...ackLive.children.map((panel) => count(panel))];
+    const ackNote = ackLive.children[0].querySelectorAll('.bosun-has-note-icon').length;
+    let ackClicks = 0;
+    ackLive.children[0].querySelector('input').addEventListener('click', () => { ackClicks += 1; });
+    ackLive.children[0].querySelector('input').click();
+    ackLive.collapse(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    ackLive.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackRepeated = [count(ackLive.group, true), ...ackLive.children.map((panel) => count(panel))];
+    change('preferences.priorityCritical', false);
+    const bothCriticalOff = [count(needLive.group, true), count(ackLive.group, true)];
+    change('priorityRules.exactAlertNames', ['ack.warning']);
+    const ackExactOn = [count(needLive.group, true), count(ackLive.group, true),
+      ...ackLive.children.map((panel) => count(panel))];
+    change('priorityRules.exactAlertNames', []);
+    change('preferences.priorityCritical', true);
+    change('preferences.priorityShowAcknowledged', false);
+    const ackToggledOff = [count(needLive.group, true), count(ackLive.group, true),
+      ...ackLive.children.map((panel) => count(panel))];
+    change('preferences.priorityShowAcknowledged', true);
+    change('features.priorityAlerts', false);
+    const bothDisabled = [count(needLive.group, true), count(ackLive.group, true),
+      ...ackLive.children.map((panel) => count(panel))];
+    change('features.priorityAlerts', true);
+    const ackReplacement = mount('ack live', [ackLiveCritical, ackLiveWarning], true);
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    ackReplacement.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackRemount = [count(ackReplacement.group, true), ...ackReplacement.children.map((panel) => count(panel))];
+    const ackAmbiguous = mount('ack ambiguous', [child(701, 'first', 'critical')], true);
+    hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack ambiguous', Children: [
+      child(701, 'first', 'critical'), child(701, 'second', 'critical')
+    ] }] } });
+    ackAmbiguous.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackAmbiguousCounts = [count(ackAmbiguous.group, true), count(ackAmbiguous.children[0])];
+    const ackMismatch = mount('ack mismatch', [child(802, 'same', 'critical')], true);
+    hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack mismatch', Children: [child(801, 'same', 'critical')] }] } });
+    ackMismatch.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackMismatchCounts = [count(ackMismatch.group, true), count(ackMismatch.children[0])];
+    hooks.applyAlertsPayload({ Groups: { Acknowledged: [] } });
+    const ackDisappeared = [count(ackMismatch.group, true), count(ackMismatch.children[0])];
+    const needCollisionChild = child(901, 'need.collision', 'critical');
+    const ackCollisionChild = child(901, 'ack.collision', 'warning');
+    const needCollision = mount('need collision', [needCollisionChild]);
+    const ackCollision = mount('ack collision', [ackCollisionChild], true, true);
+    hooks.applyAlertsPayload({ Groups: {
+      NeedAck: [{ Subject: 'need collision', Children: [needCollisionChild] }],
+      Acknowledged: [{ Subject: 'ack collision', Children: [ackCollisionChild] }]
+    } });
+    needCollision.expand(); ackCollision.expand();
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const sectionCollision = [count(needCollision.group, true), count(needCollision.children[0]),
+      count(ackCollision.group, true), count(ackCollision.children[0])];
+    const ackAmbiguousKey = mount('ack duplicate key', [child(null, 'same', 'critical')], true);
+    hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack duplicate key', Children: [
+      child(null, 'same', 'critical'), child(null, 'same', 'warning')
+    ] }] } });
+    ackAmbiguousKey.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackAmbiguousKeyCounts = [count(ackAmbiguousKey.group, true), count(ackAmbiguousKey.children[0])];
+    const conflictingChild = child(931, 'first.name', 'critical');
+    conflictingChild.State.Alert = 'second.name';
+    const ackConflicting = mount('ack conflicting name', [conflictingChild], true);
+    hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack conflicting name', Children: [conflictingChild] }] } });
+    ackConflicting.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    const ackConflictingCounts = [count(ackConflicting.group, true), count(ackConflicting.children[0])];
     return { collapsed, childCounts, noteCoexist, repeated, label, narrowStyle, clicks, disabled, reenabled,
-      criticalOff, exactOn, exactOff, domReplacement, replaced, ambiguousCounts, mismatchCounts, acknowledgedCounts };
+      criticalOff, exactOn, exactOff, domReplacement, replaced, ambiguousCounts, mismatchCounts, acknowledgedCounts,
+      ackDefaultOff, ackEnabledCollapsed, ackExpanded, ackNote, ackClicks, ackRepeated, bothCriticalOff,
+      ackExactOn, ackToggledOff, bothDisabled, ackRemount, ackAmbiguousCounts, ackMismatchCounts, ackDisappeared,
+      sectionCollision, ackAmbiguousKeyCounts, ackConflictingCounts };
   })()`);
   assert.deepStrictEqual(priorityMarkers, {
     collapsed: 1, childCounts: [1, 0], noteCoexist: 1, repeated: [1, 1, 0],
     label: ['Приоритет', 'Приоритет'], narrowStyle: [true, true], clicks: 1,
     disabled: [0, 0, 0], reenabled: [1, 1, 0], criticalOff: [0, 0],
     exactOn: [1, 0, 1], exactOff: [0, 0, 0], domReplacement: [1, 1, 0], replaced: [0, 0],
-    ambiguousCounts: [0, 0], mismatchCounts: [0, 0], acknowledgedCounts: [0, 0]
+    ambiguousCounts: [0, 0], mismatchCounts: [0, 0], acknowledgedCounts: [0, 0],
+    ackDefaultOff: [1, 0], ackEnabledCollapsed: [1, 1], ackExpanded: [1, 1, 0],
+    ackNote: 0, ackClicks: 1, ackRepeated: [1, 1, 0], bothCriticalOff: [0, 0],
+    ackExactOn: [0, 1, 0, 1], ackToggledOff: [1, 0, 0, 0], bothDisabled: [0, 0, 0, 0],
+    ackRemount: [1, 1, 0], ackAmbiguousCounts: [0, 0], ackMismatchCounts: [0, 0], ackDisappeared: [0, 0],
+    sectionCollision: [1, 1, 0, 0], ackAmbiguousKeyCounts: [0, 0], ackConflictingCounts: [0, 0]
   }, 'Priority markers must follow resolved NeedAck children and live settings');
 
   const usageGraphResolverResult = await evaluate(client, `(async () => {

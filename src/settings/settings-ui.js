@@ -37,6 +37,7 @@
       fields: Object.freeze([
         Object.freeze({ path: 'features.priorityAlerts', label: 'Включить Priority Alerts' }),
         Object.freeze({ path: 'preferences.priorityCritical', label: 'Считать Critical приоритетными' }),
+        Object.freeze({ path: 'preferences.priorityShowAcknowledged', label: 'Показывать приоритет в Acknowledged' }),
         Object.freeze({
           path: 'priorityRules.exactAlertNames',
           label: 'Точные имена алертов',
@@ -245,6 +246,7 @@
       const paths = [
         'features.priorityAlerts',
         'preferences.priorityCritical',
+        'preferences.priorityShowAcknowledged',
         'priorityRules.exactAlertNames'
       ];
       if (
@@ -260,6 +262,7 @@
         const next = await settingsStore.update({
           'features.priorityAlerts': false,
           'preferences.priorityCritical': true,
+          'preferences.priorityShowAcknowledged': false,
           'priorityRules.exactAlertNames': []
         });
         if (destroyed || paths.some((path) => pendingByPath.get(path) !== operation)) return;

@@ -214,6 +214,7 @@
   const groupHasAnyUserCommentBySubject = new Map();
   const groupHasStrongIdentityBySubject = new Map();
   const groupCountBySubject = new Map();
+  let acknowledgedPriorityIndex = null;
   const grafanaQueryById = new Map();
   const grafanaQueryByKey = new Map();
   const ambiguousGrafanaIds = new Set();
@@ -1228,18 +1229,25 @@
     setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
   }
 
-  function readChildIndexedState(key, identityType) {
+  function readChildIndexedState(key, identityType, index = null) {
     if (!key) return null;
     const maps = identityType === 'id'
-      ? [childOldNoNoteById, childHasNoteById, childHasUserCommentById]
-      : [childOldNoNoteByKey, childHasNoteByKey, childHasUserCommentByKey];
-    if (!maps.every((map) => map.has(key))) return null;
-    const priorityMap = identityType === 'id' ? childPriorityById : childPriorityByKey;
+      ? [index ? index.childOldNoNoteById : childOldNoNoteById,
+          index ? index.childHasNoteById : childHasNoteById,
+          index ? index.childHasUserCommentById : childHasUserCommentById]
+      : [index ? index.childOldNoNoteByKey : childOldNoNoteByKey,
+          index ? index.childHasNoteByKey : childHasNoteByKey,
+          index ? index.childHasUserCommentByKey : childHasUserCommentByKey];
+    if (!maps.every((map) => map?.has(key))) return null;
+    const priorityMap = identityType === 'id'
+      ? index ? index.childPriorityById : childPriorityById
+      : index ? index.childPriorityByKey : childPriorityByKey;
+    if (index && !priorityMap?.has(key)) return null;
     return {
       oldNoNote: maps[0].get(key) === true,
       hasNote: maps[1].get(key) === true,
       hasUserComment: maps[2].get(key) === true,
-      priority: priorityMap.get(key) === true
+      priority: priorityMap?.get(key) === true
     };
   }
 
@@ -1251,7 +1259,7 @@
       first.priority === second.priority;
   }
 
-  function resolveChildIndexedState(panel, parentGroupPanel = null) {
+  function resolveChildIndexedState(panel, parentGroupPanel = null, index = null) {
     const heading = getChildHeading(panel);
     if (!heading) return null;
 
@@ -1259,17 +1267,20 @@
     const groupPanel = parentGroupPanel || findParentGroupPanelForChild(panel);
     const childKey = buildChildMarkerKeyFromHeading(heading, groupPanel);
 
+    const ambiguousIds = index ? index.ambiguousChildIds : ambiguousChildIds;
+    const ambiguousKeys = index ? index.ambiguousChildKeys : ambiguousChildKeys;
+    if (!ambiguousIds || !ambiguousKeys) return null;
     if (panelId) {
-      if (ambiguousChildIds.has(panelId) || (childKey && ambiguousChildKeys.has(childKey))) {
+      if (ambiguousIds.has(panelId) || (childKey && ambiguousKeys.has(childKey))) {
         return null;
       }
-      const byId = readChildIndexedState(panelId, 'id');
-      const byKey = readChildIndexedState(childKey, 'key');
+      const byId = readChildIndexedState(panelId, 'id', index);
+      const byKey = readChildIndexedState(childKey, 'key', index);
       return childIndexedStatesMatch(byId, byKey) ? byId : null;
     }
 
-    if (!childKey || ambiguousChildKeys.has(childKey)) return null;
-    return readChildIndexedState(childKey, 'key');
+    if (!childKey || ambiguousKeys.has(childKey)) return null;
+    return readChildIndexedState(childKey, 'key', index);
   }
 
   function resolveChildHasUserComment(panel, parentGroupPanel = null) {
@@ -1938,6 +1949,7 @@
     if (initial || [
       'features.priorityAlerts',
       'preferences.priorityCritical',
+      'preferences.priorityShowAcknowledged',
       'priorityRules.exactAlertNames'
     ].some((path) => changedPaths.includes(path))) {
       if (latestAlertsPayload) rebuildAlertDataIndex(latestAlertsPayload, { skipGrafanaQueryIndex: true });
@@ -2736,8 +2748,7 @@
     return document.querySelector('[ts-ack-group="schedule.Groups.NeedAck"]');
   }
 
-  function getGroupPanels() {
-    const root = getNeedsAckRoot();
+  function getGroupPanels(root = getNeedsAckRoot()) {
     if (!root) return [];
 
     return Array.from(root.querySelectorAll('.panel-group > .panel')).filter((panel) => {
@@ -2746,8 +2757,7 @@
     });
   }
 
-  function getChildAlertPanels() {
-    const root = getNeedsAckRoot();
+  function getChildAlertPanels(root = getNeedsAckRoot()) {
     if (!root) return [];
 
     const byHeading = Array.from(root.querySelectorAll('.panel-heading[ng-click="toggle()"]'))
@@ -3088,7 +3098,7 @@
   }
 
   function rebuildAlertDataIndex(payload, options = {}) {
-    const nextIndex = alertsDataApi?.rebuildAlertDataIndex?.(payload, {
+    const helpers = {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
       hasStrongChildMarkerIdentityFromData,
@@ -3104,7 +3114,8 @@
         if (raw == null) return [];
         return Array.isArray(raw) ? raw : [raw];
       }
-    }) || {
+    };
+    const nextIndex = alertsDataApi?.rebuildAlertDataIndex?.(payload, helpers) || {
       childOldNoNoteById: new Map(),
       childOldNoNoteByKey: new Map(),
       childHasNoteById: new Map(),
@@ -3168,6 +3179,10 @@
       groupHasStrongIdentityBySubject.set(key, value);
     }
     for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
+    acknowledgedPriorityIndex = isFeatureEnabled('priorityAlerts') &&
+      settingsSnapshot?.preferences?.priorityShowAcknowledged === true
+      ? alertsDataApi?.rebuildAlertDataIndex?.(payload, helpers, 'Acknowledged') || null
+      : null;
     alertDataIndexReady = true;
     if (!options.skipGrafanaQueryIndex) rebuildGrafanaQueryIndex(payload);
   }
@@ -3371,27 +3386,41 @@
     title.insertBefore(marker, title.firstChild);
   }
 
-  function resolveGroupPriority(groupPanel) {
+  function resolveGroupPriority(groupPanel, index = null) {
     const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
-    if (groupKey && groupHasPriorityByKey.has(groupKey)) {
-      return groupHasPriorityByKey.get(groupKey) === true;
+    const byKey = index ? index.groupHasPriorityByKey : groupHasPriorityByKey;
+    const bySubject = index ? index.groupHasPriorityBySubject : groupHasPriorityBySubject;
+    const countBySubject = index ? index.groupCountBySubject : groupCountBySubject;
+    if (!byKey || !bySubject || !countBySubject) return false;
+    if (groupKey && byKey.has(groupKey)) {
+      return byKey.get(groupKey) === true;
     }
     if (hasStrongGroupMarkerIdentityFromDom(groupPanel)) return false;
     const subject = getGroupSubjectFromPanel(groupPanel);
-    return Boolean(subject && groupCountBySubject.get(subject) === 1 &&
-      groupHasPriorityBySubject.get(subject) === true);
+    return Boolean(subject && countBySubject.get(subject) === 1 &&
+      bySubject.get(subject) === true);
   }
 
   function applyPriorityMarkers() {
     const enabled = isFeatureEnabled('priorityAlerts') && alertDataIndexReady;
-    for (const panel of getChildAlertPanels()) {
-      const title = getChildHeading(panel)?.querySelector('.panel-title');
-      const priority = enabled && resolveChildIndexedState(panel)?.priority === true;
-      ensurePriorityMarker(title, false, priority);
-    }
-    for (const panel of getGroupPanels()) {
-      const title = getPanelHeading(panel)?.querySelector('.panel-title');
-      ensurePriorityMarker(title, true, enabled && resolveGroupPriority(panel));
+    for (const { root, index, show } of [
+      { root: getNeedsAckRoot(), index: null, show: enabled },
+      {
+        root: getAcknowledgedRoot(),
+        index: acknowledgedPriorityIndex,
+        show: enabled && settingsSnapshot?.preferences?.priorityShowAcknowledged === true &&
+          Boolean(acknowledgedPriorityIndex)
+      }
+    ]) {
+      for (const panel of getChildAlertPanels(root)) {
+        const title = getChildHeading(panel)?.querySelector('.panel-title');
+        const priority = show && resolveChildIndexedState(panel, null, index)?.priority === true;
+        ensurePriorityMarker(title, false, priority);
+      }
+      for (const panel of getGroupPanels(root)) {
+        const title = getPanelHeading(panel)?.querySelector('.panel-title');
+        ensurePriorityMarker(title, true, show && resolveGroupPriority(panel, index));
+      }
     }
   }
 
