@@ -8,6 +8,8 @@
   const MAX_TEMPLATES_PER_TYPE = 50;
   const MAX_TEMPLATE_LENGTH = 500;
   const MAX_TOTAL_TEMPLATE_TEXT_LENGTH = 10000;
+  const MAX_PRIORITY_ALERT_NAMES = 50;
+  const MAX_PRIORITY_ALERT_NAME_LENGTH = 256;
 
   const FEATURE_DEFAULTS = Object.freeze({
     singleAlertAge: true,
@@ -21,7 +23,8 @@
     visualNewAlertNotifications: true,
     autoRefresh: true,
     actionTemplates: true,
-    grafanaIntegration: true
+    grafanaIntegration: true,
+    priorityAlerts: false
   });
 
   const DEFAULTS = Object.freeze({
@@ -32,9 +35,11 @@
       noCommentFilterActive: false,
       acknowledgedCollapsed: false,
       soundEnabled: true,
+      priorityCritical: true,
       autoRefreshEnabled: true,
       autoRefreshIdleSeconds: 60
     }),
+    priorityRules: Object.freeze({ exactAlertNames: Object.freeze([]) }),
     actionTemplates: Object.freeze({ note: null, ack: null, close: null }),
     internal: Object.freeze({ diagnosticsEnabled: false })
   });
@@ -80,6 +85,23 @@
     return { valid: true, value: normalized };
   }
 
+  function normalizeExactAlertNames(value) {
+    if (!Array.isArray(value) || value.length > MAX_PRIORITY_ALERT_NAMES * 4) return { valid: false };
+    const normalized = [];
+    const seen = new Set();
+    for (const candidate of value) {
+      if (typeof candidate !== 'string') continue;
+      const name = candidate.trim();
+      if (!name) continue;
+      if (name.length > MAX_PRIORITY_ALERT_NAME_LENGTH) return { valid: false };
+      if (seen.has(name)) continue;
+      if (normalized.length >= MAX_PRIORITY_ALERT_NAMES) return { valid: false };
+      seen.add(name);
+      normalized.push(name);
+    }
+    return { valid: true, value: normalized };
+  }
+
   function entry(path, defaultValue, normalize, legacyKey = '') {
     return Object.freeze({
       path,
@@ -100,7 +122,9 @@
     entry('preferences.acknowledgedCollapsed', false, normalizeBoolean, 'bosunAcknowledgedCollapseEnabled'),
     entry('preferences.soundEnabled', true, normalizeBoolean, 'bosunSoundAlertsEnabled'),
     entry('preferences.autoRefreshEnabled', true, normalizeBoolean, 'bosunAutoRefreshEnabled'),
-    entry('preferences.autoRefreshIdleSeconds', 60, normalizeIdleSeconds, 'bosunAutoRefreshIdleSeconds')
+    entry('preferences.autoRefreshIdleSeconds', 60, normalizeIdleSeconds, 'bosunAutoRefreshIdleSeconds'),
+    entry('preferences.priorityCritical', true, normalizeBoolean),
+    entry('priorityRules.exactAlertNames', [], normalizeExactAlertNames)
   );
   for (const type of ACTION_TYPES) {
     schemaEntries.push(entry(`actionTemplates.${type}`, null, normalizeTemplates, `bosunActionTemplatesV1:${type}`));

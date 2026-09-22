@@ -209,6 +209,8 @@ function createStore(defaults) {
   const updates = [];
   let resetCalls = 0;
   let rejectNextUpdate = false;
+  let delayNextUpdate = false;
+  let releaseUpdate = null;
   let delayNextReset = false;
   let releaseReset = null;
   const write = (path, value) => {
@@ -219,6 +221,10 @@ function createStore(defaults) {
     getSnapshot: () => clone(snapshot),
     async update(values) {
       updates.push(clone(values));
+      if (delayNextUpdate) {
+        delayNextUpdate = false;
+        await new Promise((resolve) => { releaseUpdate = resolve; });
+      }
       if (rejectNextUpdate) {
         rejectNextUpdate = false;
         throw new Error('synthetic settings write failure');
@@ -247,6 +253,11 @@ function createStore(defaults) {
     },
     updates,
     failNextUpdate() { rejectNextUpdate = true; },
+    delayNextUpdate() { delayNextUpdate = true; },
+    releaseUpdate() {
+      releaseUpdate?.();
+      releaseUpdate = null;
+    },
     delayNextReset() { delayNextReset = true; },
     releaseReset() {
       releaseReset?.();
@@ -272,9 +283,11 @@ async function main() {
       copyButtons: false,
       lastActionEnhancements: true,
       soundNotifications: true,
-      grafanaIntegration: true
+      grafanaIntegration: true,
+      priorityAlerts: false
     },
-    preferences: { autoRefreshIdleSeconds: 45 },
+    preferences: { autoRefreshIdleSeconds: 45, priorityCritical: true },
+    priorityRules: { exactAlertNames: ['saved.alert'] },
     actionTemplates: { note: ['synthetic note'], ack: null, close: [] }
   };
   const schema = [
@@ -282,6 +295,9 @@ async function main() {
     'features.lastActionEnhancements',
     'features.soundNotifications',
     'features.grafanaIntegration',
+    'features.priorityAlerts',
+    'preferences.priorityCritical',
+    'priorityRules.exactAlertNames',
     'preferences.autoRefreshIdleSeconds',
     'actionTemplates.note',
     'actionTemplates.ack',
@@ -311,15 +327,49 @@ async function main() {
   const copyToggle = harness.document.querySelector('[data-setting-path="features.copyButtons"]');
   const grafanaToggle = harness.document.querySelector('[data-setting-path="features.grafanaIntegration"]');
   const soundToggle = harness.document.querySelector('[data-setting-path="features.soundNotifications"]');
+  const priorityToggle = harness.document.querySelector('[data-setting-path="features.priorityAlerts"]');
+  const criticalToggle = harness.document.querySelector('[data-setting-path="preferences.priorityCritical"]');
+  const priorityNames = harness.document.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
+  assert.ok(priorityToggle && criticalToggle && priorityNames, 'Priority controls must render');
+  assert.strictEqual(priorityNames.value, 'saved.alert');
+  assert.ok(harness.document.querySelector('[data-priority-section-reset]'));
+  assert.ok(harness.document.querySelectorAll('.bosun-settings-group-title')
+    .some((element) => element.textContent === 'Priority Alerts'));
+  priorityNames.value = ' first.alert \n\n second.alert ';
+  priorityNames.focus();
+  priorityNames.dispatchEvent(harness.createEvent('change', { bubbles: true }));
+  await flush();
+  assert.deepStrictEqual(store.updates.at(-1), {
+    'priorityRules.exactAlertNames': ['first.alert', 'second.alert']
+  });
+  assert.strictEqual(harness.document.activeElement, priorityNames, 'Async save must retain textarea focus');
+  store.delayNextUpdate();
+  priorityNames.value = 'slow.alert';
+  priorityNames.dispatchEvent(harness.createEvent('change', { bubbles: true }));
+  await flush();
+  soundToggle.focus();
+  store.releaseUpdate();
+  await flush();
+  assert.strictEqual(harness.document.activeElement, soundToggle, 'Delayed save must not steal unrelated focus');
+  store.external('priorityRules.exactAlertNames', ['external.alert']);
+  assert.strictEqual(priorityNames.value, 'external.alert');
+  priorityToggle.click();
+  await flush();
+  assert.deepStrictEqual(store.getSnapshot().priorityRules.exactAlertNames, ['external.alert']);
+  harness.document.querySelector('[data-priority-section-reset]').click();
+  await flush();
+  assert.strictEqual(priorityToggle.checked, false);
+  assert.strictEqual(criticalToggle.checked, true);
+  assert.strictEqual(priorityNames.value, '');
   assert.strictEqual(copyToggle.checked, false, 'Initial value must come from the store snapshot');
   assert.ok(harness.document.querySelector('.bosun-settings-reload-hint'));
 
   copyToggle.click();
   await flush();
-  assert.deepStrictEqual(store.updates[0], { 'features.copyButtons': true });
+  assert.deepStrictEqual(store.updates.at(-1), { 'features.copyButtons': true });
   grafanaToggle.click();
   await flush();
-  assert.deepStrictEqual(store.updates[1], { 'features.grafanaIntegration': false });
+  assert.deepStrictEqual(store.updates.at(-1), { 'features.grafanaIntegration': false });
   assert.strictEqual(soundToggle.checked, true, 'Grafana update must not alter unrelated runtime controls');
 
   store.external('features.copyButtons', false);
