@@ -2802,8 +2802,13 @@ async function runBrowserAssertions(client) {
       }
     };
     const alertName = 'synthetic.output.derived.label';
+    const countValuesAlertName = 'synthetic.count.values.label';
     const ruleConfig = ${JSON.stringify(`alert synthetic.output.derived.label {
   $usage_graph = promras('''label_replace(up, "cluster", "prod", "job", ".*")''', '5m', '2h', '')
+  warn = $usage_graph > 0
+}
+alert synthetic.count.values.label {
+  $usage_graph = promras('''count_values("sample_value", temperature)''', '5m', '2h', '')
   warn = $usage_graph > 0
 }`)};
     const previousFetch = globalThis.fetch;
@@ -2874,12 +2879,38 @@ async function runBrowserAssertions(client) {
       hooks.applyAlertsPayload(payload);
       const sourceState = await hooks.ruleGraphResolver.refresh([alertName]);
       const resolution = hooks.ruleGraphResolver.getResolution(alertName);
-      return {
+      const result = {
         sourceAvailable: sourceState.available,
         resolvedQuery: resolution?.query || '',
         grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
         grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
       };
+      const countValuesPayload = JSON.parse(JSON.stringify(payload));
+      const countValuesChild = countValuesPayload.Groups.NeedAck[0].Children[0];
+      countValuesChild.Alert = countValuesAlertName;
+      countValuesChild.AlertKey = countValuesAlertName + '{sample_value=7,host=synthetic-host}';
+      countValuesChild.Subject = countValuesChild.AlertKey;
+      countValuesChild.State.Alert = countValuesAlertName;
+      countValuesChild.State.AlertKey = countValuesChild.AlertKey;
+      countValuesChild.State.Tags = 'sample_value=7,host=synthetic-host';
+      subjectNode.textContent = countValuesChild.Subject;
+      hooks.applyAlertsPayload(countValuesPayload);
+      result.countValuesConflict = {
+        resolvedQuery: hooks.ruleGraphResolver.getResolution(countValuesAlertName)?.query || '',
+        grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
+        grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
+      };
+      countValuesChild.AlertKey = countValuesAlertName + '{host=synthetic-host}';
+      countValuesChild.Subject = countValuesChild.AlertKey;
+      countValuesChild.State.AlertKey = countValuesChild.AlertKey;
+      countValuesChild.State.Tags = 'host=synthetic-host';
+      subjectNode.textContent = countValuesChild.Subject;
+      hooks.applyAlertsPayload(countValuesPayload);
+      result.countValuesIndependent = {
+        grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
+        grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
+      };
+      return result;
     } finally {
       globalThis.fetch = previousFetch;
     }
@@ -2888,7 +2919,16 @@ async function runBrowserAssertions(client) {
     sourceAvailable: true,
     resolvedQuery: 'label_replace(up, "cluster", "prod", "job", ".*")',
     grafanaQuery: '',
-    grafanaButtonCount: 0
+    grafanaButtonCount: 0,
+    countValuesConflict: {
+      resolvedQuery: 'count_values("sample_value", temperature)',
+      grafanaQuery: '',
+      grafanaButtonCount: 0
+    },
+    countValuesIndependent: {
+      grafanaQuery: 'count_values("sample_value", temperature{host="synthetic-host"})',
+      grafanaButtonCount: 1
+    }
   });
 
   const concurrentRuleSnapshotResult = await evaluate(client, `(async () => {

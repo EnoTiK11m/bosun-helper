@@ -16,7 +16,7 @@
     'sum', 'avg', 'min', 'max', 'count', 'group',
     'stddev', 'stdvar', 'topk', 'bottomk', 'quantile', 'count_values'
   ]);
-  const OUTPUT_LABEL_FUNCTIONS = new Set(['label_replace', 'label_join']);
+  const OUTPUT_LABEL_FUNCTIONS = new Set(['label_replace', 'label_join', 'count_values']);
   const MAX_PROM_QUERY_LENGTH = 16 * 1024;
   const MAX_EXPR_LENGTH = 64 * 1024;
   const MAX_TAG_SOURCE_LENGTH = 8 * 1024;
@@ -632,10 +632,27 @@
         previousChar === '.'
       ) continue;
 
-      const openIndex = skipPromTrivia(source, index);
+      let openIndex = skipPromTrivia(source, index);
+      const isCountValues = identifier === 'count_values';
+      if (isCountValues) {
+        // Aggregation may place by/without before its argument list.
+        const grouping = source.slice(openIndex).match(/^(?:by|without)\b/i);
+        if (grouping) {
+          const groupingOpen = skipPromTrivia(source, openIndex + grouping[0].length);
+          if (source[groupingOpen] !== '(') return null;
+          const groupingArguments = parseFunctionArguments(source, groupingOpen);
+          if (!groupingArguments?.length) return null;
+          openIndex = skipPromTrivia(source, groupingArguments[groupingArguments.length - 1].end + 1);
+          if (source[openIndex] !== '(') return null;
+        }
+      }
       if (source[openIndex] !== '(') continue;
       const argumentsFound = parseFunctionArguments(source, openIndex);
-      const destinationLabel = parseDestinationLabel(source, argumentsFound?.[1]);
+      if (isCountValues && (
+        argumentsFound?.length !== 2 ||
+        skipPromTrivia(source, argumentsFound[1].start, argumentsFound[1].end) === argumentsFound[1].end
+      )) return null;
+      const destinationLabel = parseDestinationLabel(source, argumentsFound?.[isCountValues ? 0 : 1]);
       if (!destinationLabel) return null;
       labels.add(destinationLabel);
     }

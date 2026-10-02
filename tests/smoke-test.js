@@ -810,6 +810,65 @@ assert.strictEqual(
   'rate(http_requests_total{env="prod"}[5m])',
   'Ordinary selectors without output-derived labels must remain supported'
 );
+for (const query of [
+  'count_values("sample_value", temperature)',
+  'sum(count_values("sample_value", temperature))',
+  'count_values("other_value", humidity) + count_values("sample_value", temperature)',
+  'count_values by (host) ("sample_value", temperature)',
+  'count_values without (zone) ("sample_value", temperature)',
+  'count_values("sample_value", temperature) by (host)',
+  'count_values ( \'sample_value\', (temperature + humidity) )',
+  'count_values(`sample_value`, temperature)',
+  [
+    'sum(count_values # output label',
+    '  ( # first argument',
+    '    "sample_value" # destination',
+    '    , rate(temperature{note="escaped \\\"quote\\\""}[5m])',
+    '  ))'
+  ].join('\n')
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(query, { sample_value: '7', host: 'synthetic-host' }),
+    '',
+    `A14: count_values output-label conflict must reject the entire transform: ${query}`
+  );
+}
+for (const query of [
+  'count_values(sample_value, temperature)',
+  'count_values("sample-value", temperature)',
+  'count_values("sample_\\x76alue", temperature)',
+  'count_values("sample_\\\"value", temperature)',
+  'count_values("sample_value" + "suffix", temperature)',
+  'count_values("sample_value")',
+  'count_values("sample_value", temperature, humidity)',
+  'count_values("sample_value", # missing expression\n)'
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }),
+    '',
+    `A14: unproven count_values arguments must fail closed: ${query}`
+  );
+}
+for (const [query, expected] of [
+  ['count_values("sample_value", temperature)',
+    'count_values("sample_value", temperature{host="synthetic-host"})'],
+  ['count_values by (host) ("sample_value", temperature)',
+    'count_values by (host) ("sample_value", temperature{host="synthetic-host"})'],
+  ['sum(count_values("sample_value", rate(temperature[5m])))',
+    'sum(count_values("sample_value", rate(temperature{host="synthetic-host"}[5m])))'],
+  ['count_values( # destination\n "sample_value", temperature # expression\n)',
+    'count_values( # destination\n "sample_value", temperature{host="synthetic-host"} # expression\n)'],
+  ['temperature{note="count_values(\\\"host\\\", fake)"}',
+    'temperature{note="count_values(\\\"host\\\", fake)", host="synthetic-host"}'],
+  ['# count_values("host", fake)\ntemperature',
+    '# count_values("host", fake)\ntemperature{host="synthetic-host"}']
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }),
+    expected,
+    `A14: independent tags and count_values text in strings/comments must remain safe: ${query}`
+  );
+}
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(
     'sum by(zone,name)(rr_imsi_success_response_percent)',
