@@ -869,6 +869,35 @@ for (const [query, expected] of [
     `A14: independent tags and count_values text in strings/comments must remain safe: ${query}`
   );
 }
+const a17Selector = 'up{host="synthetic-host", env="prod"}';
+for (const [query, expected] of [
+  ['sum by # grouping comment\n  (host) (up)', `sum by # grouping comment\n  (host) (${a17Selector})`],
+  ['sum without # grouping comment\n  (host) (up)', `sum without # grouping comment\n  (host) (${a17Selector})`],
+  ['sum by \t# first\r\n \t# second\n (host, env) (up)', `sum by \t# first\r\n \t# second\n (host, env) (${a17Selector})`],
+  ['sum without\n# first\n# second\n(host,env)(up)', `sum without\n# first\n# second\n(host,env)(${a17Selector})`],
+  ['sum by # outer\n(host)(max without # inner\n(env)(up))', `sum by # outer\n(host)(max without # inner\n(env)(${a17Selector}))`],
+  ['sum by(host)(up)', `sum by(host)(${a17Selector})`],
+  ['sum without(host)(up)', `sum without(host)(${a17Selector})`],
+  ['sum(up) by # postfix\n(host)', `sum(${a17Selector}) by # postfix\n(host)`],
+  ['sum(up) without # postfix\n(host)', `sum(${a17Selector}) without # postfix\n(host)`],
+  ['sum # comment ending in by\n(up)', `sum # comment ending in by\n(${a17Selector})`],
+  ['sum # before grouping\n by # before list\n(host)(up)', `sum # before grouping\n by # before list\n(host)(${a17Selector})`],
+  ['sum by(host # inside list\n,env)(up # after selector\n)', `sum by(host # inside list\n,env)(${a17Selector} # after selector\n)`],
+  ['up{note="by without # comment", quoted="escaped \\\"by\\\""}', 'up{note="by without # comment", quoted="escaped \\\"by\\\"", host="synthetic-host", env="prod"}'],
+  ['label_join(up, "note", "by without # comment", "job")', `label_join(${a17Selector}, "note", "by without # comment", "job")`],
+  ['count_values by # grouping comment\n(host)("sample_value", up)', `count_values by # grouping comment\n(host)("sample_value", ${a17Selector})`],
+  ['count_values without # grouping comment\n(env)("sample_value", up)', `count_values without # grouping comment\n(env)("sample_value", ${a17Selector})`]
+]) {
+  assert.strictEqual(
+    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host', env: 'prod' }),
+    expected,
+    `A17: comments must preserve grouping labels and inject only real selectors: ${query}`
+  );
+}
+for (const query of ['sum by # missing closing list\n(host (up)', 'sum without # unterminated string\n(host)(up{note="broken})']) {
+  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }), '',
+    'A17: structurally invalid input must remain fail closed');
+}
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(
     'sum by(zone,name)(rr_imsi_success_response_percent)',

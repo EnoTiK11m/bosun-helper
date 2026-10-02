@@ -351,10 +351,7 @@
       ?.querySelector('[ng-repeat="child in group.Children"] [ts-since="child.Ago"]')
       ?.textContent,
     getDomChildCount: (panel) => getGroupChildPanels(panel).length,
-    hasStrongDomIdentity: (panel) => {
-      const children = getGroupChildPanels(panel);
-      return children.length > 0 && children.every((child) => Boolean(getPanelIdFromHeading(getChildHeading(child))));
-    }
+    hasStrongDomIdentity: hasStrongGroupMarkerIdentityFromDom
   }) || null;
   const actionTemplatesApi = globalThis.BosunHelperActionTemplates?.createActionTemplates?.({
     isActionPage: () => isActionPage(),

@@ -2026,6 +2026,101 @@ async function runBrowserAssertions(client) {
     uniqueButtonCount: 1
   });
 
+  const ageStrongIdentityResult = await evaluate(client, `(() => {
+    history.replaceState({}, '', '/');
+    globalThis.BosunHelperLocalConfig = { bosunHosts: ['not-current.invalid'] };
+    globalThis.BosunHelperRefreshCoordinator = undefined;
+    globalThis.BosunHelperNewAlertTracker = undefined;
+    ${singleAlertAgeSource}
+    ${alertsDataSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    const ago = new Date(Date.now() - 17 * 60 * 1000).toISOString();
+    const snapshotChild = (subject, id) => ({ Subject: subject, Ago: ago, State: { Id: id } });
+    function mount(type, children = [], count = 1) {
+      document.body.innerHTML = '<div ts-ack-group="schedule.Groups.' + type + '"><div class="panel-group"></div></div>';
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      panel.innerHTML = '<div class="panel-heading"><div class="panel-title">' +
+        '<span ng-bind="group.Subject">same unique group</span>' +
+        '<span class="pull-right ng-binding">' + count + ' alerts</span></div></div>';
+      for (const child of children) {
+        const node = document.createElement('div');
+        node.className = 'panel';
+        node.setAttribute('ng-repeat', 'child in group.Children');
+        node.innerHTML = '<div class="panel-heading"><div class="panel-title"></div></div>';
+        const title = node.querySelector('.panel-title');
+        if (child.id) {
+          const id = document.createElement('span');
+          id.setAttribute('ng-show', 'state.Id');
+          id.textContent = '#' + child.id;
+          title.appendChild(id);
+        }
+        const subject = document.createElement('span');
+        subject.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+        subject.textContent = child.subject || '';
+        title.appendChild(subject);
+        panel.appendChild(node);
+      }
+      document.querySelector('.panel-group').appendChild(panel);
+      return panel;
+    }
+    const group = (children) => ({ Subject: 'same unique group', Children: children });
+    const apply = (type, groups) => hooks.applyAlertsPayload({ Groups: { [type]: groups } });
+    const text = (panel) => panel.querySelector('.pull-right.ng-binding').textContent;
+    const result = {};
+    for (const type of ['NeedAck', 'Acknowledged']) {
+      const cases = {};
+      let panel = mount(type, [{ subject: 'child-B' }]);
+      apply(type, [group([snapshotChild('child-A')])]);
+      cases.subjectConflict = text(panel);
+      if (cases.subjectConflict !== '1 alerts') {
+        throw new Error('A16: ' + type + ' child Subject conflict applied snapshot age: ' + cases.subjectConflict);
+      }
+      panel = mount(type, [{ subject: 'child-A' }]);
+      // Numeric Ago is valid age data and does not add a string Ago suffix to the identity key.
+      const matchingNoId = snapshotChild('child-A');
+      matchingNoId.Ago = Date.parse(ago);
+      apply(type, [group([matchingNoId])]);
+      cases.matchWithoutId = text(panel);
+      // Repaint the same panel with conflicting child identity: cached age must be discarded.
+      panel.querySelector('[ng-bind="child.Subject || child.AlertKey"]').textContent = 'child-B';
+      hooks.singleAlertAge.refresh();
+      cases.repaintConflict = text(panel);
+      panel = mount(type, [{ subject: 'child-A', id: 101 }]);
+      apply(type, [group([snapshotChild('child-A', 101)])]);
+      cases.matchId = text(panel);
+      const replacement = mount(type, [{ subject: 'child-B', id: 202 }]);
+      hooks.singleAlertAge.refresh();
+      cases.replacementConflict = text(replacement);
+      apply(type, [group([snapshotChild('child-B', 101)])]);
+      cases.idConflict = text(replacement);
+      panel = mount(type, [{ subject: 'synthetic.alert{host=B}' }]);
+      const keyed = snapshotChild(undefined);
+      keyed.AlertKey = 'synthetic.alert{host=A}';
+      apply(type, [group([keyed])]);
+      cases.alertKeyConflict = text(panel);
+      panel = mount(type, [{ subject: 'child-A' }]);
+      apply(type, [group([matchingNoId]), group([matchingNoId])]);
+      cases.ambiguousKey = text(panel);
+      panel = mount(type);
+      apply(type, [group([snapshotChild('child-A', 101)])]);
+      cases.collapsed = text(panel);
+      panel = mount(type, [{ subject: 'child-A' }, { subject: 'child-B' }], 2);
+      apply(type, [group([snapshotChild('child-A'), snapshotChild('child-B')])]);
+      cases.multiple = text(panel);
+      result[type] = cases;
+    }
+    return result;
+  })()`);
+  for (const type of ['NeedAck', 'Acknowledged']) {
+    assert.deepStrictEqual(ageStrongIdentityResult[type], {
+      subjectConflict: '1 alerts', matchWithoutId: '17m-ago', repaintConflict: '1 alerts',
+      matchId: '17m-ago', replacementConflict: '1 alerts', idConflict: '1 alerts',
+      alertKeyConflict: '1 alerts', ambiguousKey: '1 alerts', collapsed: '17m-ago', multiple: '2 alerts'
+    }, 'A16: age identity contract failed in ' + type);
+  }
+
   const strongIdentityMismatchResult = await evaluate(client, `(() => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
