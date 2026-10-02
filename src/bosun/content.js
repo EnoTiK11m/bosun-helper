@@ -106,6 +106,7 @@
   const OLD_NO_NOTE_ICON_CLASS = 'bosun-old-no-note-icon';
   const HAS_NOTE_ICON_CLASS = 'bosun-has-note-icon';
   const PRIORITY_MARKER_CLASS = 'bosun-priority-marker';
+  const PRIORITY_ROW_CLASS = 'bosun-priority-row';
 
   const DATA_REFRESH_MS = 4000;
   const DATA_REFRESH_HIDDEN_MS = 10000;
@@ -1141,6 +1142,7 @@
     }
     rebuildAlertDataIndex({ Groups: {} });
     singleAlertAgeApi?.clear?.();
+    clearOwnedClass(PRIORITY_ROW_CLASS);
     alertDataIndexReady = false;
     document.querySelectorAll(
       `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}`
@@ -3369,6 +3371,7 @@
 
   function ensurePriorityMarker(title, isGroup, priority) {
     if (!title) return;
+    setExtensionClass(title.closest('.panel-heading'), PRIORITY_ROW_CLASS, Boolean(priority));
     const selector = `:scope > .${PRIORITY_MARKER_CLASS}${isGroup ? '.bosun-parent-marker' : ':not(.bosun-parent-marker)'}`;
     const markers = Array.from(title.querySelectorAll(selector));
     if (!priority) {
@@ -3379,10 +3382,10 @@
     if (markers.length) return;
     const marker = document.createElement('span');
     marker.className = `${PRIORITY_MARKER_CLASS}${isGroup ? ' bosun-parent-marker' : ''} ${NO_SELECT_CLASS}`;
-    marker.textContent = '★';
-    marker.title = 'Приоритет';
+    marker.textContent = '⚑';
+    marker.title = 'Приоритетный алерт';
     marker.setAttribute('role', 'img');
-    marker.setAttribute('aria-label', 'Приоритет');
+    marker.setAttribute('aria-label', 'Приоритетный алерт');
     title.insertBefore(marker, title.firstChild);
   }
 
