@@ -216,11 +216,18 @@ async function testHiddenFollowerDefersSnapshotsUntilVisible() {
   assert.strictEqual(leader.coordinator.getRole(), 'leader');
   assert.strictEqual(follower.coordinator.getRole(), 'follower');
   assert.strictEqual(follower.applied.length, 0, 'Hidden follower must not apply snapshots');
+  const firstSnapshot = leader.applied[0].payload;
+  const latestSnapshot = leader.applied[leader.applied.length - 1].payload;
+  assert.strictEqual(leader.coordinator.ownsSnapshot(firstSnapshot), false, 'Superseded snapshot cannot authorize tracker cleanup');
+  assert.strictEqual(leader.coordinator.ownsSnapshot(latestSnapshot), true);
+  assert.strictEqual(follower.coordinator.ownsSnapshot(latestSnapshot), false);
 
   follower.setVisibility('visible');
   await flushMicrotasks();
   assert.strictEqual(follower.applied.length, 1, 'Visible follower must apply only the latest buffered snapshot');
   assert.strictEqual(follower.applied[0].metadata.reason, 'visibility-buffer');
+  assert.strictEqual(follower.coordinator.ownsSnapshot(follower.applied[0].payload), false,
+    'Applying a buffered snapshot does not confer tracker ownership');
 
   await clock.advance(0);
   leader.coordinator.stop();
@@ -880,19 +887,33 @@ async function testRefreshCoordinatorRejoinTracksRotatedToken() {
 async function testRefreshCoordinatorResumesFromBfcache() {
   const clock = createFakeClock();
   const shared = createSharedCoordination(clock);
-  const tab = createCoordinatorTab('bfcache', clock, shared);
+  let completeResumedFetch;
+  const tab = createCoordinatorTab('bfcache', clock, shared, {
+    fetchSnapshot(_options, count) {
+      if (count === 1) return { marker: 'before-bfcache' };
+      return new Promise((resolve) => { completeResumedFetch = resolve; });
+    }
+  });
   tab.coordinator.start();
   await flushMicrotasks();
   await clock.advance(0);
   assert.strictEqual(tab.coordinator.getRole(), 'leader');
+  const oldSnapshot = tab.applied[0].payload;
+  assert.strictEqual(tab.coordinator.ownsSnapshot(oldSnapshot), true);
 
   tab.windowListeners.get('pagehide')?.({ persisted: true });
   await flushMicrotasks();
   assert.strictEqual(tab.coordinator.getRole(), 'stopped');
+  assert.strictEqual(tab.coordinator.ownsSnapshot(oldSnapshot), false);
   tab.windowListeners.get('pageshow')?.({ persisted: true });
   await flushMicrotasks();
   await clock.advance(0);
   assert.strictEqual(tab.coordinator.getRole(), 'leader');
+  assert.strictEqual(tab.coordinator.ownsSnapshot(oldSnapshot), false,
+    'New leadership must not authorize cleanup using the previous lifecycle snapshot');
+  completeResumedFetch({ marker: 'after-bfcache' });
+  await flushMicrotasks();
+  assert.strictEqual(tab.coordinator.ownsSnapshot(tab.applied[tab.applied.length - 1].payload), true);
   tab.coordinator.stop();
   await flushMicrotasks();
   await clock.advance(0);
