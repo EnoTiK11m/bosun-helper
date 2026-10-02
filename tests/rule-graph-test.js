@@ -84,6 +84,67 @@ async function run() {
   const api = loadApi();
   assert.ok(api, 'Bosun rule graph module must expose its API');
 
+  const legacyArgs = ['"synthetic_metric"', '""', '""', '"sum"', '"1m"', '"1d"', '""'];
+  const legacyCall = (overrides = {}) => `prom(${legacyArgs.map((arg, index) => overrides[index] ?? arg).join(', ')})`;
+  const legacyResolve = (expression, prelude = '', source = 'usage_graph') => api.resolveAlertGraph(
+    alertRule('synthetic.legacy.subset', `${prelude}\n  $${source} = ${expression}\n  warn = 1`),
+    'synthetic.legacy.subset'
+  );
+  const legacyProductionFixtures = [
+    { expression: legacyCall({ 0: '"synthetic_alpha"', 2: `''' label_a="demo", label_b="east", label_c="api", label_d="primary" '''` }),
+      query: 'sum(synthetic_alpha{label_a="demo", label_b="east", label_c="api", label_d="primary"}) by ()', source: 'usage_graph' },
+    { expression: legacyCall({ 0: '"synthetic_beta"', 2: `''' label_a="demo", label_b="east", label_c="api" '''` }),
+      query: 'sum(synthetic_beta{label_a="demo", label_b="east", label_c="api"}) by ()', source: 'q' },
+    { expression: legacyCall({ 0: '"synthetic_gamma"', 2: `''' label_a="stage", label_b="west", label_c="worker" '''`, 4: '"2m"', 5: '"2d"' }),
+      query: 'sum(synthetic_gamma{label_a="stage", label_b="west", label_c="worker"}) by ()', source: 'q' }
+  ];
+  assert.deepStrictEqual(legacyProductionFixtures.map(({ expression, source }) => {
+    const result = legacyResolve(expression, '', source);
+    return { ok: result.ok, query: result.query, source: result.source, reason: result.reason };
+  }), legacyProductionFixtures.map(({ query, source }) => ({ ok: true, query, source, reason: 'direct_prom' })),
+  'Direct seven-literal legacy prom must build the three production-shaped queries');
+  for (const [expression, query] of [
+    [legacyCall(), 'sum(synthetic_metric) by ()'],
+    [legacyCall({ 2: "'''   '''" }), 'sum(synthetic_metric{}) by ()'],
+    [legacyCall({ 1: '"label_a"' }), 'sum(synthetic_metric) by (label_a)'],
+    [legacyCall({ 2: `'''label_a="a,b"'''` }), 'sum(synthetic_metric{label_a="a,b"}) by ()'],
+    [legacyCall({ 1: '"label_b,label_a"', 2: `''' label_c = " demo " , label_d =~ "east.*|west|.*" '''` }),
+      'sum(synthetic_metric{label_c=" demo ", label_d=~"east.*|west|.*"}) by (label_b, label_a)']
+  ]) assert.strictEqual(legacyResolve(expression).query, query, expression);
+
+  const invalidLegacyExpressions = [
+    legacyCall({ 0: '"synthetic.metric"' }), legacyCall({ 0: '"1metric"' }),
+    legacyCall({ 0: '"synthetic_metric\n"' }), legacyCall({ 1: '"label_a\n"' }),
+    legacyCall({ 4: '"1m\n"' }), legacyCall({ 5: '"1d\n"' }),
+    'prom("synthetic_metric", "1m", "")', legacyCall({ 6: '"", ""' }),
+    legacyCall({ 0: '1' }), legacyCall({ 0: '$metric' }), legacyCall({ 0: '"$metric"' }),
+    legacyCall({ 0: String.raw`"synthetic\_metric"` }), legacyCall({ 0: "'synthetic_metric'" }),
+    legacyCall({ 0: '`synthetic_metric`' }), legacyCall({ 0: "'''synthetic_metric'''" }),
+    legacyCall({ 2: `'label_a="demo"'` }), legacyCall({ 2: String.raw`"label_a=\"demo\""` }),
+    legacyCall({ 2: `'''label_a="$value"'''` }), legacyCall({ 2: String.raw`'''label_a="a\nb"'''` }),
+    legacyCall({ 3: '"avg"' }), legacyCall({ 1: '"bad-label"' }),
+    legacyCall({ 1: '"label_a,label_a"' }), legacyCall({ 1: '"__name__"' }),
+    legacyCall({ 1: '"label_a,,label_b"' }), legacyCall({ 1: '"label_a, label_b"' }),
+    legacyCall({ 1: '" "' }), legacyCall({ 2: `'''label_a=demo'''` }),
+    legacyCall({ 2: `'''label_a="a",label_a="b"'''` }), legacyCall({ 2: `'''label_a!="a"'''` }),
+    legacyCall({ 2: `'''label_a!~"a"'''` }), legacyCall({ 2: `'''label_a=~"[ab]"'''` }),
+    legacyCall({ 2: `'''label_a=~"a||b"'''` }), legacyCall({ 2: `'''label_a="a",'''` }),
+    legacyCall({ 2: `'''{label_a="a"}'''` }), legacyCall({ 2: `'''label_a="a" # comment'''` }),
+    ...['0m', '-1m', '+1m', '1.5m', '1h', '01m', '1m1d', '999999999999999999999d', '106752d', '153722868m']
+      .flatMap((duration) => [legacyCall({ 4: `"${duration}"` }), legacyCall({ 5: `"${duration}"` })]),
+    legacyCall({ 6: '"1m"' }), legacyCall({ 4: '""' }), legacyCall({ 5: '""' }),
+    `sum(${legacyCall()})`, `(${legacyCall()})`, `${legacyCall()} * 2`, `2 + ${legacyCall()}`,
+    `${legacyCall()} trailing`, `["other"]${legacyCall()}`, legacyCall({ 0: legacyCall() }),
+    '$legacy'
+  ];
+  for (const expression of invalidLegacyExpressions) {
+    const result = legacyResolve(expression, `  $metric = "synthetic_metric"\n  $legacy = ${legacyCall()}`);
+    assert.strictEqual(result.ok, false, `Legacy prom must fail closed: ${expression}`);
+    assert.strictEqual(result.query, '', `Rejected legacy prom must not leak a query: ${expression}`);
+  }
+  assert.strictEqual(legacyResolve(legacyCall({ 4: '"153722867m"', 5: '"106751d"' })).ok, true,
+    'Largest whole supported durations within int64 nanoseconds must remain valid');
+
   const selectedQuery = 'sum(rate(selected_total[5m]))';
   const directConfig = [
     alertRule('synthetic.direct', `  $usage_graph = ${promras(selectedQuery)}\n  warn = 1`),
