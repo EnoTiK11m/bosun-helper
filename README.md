@@ -79,8 +79,14 @@ Bosun автоматически.
   Строится `sum(metric{filter}) by (grouping)`, затем применяется общий tag pipeline.
   Как для `promras`, Bosun step/range не передаются в Grafana: идентичность timestamps,
   sample count, squelch и полного Bosun dataset не гарантируется;
-- multi-query `merge(addtags(...), ...)` распознаётся, но не превращается в
-  меняющий семантику `or` и пока не создаёт single-query Grafana action;
+- полный `merge(addtags(branch, "key=value"), addtags(branch, "key=other"))`
+  поддерживается только для двух безопасно разрешённых branches с одинаковым
+  доказанным output label set. Новый общий key и разные constant values позволяют
+  построить один `label_replace(...) or label_replace(...)` без потери series;
+  key: `[A-Za-z_][A-Za-z0-9_]*` без `__*`, value: `[A-Za-z0-9_-]+`.
+  Конфликт key с output labels или alert tags, неизвестные labels, nesting,
+  несколько добавляемых tags и 3+ branches остаются fail closed.
+  Общий merge и multi-query handoff не поддерживаются;
 - отказ от Grafana-действия при повреждённом rule/PromQL/tags, unsupported graph
   или неоднозначной identity алерта;
 - предварительный просмотр полного запроса до открытия Grafana;

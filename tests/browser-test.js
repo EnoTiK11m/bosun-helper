@@ -2854,7 +2854,7 @@ async function runBrowserAssertions(client) {
     activeConfig = ${JSON.stringify(`alert imsi.channel.success.response.percent.low {
   $q1 = promras('''sum(rate(first_total[5m]))''', '5m', '2h', '')
   $q2 = promras('''sum(rate(second_total[5m]))''', '5m', '2h', '')
-  $usage_graph = merge(addtags($q1, "side=first"), addtags($q2, "side=second"))
+  $usage_graph = merge($q1, $q2)
   warn = $q1 > 0
 }`)};
     const multiRefresh = hooks.ruleGraphResolver.refresh(
@@ -2954,6 +2954,20 @@ async function runBrowserAssertions(client) {
     buttonsAfterConflictingIdentity: 0
   });
 
+  const discriminatorBrowserCases = [
+    { labels: 'label_a', scaleLeft: false, scaleRight: false },
+    { labels: 'label_a, label_b', scaleLeft: true, scaleRight: false },
+    { labels: 'label_a, label_b, label_c', scaleLeft: false, scaleRight: true }
+  ].map(({ labels, scaleLeft, scaleRight }, index) => {
+    const left = `sum by (${labels}) (synthetic_a)`;
+    const right = `sum by (${labels}) (synthetic_b)`;
+    const operand = (query, scaled) => scaled ? `((${query}) * (100))` : query;
+    const wrapper = (query, value) => `label_replace((${query}), "branch_axis", "${value}", "", ".*")`;
+    return { name: `synthetic.merge.${index}`, expression:
+      `merge(addtags(promras('''${left}''', '5m', '2h', '')${scaleLeft ? ' * 100' : ''}, "branch_axis=first"), ` +
+      `addtags(promras('''${right}''', '5m', '2h', '')${scaleRight ? ' * 100' : ''}, "branch_axis=second"))`,
+      query: `${wrapper(operand(left, scaleLeft), 'first')} or ${wrapper(operand(right, scaleRight), 'second')}` };
+  });
   const stateExprFallbackResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
@@ -2990,6 +3004,11 @@ alert synthetic.legacy.q {
 }
 alert synthetic.legacy.dotted {
   $usage_graph = prom("synthetic.legacy.total", "", "", "sum", "1m", "1d", "")
+  warn = 1
+}
+${discriminatorBrowserCases.map(({ name, expression }) => `alert ${name} {\n  $usage_graph = ${expression}\n  warn = 1\n}`).join('\n')}
+alert synthetic.merge.rejected {
+  $usage_graph = ${discriminatorBrowserCases[0].expression.replace('branch_axis=second', 'branch_axis=first')}
   warn = 1
 }`)};
     let configGate = null;
@@ -3085,6 +3104,21 @@ alert synthetic.legacy.dotted {
       malformedTags.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host=';
       const malformedLegacyTags = await resolved(malformedTags);
 
+      const mergeActions = [];
+      const mergeCases = ${JSON.stringify(discriminatorBrowserCases)};
+      for (let index = 0; index < mergeCases.length; index += 1) {
+        const current = fixture(mergeCases[index].name, 820 + index, expr('fallback_must_not_win'));
+        mergeActions.push(await resolved(current));
+        current.root.querySelector('.bosun-grafana-query-btn')?.click();
+      }
+      const conflict = fixture(mergeCases[0].name, 830, expr('valid_fallback_total'));
+      conflict.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host=node830,branch_axis=first';
+      const mergeConflict = await resolved(conflict);
+      const rejectedMerge = await resolved(fixture('synthetic.merge.rejected', 831, expr('valid_fallback_total')));
+      const malformedMerge = fixture(mergeCases[0].name, 832, expr('valid_fallback_total'));
+      malformedMerge.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host=';
+      const malformedMergeTags = await resolved(malformedMerge);
+
       // Both generations subscribe to a real, delayed config acquisition. Only the
       // latest snapshot/DOM may receive an action when that acquisition completes.
       async function replaceWhilePending(next, hash) {
@@ -3115,6 +3149,7 @@ alert synthetic.legacy.dotted {
       return { verified, positiveReason, positive, missingResolution, missingResult,
         unresolvedReason, unresolvedResult, ambiguous, extractedUnsupported, unsupported,
         legacyResult, legacyQResult, dottedResult, dottedReason, malformedLegacyTags,
+        mergeActions, mergeConflict, rejectedMerge, malformedMergeTags,
         replacement, forbiddenReplacement, openedQueries };
     } finally {
       hooks.ruleGraphResolver.destroy();
@@ -3123,6 +3158,9 @@ alert synthetic.legacy.dotted {
     }
   })()`);
   const noExprAction = { query: '', buttons: 0 };
+  const expectedMergeQueries = discriminatorBrowserCases.map(({ query }, index) => query
+    .replace('synthetic_a)', `synthetic_a{host="node${820 + index}"})`)
+    .replace('synthetic_b)', `synthetic_b{host="node${820 + index}"})`));
   assert.deepStrictEqual(stateExprFallbackResult, {
     verified: true,
     positiveReason: 'no_usage_graph',
@@ -3139,6 +3177,10 @@ alert synthetic.legacy.dotted {
     dottedResult: noExprAction,
     dottedReason: 'legacy_prom',
     malformedLegacyTags: noExprAction,
+    mergeActions: expectedMergeQueries.map((query) => ({ query, buttons: 1 })),
+    mergeConflict: noExprAction,
+    rejectedMerge: noExprAction,
+    malformedMergeTags: noExprAction,
     replacement: {
       pendingA: noExprAction, pendingNext: noExprAction,
       after: { query: 'sum(rate(expr_b_total{host="node802"}[5m]))', buttons: 1 }, oldQuery: ''
@@ -3150,6 +3192,7 @@ alert synthetic.legacy.dotted {
       'sum(rate(expr_a_total{host="node801"}[5m]))',
       'sum(synthetic_legacy_total{env="demo", host="node807"}) by ()',
       'sum(synthetic_legacy_q_total{host="node808"}) by ()',
+      ...expectedMergeQueries,
       'sum(rate(expr_b_total{host="node802"}[5m]))'
     ]
   }, 'State.Expr fallback must obey verified rule resolution, current identity and the common tag pipeline');
