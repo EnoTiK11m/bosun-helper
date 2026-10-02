@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-function loadApi() {
+function loadApi(rejectGenerated = false) {
   const context = {
     console,
     globalThis: null,
@@ -20,6 +20,11 @@ function loadApi() {
   vm.runInNewContext(fs.readFileSync('src/grafana/promql.js', 'utf8'), context, {
     filename: 'src/grafana/promql.js'
   });
+  if (rejectGenerated) {
+    const transform = context.BosunHelperPromQL.applyAlertTagsToPromQuery;
+    context.BosunHelperPromQL.applyAlertTagsToPromQuery = (query, ...args) =>
+      query.startsWith('label_replace(') ? '' : transform(query, ...args);
+  }
   vm.runInNewContext(fs.readFileSync('src/grafana/bosun-rule-graph.js', 'utf8'), context, {
     filename: 'src/grafana/bosun-rule-graph.js'
   });
@@ -339,10 +344,33 @@ async function run() {
     'A PromQL leaf must remain grouped when used in computed arithmetic'
   );
 
+  const mergeFixtures = [
+    { labels: 'label_a', leftScale: '', rightScale: '' },
+    { labels: 'label_a, label_b', leftScale: ' * 100', rightScale: '' },
+    { labels: 'label_a, label_b, label_c', leftScale: '', rightScale: ' * 100' }
+  ];
+  const wrapBranch = (query, value) => `label_replace((${query}), "branch_axis", "${value}", "", ".*")`;
+  const mergeResolve = (expression, prelude = '') => api.resolveAlertGraph(
+    alertRule('synthetic.discriminator', `${prelude}\n  $usage_graph = ${expression}\n  warn = 1`),
+    'synthetic.discriminator'
+  );
+  const mergeResults = mergeFixtures.map(({ labels, leftScale, rightScale }) => {
+    const left = `sum by (${labels}) (synthetic_a)`;
+    const right = `sum by (${labels}) (synthetic_b)`;
+    const expression = `merge(addtags($left${leftScale}, "branch_axis=first"), addtags($right${rightScale}, "branch_axis=second"))`;
+    const resolved = mergeResolve(expression, `  $left = ${promras(left)}\n  $right = ${promras(right)}`);
+    const operand = (query, scale) => scale ? `((${query}) * (100))` : query;
+    return { actual: { ok: resolved.ok, query: resolved.query, outputSignature: resolved.outputSignature }, expected: { ok: true,
+      outputSignature: `labels:branch_axis,${labels.replace(/ /g, '')}`,
+      query: `${wrapBranch(operand(left, leftScale), 'first')} or ${wrapBranch(operand(right, rightScale), 'second')}` } };
+  });
+  assert.deepStrictEqual(mergeResults.map(({ actual }) => actual), mergeResults.map(({ expected }) => expected),
+    'All three discriminator cases must resolve, preserving branch arithmetic precedence');
+
   const multiConfig = alertRule('synthetic.multi', [
     `  $left = ${promras('sum(rate(left_total[5m]))')}`,
     `  $right = ${promras('sum(rate(right_total[5m]))')}`,
-    '  $usage_graph = merge(addtags($left, "side=left"), addtags($right, "side=right"))',
+    '  $usage_graph = merge($left, $right)',
     '  warn = 1'
   ].join('\n'));
   assert.deepStrictEqual(plain(api.resolveAlertGraph(multiConfig, 'synthetic.multi')), {
@@ -358,6 +386,53 @@ async function run() {
     !api.resolveAlertGraph(multiConfig, 'synthetic.multi').query.includes(' or '),
     'Multi-query graph must never be synthesized with or'
   );
+
+  const branchA = promras('sum by (label_a) (synthetic_a)');
+  const branchB = promras('sum by (label_a) (synthetic_b)');
+  const tagged = (branch, tag) => `addtags(${branch}, "${tag}")`;
+  const a = tagged(branchA, 'branch_axis=first');
+  const b = tagged(branchB, 'branch_axis=second');
+  const merge = (left = a, right = b) => `merge(${left}, ${right})`;
+  const invalidMergeExpressions = [
+    `merge(${a})`, `merge(${a}, ${b}, ${tagged(branchA, 'branch_axis=third')})`,
+    merge(branchA), merge(a, branchB), merge(tagged(merge(), 'branch_axis=first')),
+    merge(`addtags(${a}, "other=first")`), merge(`addtags(${branchA})`),
+    merge(`addtags(${branchA}, "branch_axis=first", "other=x")`),
+    ...['branch_axis=first,other=x', 'broken', '=first', 'branch_axis=', '__name__=first',
+      '__private=first', 'bad-key=first', 'branch_axis=two words', 'branch_axis=$value',
+      'branch_axis=a=b', ' branch_axis=first', 'branch_axis=first\n', String.raw`branch_axis=\first`,
+      "branch_axis='first'", 'branch_axis=first.second'].map((tag) => merge(tagged(branchA, tag))),
+    merge(a, tagged(branchB, 'other=second')), merge(a, tagged(branchB, 'branch_axis=first')),
+    merge(tagged(promras('sum by (branch_axis, label_a) (synthetic_a)'), 'branch_axis=first')),
+    merge(tagged(promras('synthetic_a'), 'branch_axis=first')),
+    merge(tagged(promras('sum by (label_b) (synthetic_a)'), 'branch_axis=first')),
+    merge(tagged(`dropna(${branchA})`, 'branch_axis=first')),
+    merge(tagged('unknown($left)', 'branch_axis=first')),
+    merge(tagged('$missing', 'branch_axis=first')),
+    merge(tagged('promras("bad", "1m")', 'branch_axis=first')),
+    `${merge()} * 100`, `100 + ${merge()}`, `unknown(${merge()})`, `dropna(${merge()})`,
+    `(${merge()})`, `-${merge()}`, merge('$tagged'), merge(`(${a})`),
+    merge(`addtags(${branchA}, $tag)`), '$merged'
+  ];
+  for (const expression of invalidMergeExpressions) {
+    const rejected = mergeResolve(expression,
+      `  $left = ${branchA}\n  $tagged = ${a}\n  $tag = "branch_axis=first"\n  $merged = ${merge()}`);
+    assert.strictEqual(rejected.ok, false, `Unsafe merge must fail closed: ${expression}`);
+    assert.strictEqual(rejected.query, '', `Unsafe merge must not leak a query: ${expression}`);
+  }
+  const sameOperand = mergeResolve(merge(a, tagged(branchA, 'branch_axis=second')));
+  assert.strictEqual(sameOperand.ok, true, 'Distinct discriminator values make identical operands disjoint');
+  const generatedConfig = alertRule('synthetic.generated', `  $usage_graph = ${merge()}\n  warn = 1`);
+  assert.strictEqual(loadApi(true).resolveAlertGraph(generatedConfig, 'synthetic.generated').ok, false,
+    'Generated query rejection by the common validator must fail closed');
+  const promContext = { globalThis: null };
+  promContext.globalThis = promContext;
+  vm.runInNewContext(fs.readFileSync('src/grafana/promql.js', 'utf8'), promContext);
+  const generated = mergeResolve(merge()).query;
+  assert.strictEqual(promContext.BosunHelperPromQL.applyAlertTagsToPromQuery(generated, 'branch_axis=first'), '',
+    'Derived discriminator conflict must not become a selector matcher');
+  assert.strictEqual(promContext.BosunHelperPromQL.applyAlertTagsToPromQuery(generated, 'host=demo'),
+    generated.replace('synthetic_a)', 'synthetic_a{host="demo"})').replace('synthetic_b)', 'synthetic_b{host="demo"})'));
 
   const unsupportedConfig = [
     alertRule('synthetic.cycle', '  $a = $b\n  $b = $a\n  $usage_graph = $a\n  warn = 1'),

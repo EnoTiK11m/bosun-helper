@@ -722,7 +722,9 @@
       queries: uniqueQueries(queries),
       computed: options.computed === true,
       transformed: options.transformed === true,
-      signature: options.signature || null
+      signature: options.signature || null,
+      ...(options.addedTag ? { addedTag: options.addedTag } : {}),
+      ...(options.discriminatorMerge ? { discriminatorMerge: true } : {})
     };
   }
 
@@ -873,10 +875,15 @@
     }
 
     function parseCall(name) {
+      const callOffset = offset - 1;
       consume('(');
       const args = [];
+      const directAddtags = [];
+      const literalStrings = [];
       if (current().type !== ')') {
         while (true) {
+          directAddtags.push(current().type === 'identifier' && current().value.toLowerCase() === 'addtags');
+          literalStrings.push(current().type === 'string');
           if (current().type === 'string') {
             const token = current();
             offset += 1;
@@ -931,9 +938,17 @@
           !args[0].queries.length ||
           args[1]?.type !== 'string'
         ) return graphError('computed_graph');
-        return graphValue(args[0].prom, args[0].queries, {
+        const branch = args[0];
+        const tag = args[1].value.match(/^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_-]+)$/);
+        const labels = branch.signature?.startsWith('labels:') ? branch.signature.slice(7).split(',') : null;
+        const addedTag = literalStrings[1] && tag && tag[0].length === args[1].value.length && !tag[1].startsWith('__') && labels &&
+          !labels.includes(tag[1]) && !branch.transformed && !branch.discriminatorMerge
+          ? { key: tag[1], value: tag[2], prom: branch.prom, signature: branch.signature }
+          : null;
+        return graphValue(branch.prom, branch.queries, {
           computed: true,
-          transformed: true
+          transformed: true,
+          addedTag
         });
       }
       if (lower === 'merge') {
@@ -943,6 +958,26 @@
           return graphError('multi_query_graph');
         }
         const queries = args.flatMap((arg) => arg.queries || []);
+        const left = args[0]?.addedTag;
+        const right = args[1]?.addedTag;
+        if (args.length === 2 && directAddtags.every(Boolean) && left && right &&
+            context.stack.length === 1 && callOffset === 0 && current().type === 'eof' &&
+            left.signature === right.signature && left.key === right.key && left.value !== right.value) {
+          // A new, distinct discriminator makes cross-branch label sets disjoint.
+          // Keep each complete operand parenthesized, including existing arithmetic.
+          const wrap = (branch) => `label_replace((${branch.prom}), "${branch.key}", "${branch.value}", "", ".*")`;
+          const query = `${wrap(left)} or ${wrap(right)}`;
+          if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) {
+            return graphError('invalid_promras');
+          }
+          return graphValue(query, queries, {
+            computed: true,
+            discriminatorMerge: true,
+            signature: getGroupingLabelSignature(
+              [...left.signature.slice(7).split(',').filter(Boolean), left.key].join(',')
+            )
+          });
+        }
         if (uniqueQueries(queries).length < 2) return graphError('computed_graph');
         return graphMulti(queries);
       }
@@ -1146,7 +1181,8 @@
       source,
       query: resolved.prom,
       queries: resolved.queries,
-      fallbackReason
+      fallbackReason,
+      ...(resolved.discriminatorMerge ? { outputSignature: resolved.signature } : {})
     });
   }
 
