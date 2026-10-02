@@ -470,14 +470,6 @@
       .map((tag) => `${tag.name}="${escapePromLabelValue(tag.value)}"`);
   }
 
-  function previousIdentifier(query, offset) {
-    let index = offset - 1;
-    while (index >= 0 && /\s/.test(query[index])) index -= 1;
-    const end = index + 1;
-    while (index >= 0 && isIdentifierPart(query[index])) index -= 1;
-    return query.slice(index + 1, end).toLowerCase();
-  }
-
   function skipPromTrivia(source, startIndex, endIndex = source.length) {
     let index = startIndex;
     while (index < endIndex) {
@@ -683,6 +675,8 @@
     let escaped = false;
     let comment = false;
     const parentheses = [];
+    // Track lexical context in the same scan; comment text is never a token.
+    let previousToken = '';
     function appendResult(value) {
       const text = String(value || '');
       if (result.length + text.length > MAX_PROM_QUERY_LENGTH) return false;
@@ -718,6 +712,7 @@
       if (char === '"' || char === "'" || char === '`') {
         quote = char;
         if (!appendResult(char)) return '';
+        previousToken = '';
         index += 1;
         continue;
       }
@@ -732,8 +727,8 @@
       if (char === '{') return '';
 
       if (char === '(') {
-        const previous = previousIdentifier(source, index);
-        parentheses.push(LABEL_LIST_KEYWORDS.has(previous) ? 'label-list' : 'expression');
+        parentheses.push(LABEL_LIST_KEYWORDS.has(previousToken) ? 'label-list' : 'expression');
+        previousToken = '';
         if (!appendResult(char)) return '';
         index += 1;
         continue;
@@ -741,6 +736,7 @@
 
       if (char === ')') {
         parentheses.pop();
+        previousToken = '';
         if (!appendResult(char)) return '';
         index += 1;
         continue;
@@ -748,6 +744,7 @@
 
       if (!isIdentifierStart(char)) {
         if (!appendResult(char)) return '';
+        if (!/\s/.test(char)) previousToken = '';
         index += 1;
         continue;
       }
@@ -757,9 +754,9 @@
       while (index < source.length && isIdentifierPart(source[index])) index += 1;
       const identifier = source.slice(start, index);
       const lowerIdentifier = identifier.toLowerCase();
+      previousToken = lowerIdentifier;
 
-      let lookahead = index;
-      while (lookahead < source.length && /\s/.test(source[lookahead])) lookahead += 1;
+      const lookahead = skipPromTrivia(source, index);
       const nextChar = source[lookahead] || '';
       const previousChar = source[start - 1] || '';
       const inLabelList = parentheses[parentheses.length - 1] === 'label-list';
@@ -798,6 +795,7 @@
         const trimmedMatchers = matchers.trim();
         const nextMatchers = [trimmedMatchers, additions.join(', ')].filter(Boolean).join(', ');
         if (!appendResult(`${identifier}${whitespace}{${nextMatchers}}`)) return '';
+        previousToken = '';
         index = closeIndex + 1;
         continue;
       }
@@ -808,7 +806,7 @@
         : identifier)) return '';
     }
 
-    return result;
+    return hasValidPromQueryStructure(result) ? result : '';
   }
 
   globalThis.BosunHelperPromQL = {
