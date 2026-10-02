@@ -311,17 +311,36 @@
       .${oldNoNoteIconClass} { color: #ff9800 !important; }
       .${hasNoteIconClass} { color: #9ea19d !important; }
 
+      .panel-heading.bosun-priority-row {
+        --bosun-priority-accent: 49, 93, 156;
+        position: relative;
+      }
+
+      .panel-heading.bosun-priority-row::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: rgba(var(--bosun-priority-accent), .10);
+        box-shadow: inset 0 0 0 1px rgba(var(--bosun-priority-accent), .35);
+        pointer-events: none;
+      }
+
+      .panel-heading.bosun-priority-row:hover::after {
+        background: rgba(var(--bosun-priority-accent), .12);
+      }
+
       .bosun-priority-marker {
         display: inline-block;
         box-sizing: border-box;
         margin-right: 4px;
-        padding: 0 3px;
-        border: 1px solid #5279b8;
-        border-radius: 3px;
-        color: #315d9c;
-        background: #eef4ff;
-        font-size: 10px;
-        line-height: 1.3;
+        padding: 0;
+        border: 0;
+        color: rgb(var(--bosun-priority-accent, 49, 93, 156));
+        background: transparent;
+        font-size: 14px;
+        font-weight: 600;
+        line-height: 1;
         vertical-align: middle;
         white-space: nowrap;
         user-select: none;

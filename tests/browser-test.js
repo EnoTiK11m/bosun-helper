@@ -2438,6 +2438,9 @@ async function runBrowserAssertions(client) {
     reexpandedPlainChildIcons: 0
   }, 'Collapsed group Note indicator did not preserve safe child identity semantics');
 
+  await client.send('Emulation.setDeviceMetricsOverride', {
+    width: 600, height: 800, deviceScaleFactor: 1, mobile: false
+  });
   const priorityMarkers = await evaluate(client, `(() => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
@@ -2475,6 +2478,7 @@ async function runBrowserAssertions(client) {
       const list = document.createElement('div'); list.className = 'panel-group';
       const group = document.createElement('div'); group.className = 'panel';
       const heading = document.createElement('div'); heading.className = 'panel-heading';
+      heading.style.backgroundColor = 'rgb(255, 220, 220)';
       const title = document.createElement('div'); title.className = 'panel-title';
       const subjectNode = document.createElement('span');
       subjectNode.setAttribute('ng-bind', 'group.Subject'); subjectNode.textContent = subject;
@@ -2483,6 +2487,8 @@ async function runBrowserAssertions(client) {
         const panel = document.createElement('div'); panel.className = 'panel';
         panel.setAttribute('ng-repeat', 'child in group.Children');
         const h = document.createElement('div'); h.className = 'panel-heading'; h.setAttribute('ng-click', 'toggle()');
+        h.style.backgroundColor = row.State.CurrentStatus === 'critical'
+          ? 'rgb(255, 220, 220)' : 'rgb(255, 245, 210)';
         const t = document.createElement('div'); t.className = 'panel-title';
         const id = document.createElement('span'); id.setAttribute('ng-show', 'state.Id'); id.textContent = '#' + row.State.Id;
         const name = document.createElement('span'); name.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
@@ -2495,10 +2501,20 @@ async function runBrowserAssertions(client) {
       return { group, children, expand() { children.forEach((panel) => group.appendChild(panel)); },
         collapse() { children.forEach((panel) => panel.remove()); } };
     }
-    const count = (element, parent = false) => element.querySelectorAll(
-      parent ? ':scope > .panel-heading .bosun-priority-marker.bosun-parent-marker'
-        : ':scope > .panel-heading .bosun-priority-marker:not(.bosun-parent-marker)'
-    ).length;
+    const count = (element, parent = false) => {
+      const markers = element.querySelectorAll(
+        parent ? ':scope > .panel-heading .bosun-priority-marker.bosun-parent-marker'
+          : ':scope > .panel-heading .bosun-priority-marker:not(.bosun-parent-marker)'
+      );
+      const heading = element.querySelector(':scope > .panel-heading');
+      if (heading.classList.contains('bosun-priority-row') !== (markers.length > 0)) {
+        throw new Error('Priority accent must follow marker on every repaint/toggle');
+      }
+      if (Array.from(markers).some((marker) => marker.textContent !== '⚑')) {
+        throw new Error('Priority marker must use a flag');
+      }
+      return markers.length;
+    };
     const critical = child(101, 'critical.alert', 'critical', true);
     const warning = child(102, 'warning.alert', 'warning');
     const mounted = mount('priority group', [critical, warning]);
@@ -2516,16 +2532,44 @@ async function runBrowserAssertions(client) {
     const label = [marker?.title, marker?.getAttribute('aria-label')];
     const narrowStyle = [Math.ceil(marker.getBoundingClientRect().width) <= 24,
       getComputedStyle(marker).pointerEvents === 'none'];
+    const markerStyle = getComputedStyle(marker);
+    const flagPresentation = [markerStyle.borderWidth, markerStyle.backgroundColor,
+      markerStyle.padding, markerStyle.fontSize, markerStyle.fontWeight, markerStyle.lineHeight];
+    const priorityHeading = mounted.children[0].querySelector('.panel-heading');
+    const checkbox = mounted.children[0].querySelector('input');
+    const geometry = () => [priorityHeading.getBoundingClientRect().height,
+      checkbox.getBoundingClientRect().left, checkbox.getBoundingClientRect().top];
+    const flagGeometry = geometry();
+    marker.textContent = '★';
+    const starGeometry = geometry();
+    marker.textContent = '⚑';
+    const flagLayoutStable = flagGeometry.every((value, index) => Math.abs(value - starGeometry[index]) <= 2);
+    const overlay = getComputedStyle(priorityHeading, '::after');
+    const visualStyle = {
+      background: getComputedStyle(priorityHeading).backgroundColor,
+      tint: overlay.backgroundColor, outline: overlay.boxShadow, pointerEvents: overlay.pointerEvents,
+      noOverflow: priorityHeading.scrollWidth <= priorityHeading.clientWidth,
+      groupTint: getComputedStyle(mounted.group.querySelector(':scope > .panel-heading'), '::after').backgroundColor
+    };
+    let rowClicks = 0;
+    priorityHeading.addEventListener('click', () => { rowClicks += 1; });
     let clicks = 0; mounted.children[0].querySelector('input').addEventListener('click', () => { clicks += 1; });
     mounted.children[0].querySelector('input').click();
+    priorityHeading.click();
+    const nativeClickState = [rowClicks, checkbox.checked];
     change('features.priorityAlerts', false);
     const disabled = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    const disabledStyle = [getComputedStyle(priorityHeading).backgroundColor,
+      getComputedStyle(priorityHeading, '::after').content];
     change('features.priorityAlerts', true);
     const reenabled = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
     change('preferences.priorityCritical', false);
     const criticalOff = [count(mounted.group, true), count(mounted.children[0])];
     change('priorityRules.exactAlertNames', ['warning.alert']);
     const exactOn = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
+    const warningHeading = mounted.children[1].querySelector('.panel-heading');
+    const warningStyle = [getComputedStyle(warningHeading).backgroundColor,
+      getComputedStyle(warningHeading, '::after').backgroundColor];
     change('priorityRules.exactAlertNames', []);
     const exactOff = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
     change('preferences.priorityCritical', true);
@@ -2567,6 +2611,7 @@ async function runBrowserAssertions(client) {
     ackLive.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     const ackExpanded = [count(ackLive.group, true), ...ackLive.children.map((panel) => count(panel))];
+    const ackTint = getComputedStyle(ackLive.children[0].querySelector('.panel-heading'), '::after').backgroundColor;
     const ackNote = ackLive.children[0].querySelectorAll('.bosun-has-note-icon').length;
     let ackClicks = 0;
     ackLive.children[0].querySelector('input').addEventListener('click', () => { ackClicks += 1; });
@@ -2629,15 +2674,40 @@ async function runBrowserAssertions(client) {
     hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack conflicting name', Children: [conflictingChild] }] } });
     ackConflicting.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     const ackConflictingCounts = [count(ackConflicting.group, true), count(ackConflicting.children[0])];
+    const unknown = child(941, 'unknown.priority', 'unknown');
+    const unknownMounted = mount('unknown priority', [unknown]);
+    unknownMounted.expand();
+    const unknownHeading = unknownMounted.children[0].querySelector('.panel-heading');
+    unknownHeading.style.backgroundColor = 'rgb(232, 232, 232)';
+    change('priorityRules.exactAlertNames', ['unknown.priority']);
+    hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'unknown priority', Children: [unknown] }] } });
+    const unknownCount = count(unknownMounted.children[0]);
+    const unknownStyle = [getComputedStyle(unknownHeading).backgroundColor,
+      getComputedStyle(unknownHeading, '::after').backgroundColor];
+    history.replaceState({}, '', '/action?type=note');
+    hooks.handleRouteChange();
+    const routeCleanup = document.querySelectorAll('.bosun-priority-marker, .bosun-priority-row').length;
     return { collapsed, childCounts, noteCoexist, repeated, label, narrowStyle, clicks, disabled, reenabled,
+      flagLayoutStable, flagPresentation, visualStyle, disabledStyle, nativeClickState, ackTint, warningStyle,
+      unknownCount, unknownStyle, routeCleanup,
       criticalOff, exactOn, exactOff, domReplacement, replaced, ambiguousCounts, mismatchCounts, acknowledgedCounts,
       ackDefaultOff, ackEnabledCollapsed, ackExpanded, ackNote, ackClicks, ackRepeated, bothCriticalOff,
       ackExactOn, ackToggledOff, bothDisabled, ackRemount, ackAmbiguousCounts, ackMismatchCounts, ackDisappeared,
       sectionCollision, ackAmbiguousKeyCounts, ackConflictingCounts };
   })()`);
+  await client.send('Emulation.clearDeviceMetricsOverride');
   assert.deepStrictEqual(priorityMarkers, {
     collapsed: 1, childCounts: [1, 0], noteCoexist: 1, repeated: [1, 1, 0],
-    label: ['Приоритет', 'Приоритет'], narrowStyle: [true, true], clicks: 1,
+    label: ['Приоритетный алерт', 'Приоритетный алерт'], narrowStyle: [true, true], clicks: 1,
+    flagLayoutStable: true,
+    flagPresentation: ['0px', 'rgba(0, 0, 0, 0)', '0px', '14px', '600', '14px'],
+    visualStyle: { background: 'rgb(255, 220, 220)', tint: 'rgba(49, 93, 156, 0.1)',
+      outline: 'rgba(49, 93, 156, 0.35) 0px 0px 0px 1px inset', pointerEvents: 'none',
+      noOverflow: true, groupTint: 'rgba(49, 93, 156, 0.1)' },
+    disabledStyle: ['rgb(255, 220, 220)', 'none'], nativeClickState: [2, true],
+    ackTint: 'rgba(49, 93, 156, 0.1)',
+    warningStyle: ['rgb(255, 245, 210)', 'rgba(49, 93, 156, 0.1)'],
+    unknownCount: 1, unknownStyle: ['rgb(232, 232, 232)', 'rgba(49, 93, 156, 0.1)'], routeCleanup: 0,
     disabled: [0, 0, 0], reenabled: [1, 1, 0], criticalOff: [0, 0],
     exactOn: [1, 0, 1], exactOff: [0, 0, 0], domReplacement: [1, 1, 0], replaced: [0, 0],
     ambiguousCounts: [0, 0], mismatchCounts: [0, 0], acknowledgedCounts: [0, 0],
