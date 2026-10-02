@@ -72,6 +72,13 @@ Bosun автоматически.
   vector/vector arithmetic разрешается только при доказуемо эквивалентном
   label matching, а `dropna` пока fail closed;
   unrelated `promras` вне dependency graph не создают ложную ambiguity;
+- direct legacy `prom` поддерживается только для 7 literal arguments: обычная metric,
+  `sum`, canonical grouping, уникальные filter matchers с `=` / ограниченным `=~`,
+  положительные integer durations `m`/`d` для step/start и пустой end;
+  dotted metrics, variables, escapes, prefix и arithmetic вокруг `prom` fail closed.
+  Строится `sum(metric{filter}) by (grouping)`, затем применяется общий tag pipeline.
+  Как для `promras`, Bosun step/range не передаются в Grafana: идентичность timestamps,
+  sample count, squelch и полного Bosun dataset не гарантируется;
 - multi-query `merge(addtags(...), ...)` распознаётся, но не превращается в
   меняющий семантику `or` и пока не создаёт single-query Grafana action;
 - отказ от Grafana-действия при повреждённом rule/PromQL/tags, unsupported graph

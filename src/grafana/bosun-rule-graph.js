@@ -485,14 +485,14 @@
       if (source.slice(index, index + 3) === "'''") {
         const end = source.indexOf("'''", index + 3);
         if (end < 0) throw new ParseFailure('invalid_promras');
-        addToken({ type: 'string', value: source.slice(index + 3, end), triple: true });
+        addToken({ type: 'string', value: source.slice(index + 3, end), triple: true, quote: "'''" });
         index = end + 3;
         continue;
       }
       if (char === '"' || char === "'" || char === '`') {
         const end = skipQuoted(source, index);
         if (end < 0) throw new ParseFailure('invalid_rule_source');
-        addToken({ type: 'string', value: source.slice(index + 1, end - 1), triple: false });
+        addToken({ type: 'string', value: source.slice(index + 1, end - 1), triple: false, quote: char });
         index = end;
         continue;
       }
@@ -734,6 +734,71 @@
     return { type: 'error', reason };
   }
 
+  function buildDirectLegacyProm(tokens) {
+    const reject = () => graphError('legacy_prom');
+    if (
+      tokens.length !== 17 || tokens[0].type !== 'identifier' || tokens[0].value !== 'prom' ||
+      tokens[1].type !== '(' || tokens[15].type !== ')' || tokens[16].type !== 'eof'
+    ) return reject();
+    const args = [];
+    for (let index = 0; index < 7; index += 1) {
+      const token = tokens[2 + index * 2];
+      if (
+        token.type !== 'string' || token.value.includes('\\') || token.value.includes('$') ||
+        (index !== 2 && /\s/.test(token.value)) ||
+        (index === 2 ? !(token.quote === "'''" || (token.quote === '"' && token.value === '')) : token.quote !== '"') ||
+        (index < 6 && tokens[3 + index * 2].type !== ',')
+      ) return reject();
+      args.push(token.value);
+    }
+    const [metric, grouping, filter, aggregation, step, start, end] = args;
+    if (!/^[A-Za-z_:][A-Za-z0-9_:]*$/.test(metric) || aggregation !== 'sum' || end !== '') return reject();
+    const labels = grouping === '' ? [] : grouping.split(',');
+    if (
+      labels.some((label) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(label) || label === '__name__') ||
+      new Set(labels).size !== labels.length
+    ) return reject();
+    // Bosun durations are int64 nanoseconds. Reject before conversion can overflow.
+    for (const duration of [step, start]) {
+      const match = duration.match(/^([1-9][0-9]{0,18})(m|d)$/);
+      if (!match) return reject();
+      const nanos = BigInt(match[1]) * (match[2] === 'm' ? 60000000000n : 86400000000000n);
+      if (nanos > 9223372036854775807n) return reject();
+    }
+    const matchers = [];
+    const matcherLabels = new Set();
+    if (filter.trim()) {
+      let quoted = false;
+      let begin = 0;
+      const parts = [];
+      for (let index = 0; index < filter.length; index += 1) {
+        if (filter[index] === '"') quoted = !quoted;
+        if (filter[index] === ',' && !quoted) {
+          parts.push(filter.slice(begin, index));
+          begin = index + 1;
+        }
+      }
+      if (quoted) return reject();
+      parts.push(filter.slice(begin));
+      for (const part of parts) {
+        const match = part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(=~|=)\s*"([^"\x00-\x1f\x7f]*)"$/);
+        if (!match || matcherLabels.has(match[1])) return reject();
+        const [, label, operator, value] = match;
+        // A deliberately small RE2 grammar, not a JavaScript RegExp compatibility guess.
+        if (operator === '=~' && !/^(?:[A-Za-z0-9_-]+(?:\.\*)?|\.\*)(?:\|(?:[A-Za-z0-9_-]+(?:\.\*)?|\.\*))*$/.test(value)) {
+          return reject();
+        }
+        matcherLabels.add(label);
+        matchers.push(`${label}${operator}"${value}"`);
+      }
+    }
+    // Like Bosun's template, a nonempty original filter keeps braces, even if blank.
+    const selector = filter === '' ? '' : `{${matchers.join(', ')}}`;
+    const query = `sum(${metric}${selector}) by (${labels.join(', ')})`;
+    if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) return reject();
+    return { ...graphValue(query, [query], { signature: getQueryOutputSignature(query) }), legacyProm: true };
+  }
+
   function parseGraphExpression(expression, assignments, context) {
     let tokens;
     const tokenDiagnostics = { tokens: 0 };
@@ -760,6 +825,11 @@
       context.expressionTokens += MAX_EXPRESSION_TOKENS;
       context.batchWork.expressionTokens += MAX_EXPRESSION_TOKENS;
       return graphError(error instanceof ParseFailure ? error.reason : 'computed_graph');
+    }
+    // A legacy call is permitted only as the complete selected expression, never
+    // through a variable dependency, wrapper, arithmetic or backend prefix.
+    if (tokens.some((token) => token.type === 'identifier' && token.value.toLowerCase() === 'prom')) {
+      return context.stack.length === 1 ? buildDirectLegacyProm(tokens) : graphError('legacy_prom');
     }
     let offset = 0;
 
@@ -1072,7 +1142,7 @@
     return result({
       ok: true,
       kind: 'single_query',
-      reason: resolved.computed ? 'computed_graph' : 'direct_promras',
+      reason: resolved.legacyProm ? 'direct_prom' : (resolved.computed ? 'computed_graph' : 'direct_promras'),
       source,
       query: resolved.prom,
       queries: resolved.queries,

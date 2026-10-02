@@ -2979,6 +2979,18 @@ alert synthetic.expr.b {
 alert synthetic.expr.unresolved {
   $q = $missing
   warn = 1
+}
+alert synthetic.legacy.direct {
+  $usage_graph = prom("synthetic_legacy_total", "", '''env="demo"''', "sum", "1m", "1d", "")
+  warn = 1
+}
+alert synthetic.legacy.q {
+  $q = prom("synthetic_legacy_q_total", "", "", "sum", "1m", "1d", "")
+  warn = 1
+}
+alert synthetic.legacy.dotted {
+  $usage_graph = prom("synthetic.legacy.total", "", "", "sum", "1m", "1d", "")
+  warn = 1
 }`)};
     let configGate = null;
     let configStarted = null;
@@ -3060,6 +3072,19 @@ alert synthetic.expr.unresolved {
       const extractedUnsupported = globalThis.BosunHelperPromQL.extractPromrasQuery(expr(unsupportedQuery));
       const unsupported = await resolved(fixture('synthetic.expr.a', 806, expr(unsupportedQuery)));
 
+      const legacy = fixture('synthetic.legacy.direct', 807, expr('fallback_must_not_win'));
+      const legacyResult = await resolved(legacy);
+      legacy.root.querySelector('.bosun-grafana-query-btn')?.click();
+      const legacyQ = fixture('synthetic.legacy.q', 808, expr('fallback_must_not_win'));
+      const legacyQResult = await resolved(legacyQ);
+      legacyQ.root.querySelector('.bosun-grafana-query-btn')?.click();
+      const dotted = fixture('synthetic.legacy.dotted', 809, expr('valid_fallback_total'));
+      const dottedResult = await resolved(dotted);
+      const dottedReason = hooks.ruleGraphResolver.getResolution(dotted.name)?.reason;
+      const malformedTags = fixture('synthetic.legacy.direct', 810, expr('valid_fallback_total'));
+      malformedTags.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host=';
+      const malformedLegacyTags = await resolved(malformedTags);
+
       // Both generations subscribe to a real, delayed config acquisition. Only the
       // latest snapshot/DOM may receive an action when that acquisition completes.
       async function replaceWhilePending(next, hash) {
@@ -3089,6 +3114,7 @@ alert synthetic.expr.unresolved {
       const forbiddenReplacement = await replaceWhilePending(missing, 'EXPR-H3');
       return { verified, positiveReason, positive, missingResolution, missingResult,
         unresolvedReason, unresolvedResult, ambiguous, extractedUnsupported, unsupported,
+        legacyResult, legacyQResult, dottedResult, dottedReason, malformedLegacyTags,
         replacement, forbiddenReplacement, openedQueries };
     } finally {
       hooks.ruleGraphResolver.destroy();
@@ -3108,6 +3134,11 @@ alert synthetic.expr.unresolved {
     ambiguous: noExprAction,
     extractedUnsupported: '{__name__=~"synthetic_.*"}',
     unsupported: noExprAction,
+    legacyResult: { query: 'sum(synthetic_legacy_total{env="demo", host="node807"}) by ()', buttons: 1 },
+    legacyQResult: { query: 'sum(synthetic_legacy_q_total{host="node808"}) by ()', buttons: 1 },
+    dottedResult: noExprAction,
+    dottedReason: 'legacy_prom',
+    malformedLegacyTags: noExprAction,
     replacement: {
       pendingA: noExprAction, pendingNext: noExprAction,
       after: { query: 'sum(rate(expr_b_total{host="node802"}[5m]))', buttons: 1 }, oldQuery: ''
@@ -3115,7 +3146,12 @@ alert synthetic.expr.unresolved {
     forbiddenReplacement: {
       pendingA: noExprAction, pendingNext: noExprAction, after: noExprAction, oldQuery: ''
     },
-    openedQueries: ['sum(rate(expr_a_total{host="node801"}[5m]))', 'sum(rate(expr_b_total{host="node802"}[5m]))']
+    openedQueries: [
+      'sum(rate(expr_a_total{host="node801"}[5m]))',
+      'sum(synthetic_legacy_total{env="demo", host="node807"}) by ()',
+      'sum(synthetic_legacy_q_total{host="node808"}) by ()',
+      'sum(rate(expr_b_total{host="node802"}[5m]))'
+    ]
   }, 'State.Expr fallback must obey verified rule resolution, current identity and the common tag pipeline');
 
   const outputDerivedLabelResult = await evaluate(client, `(async () => {
