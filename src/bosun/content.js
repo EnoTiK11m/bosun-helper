@@ -187,6 +187,7 @@
   let newAlertNoticeCounts = { warning: 0, critical: 0, unknown: 0 };
   let newAlertTrackerMutationAllowed = true;
   let latestAlertsPayload = null;
+  let latestAlertsTrackerOwner = false;
   let visualTrackerLifecycleGeneration = 0;
   let ruleGraphLifecycleGeneration = 0;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
@@ -1133,6 +1134,7 @@
     ruleGraphLifecycleGeneration += 1;
     ruleGraphResolver?.stop?.();
     latestAlertsPayload = null;
+    latestAlertsTrackerOwner = false;
     try { primedAlertsPayload?.controller?.abort?.(); } catch (_) {}
     primedAlertsPayload = null;
     if (alertMarkerCachePersistTimer) {
@@ -1868,9 +1870,10 @@
         if (
           generation !== visualTrackerLifecycleGeneration ||
           !isFeatureEnabled('visualNewAlertNotifications') ||
-          !latestAlertsPayload
+          !canReconcileAlertTracker(latestAlertsPayload)
         ) return;
-        return newAlertTrackerApi?.reconcile?.(latestAlertsPayload);
+        const payload = latestAlertsPayload;
+        return newAlertTrackerApi?.reconcile?.(payload, () => canReconcileAlertTracker(payload));
       }).catch((error) => {
         reportDiagnostics('new-alert-tracker-start-failed', error?.message || 'unknown-error');
       });
@@ -3509,9 +3512,16 @@
     return fetchAlertsPayload(options);
   }
 
+  function canReconcileAlertTracker(payload) {
+    return Boolean(payload && payload === latestAlertsPayload && latestAlertsTrackerOwner &&
+      isFeatureEnabled('visualNewAlertNotifications') &&
+      (!refreshCoordinatorApi || refreshCoordinatorApi.ownsSnapshot?.(payload) === true));
+  }
+
   function applyAlertsPayload(payload, metadata = {}) {
     if (!isDashboardEnhancementsPage()) return;
     latestAlertsPayload = payload;
+    latestAlertsTrackerOwner = metadata?.source !== 'follower';
     alertsPayloadApplyVersion += 1;
     singleAlertAgeApi?.update?.(payload, {
       source: metadata?.source || 'direct',
@@ -3529,7 +3539,7 @@
       newAlertTrackerMutationAllowed = previousTrackerPermission;
     }
     if (trackerOwner && isFeatureEnabled('visualNewAlertNotifications')) {
-      newAlertTrackerApi?.reconcile?.(payload);
+      newAlertTrackerApi?.reconcile?.(payload, () => canReconcileAlertTracker(payload));
     }
     applyNeedsAckMarkersFromData();
     if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();

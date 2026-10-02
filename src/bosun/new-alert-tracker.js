@@ -209,10 +209,12 @@
       if (changed) notify();
     }
 
-    async function reconcile(payload) {
+    async function reconcile(payload, canReconcile = () => true) {
       const generation = lifecycleGeneration;
       await (readyPromise || Promise.resolve());
       if (!started || generation !== lifecycleGeneration) return;
+      // Restore can outlive ownership or the snapshot that authorized this call.
+      if (!canReconcile()) return;
       const { currentIds, idToSeverity } = collectCurrentIdsAndSeverity(payload);
       const notedIds = collectIdsWithNote(payload);
       let changed = false;

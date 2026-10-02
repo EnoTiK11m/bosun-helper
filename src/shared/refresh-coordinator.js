@@ -34,6 +34,7 @@
     let lastAcceptedTerm = '';
     let lastAcceptedSequence = 0;
     let lastSnapshot = null;
+    let lastSnapshotGeneration = -1;
     let heartbeatTimer = null;
     let pollTimer = null;
     let refreshTimer = null;
@@ -216,6 +217,7 @@
           fetchedAt: Date.now(),
           payload
         };
+        lastSnapshotGeneration = expectedGeneration;
         applySnapshot(payload, { source: 'leader', reason, fetchedAt: lastSnapshot.fetchedAt });
         if (!fallbackMode && !post(lastSnapshot)) {
           enterFallback(new Error('refresh snapshot channel unavailable'));
@@ -606,6 +608,11 @@
       start,
       stop,
       requestRefresh,
+      // Only the latest fetched snapshot of this leadership/lifecycle is authoritative.
+      ownsSnapshot: (payload) => !stopped && role === 'leader' &&
+        lastSnapshotGeneration === lifecycleGeneration &&
+        Boolean(lastSnapshot) && lastSnapshot.payload === payload && lastSnapshot.term === term &&
+        lastSnapshot.seq === sequence,
       getRole: () => role,
       getTabId: () => tabId
     };
