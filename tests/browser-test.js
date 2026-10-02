@@ -2954,6 +2954,170 @@ async function runBrowserAssertions(client) {
     buttonsAfterConflictingIdentity: 0
   });
 
+  const stateExprFallbackResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/');
+    document.body.innerHTML = '';
+    globalThis.BosunHelperLocalConfig = {
+      bosunHosts: ['not-current.invalid'],
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1'
+    };
+    const openedQueries = [];
+    globalThis.BosunHelperGrafanaHandoff = {
+      createGrafanaHandoff() {
+        return { openQuery(query) { openedQueries.push(query); }, cleanupExpired() {}, destroy() {} };
+      }
+    };
+    const previousFetch = globalThis.fetch;
+    let activeHash = 'EXPR-H1';
+    const config = ${JSON.stringify(`alert synthetic.expr.a {
+  warn = 1
+}
+alert synthetic.expr.b {
+  warn = 1
+}
+alert synthetic.expr.unresolved {
+  $q = $missing
+  warn = 1
+}`)};
+    let configGate = null;
+    let configStarted = null;
+    globalThis.fetch = async (url) => {
+      if (url === '/api/config/running_hash') {
+        return { ok: true, status: 200, headers: { get() { return null; } },
+          text: async () => JSON.stringify({ Hash: activeHash }) };
+      }
+      if (url === '/api/config?hash=') {
+        configStarted?.();
+        if (configGate) await configGate;
+        return { ok: true, status: 200, headers: { get() { return null; } }, text: async () => config };
+      }
+      throw new Error('unexpected synthetic URL: ' + url);
+    };
+    ${promqlSource}
+    ${ruleGraphSource}
+    ${contentSource}
+    const hooks = globalThis.__BosunHelperBrowserTest;
+    const expr = (query) => "promras('''" + query + "''', '5m', '2h', '')";
+    function fixture(name, id, expression) {
+      const key = name + '{host=node' + id + '}';
+      const child = { Alert: name, AlertKey: key, Subject: key, Ago: '3m',
+        State: { Id: id, Alert: name, AlertKey: key, Tags: 'host=node' + id, Expr: expression } };
+      const root = document.createElement('div');
+      root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
+      const panel = document.createElement('div');
+      panel.className = 'panel';
+      const heading = document.createElement('div');
+      heading.className = 'panel-heading';
+      heading.setAttribute('ng-click', 'toggle()');
+      const idNode = document.createElement('span');
+      idNode.setAttribute('ng-show', 'state.Id');
+      idNode.textContent = '#' + id;
+      const subject = document.createElement('span');
+      subject.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
+      subject.textContent = key;
+      const ago = document.createElement('span');
+      ago.setAttribute('ts-since', 'child.Ago');
+      ago.textContent = '3m';
+      heading.append(idNode, subject, ago);
+      panel.append(heading);
+      root.append(panel);
+      return { name, panel, root, payload: { Groups: { NeedAck: [{
+        Subject: 'synthetic expr group', Children: [child]
+      }] } } };
+    }
+    const settle = async () => {
+      for (let index = 0; index < 30; index += 1) await Promise.resolve();
+    };
+    function mount(current) {
+      document.body.replaceChildren(current.root);
+      hooks.applyAlertsPayload(current.payload);
+    }
+    function observe(current) {
+      return { query: hooks.getGrafanaQueryForPanel(current.panel),
+        buttons: current.root.querySelectorAll('.bosun-grafana-query-btn').length };
+    }
+    async function resolved(current) {
+      mount(current);
+      await hooks.ruleGraphResolver.refresh([current.name]);
+      await settle();
+      return observe(current);
+    }
+    try {
+      const a = fixture('synthetic.expr.a', 801, expr('sum(rate(expr_a_total[5m]))'));
+      const positive = await resolved(a);
+      const verified = hooks.ruleGraphResolver.getSnapshot().available;
+      const positiveReason = hooks.ruleGraphResolver.getResolution(a.name)?.reason;
+      a.root.querySelector('.bosun-grafana-query-btn')?.click();
+      const missing = fixture('synthetic.expr.missing', 803, expr('up'));
+      const missingResult = await resolved(missing);
+      const missingResolution = hooks.ruleGraphResolver.getResolution(missing.name);
+      const unresolved = fixture('synthetic.expr.unresolved', 804, expr('up'));
+      const unresolvedResult = await resolved(unresolved);
+      const unresolvedReason = hooks.ruleGraphResolver.getResolution(unresolved.name)?.reason;
+      const ambiguous = await resolved(fixture('synthetic.expr.a', 805, expr('up') + ' + ' + expr('other_up')));
+      const unsupportedQuery = '{__name__=~"synthetic_.*"}';
+      const extractedUnsupported = globalThis.BosunHelperPromQL.extractPromrasQuery(expr(unsupportedQuery));
+      const unsupported = await resolved(fixture('synthetic.expr.a', 806, expr(unsupportedQuery)));
+
+      // Both generations subscribe to a real, delayed config acquisition. Only the
+      // latest snapshot/DOM may receive an action when that acquisition completes.
+      async function replaceWhilePending(next, hash) {
+        await resolved(a);
+        activeHash = hash;
+        let release;
+        configGate = new Promise((resolve) => { release = resolve; });
+        const started = new Promise((resolve) => { configStarted = resolve; });
+        const refresh = hooks.ruleGraphResolver.refresh([a.name], { force: true });
+        hooks.applyAlertsPayload(a.payload);
+        await started;
+        const pendingA = observe(a);
+        mount(next);
+        const pendingNext = observe(next);
+        release();
+        await refresh;
+        await settle();
+        configGate = null;
+        configStarted = null;
+        const after = observe(next);
+        const oldQuery = hooks.getGrafanaQueryForPanel(a.panel);
+        next.root.querySelector('.bosun-grafana-query-btn')?.click();
+        return { pendingA, pendingNext, after, oldQuery };
+      }
+      const replacement = await replaceWhilePending(
+        fixture('synthetic.expr.b', 802, expr('sum(rate(expr_b_total[5m]))')), 'EXPR-H2');
+      const forbiddenReplacement = await replaceWhilePending(missing, 'EXPR-H3');
+      return { verified, positiveReason, positive, missingResolution, missingResult,
+        unresolvedReason, unresolvedResult, ambiguous, extractedUnsupported, unsupported,
+        replacement, forbiddenReplacement, openedQueries };
+    } finally {
+      hooks.ruleGraphResolver.destroy();
+      globalThis.fetch = previousFetch;
+      document.body.replaceChildren();
+    }
+  })()`);
+  const noExprAction = { query: '', buttons: 0 };
+  assert.deepStrictEqual(stateExprFallbackResult, {
+    verified: true,
+    positiveReason: 'no_usage_graph',
+    positive: { query: 'sum(rate(expr_a_total{host="node801"}[5m]))', buttons: 1 },
+    missingResolution: null,
+    missingResult: noExprAction,
+    unresolvedReason: 'unresolved_variable',
+    unresolvedResult: noExprAction,
+    ambiguous: noExprAction,
+    extractedUnsupported: '{__name__=~"synthetic_.*"}',
+    unsupported: noExprAction,
+    replacement: {
+      pendingA: noExprAction, pendingNext: noExprAction,
+      after: { query: 'sum(rate(expr_b_total{host="node802"}[5m]))', buttons: 1 }, oldQuery: ''
+    },
+    forbiddenReplacement: {
+      pendingA: noExprAction, pendingNext: noExprAction, after: noExprAction, oldQuery: ''
+    },
+    openedQueries: ['sum(rate(expr_a_total{host="node801"}[5m]))', 'sum(rate(expr_b_total{host="node802"}[5m]))']
+  }, 'State.Expr fallback must obey verified rule resolution, current identity and the common tag pipeline');
+
   const outputDerivedLabelResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
