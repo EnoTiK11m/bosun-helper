@@ -260,6 +260,7 @@ function instrumentContentSource(source) {
     ensureAutoRefreshControls,
     ensureLastActionCopyButtons,
     ensureGrafanaQueryButtons,
+    ensurePriorityActions,
     async startPriorityActionSettings() {
       await settingsStore.start();
       installStorageChangeTracking();
@@ -486,6 +487,30 @@ async function runBrowserAssertions(client) {
     await Promise.resolve();
     const externalUpdateReflected = copyToggle.checked === false;
 
+    const drafts = [];
+    const priorityDraft = document.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
+    const templateDraft = document.querySelector('[data-setting-path="actionTemplates.note"]');
+    priorityDraft.value = 'synthetic.draft'; templateDraft.value = 'draft note';
+    priorityDraft.focus();
+    priorityDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    templateDraft.dispatchEvent(new Event('input', { bubbles: true }));
+    api.mount(actions); api.mount(actions);
+    drafts.push([priorityDraft.value, templateDraft.value, document.activeElement === priorityDraft]);
+    async function externalDraftUpdate(path, value) {
+      const before = clone(snapshot); writePath(snapshot, path, value);
+      for (const subscriber of subscribers) subscriber(clone(snapshot), before, [path]);
+      await Promise.resolve();
+    }
+    await externalDraftUpdate('features.soundNotifications', false);
+    drafts.push([priorityDraft.value, templateDraft.value]);
+    await externalDraftUpdate('priorityRules.exactAlertNames', ['external']);
+    drafts.push([priorityDraft.value, templateDraft.value]);
+    await externalDraftUpdate('actionTemplates.close', ['pristine']);
+    const pristineDraftUpdate = document.querySelector('[data-setting-path="actionTemplates.close"]').value;
+    priorityDraft.dispatchEvent(new Event('change', { bubbles: true }));
+    await Promise.resolve(); await Promise.resolve();
+    drafts.push([priorityDraft.value, templateDraft.value, snapshot.priorityRules.exactAlertNames[0]]);
+
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     const escapeClosed = !api.isOpen() && document.activeElement === button;
     button.click();
@@ -501,6 +526,7 @@ async function runBrowserAssertions(client) {
     const resetApplied = calls.resets === 1 &&
       document.querySelector('[data-setting-path="features.copyButtons"]').checked === true;
     const resetFocusPreserved = document.activeElement === resetButton;
+    const resetDraftsCleared = priorityDraft.value === '' && templateDraft.value === '';
     const templateAccessibility = ['note', 'ack', 'close'].every((type) => {
       const textarea = document.querySelector('[data-setting-path="actionTemplates.' + type + '"]');
       const defaultButton = document.querySelector('[data-template-default-path="actionTemplates.' + type + '"]');
@@ -523,6 +549,7 @@ async function runBrowserAssertions(client) {
     remountApi.destroy();
     return {
       initial,
+      drafts, pristineDraftUpdate, resetDraftsCleared,
       updates: calls.updates,
       saveFocusPreserved,
       soundUnaffected,
@@ -571,6 +598,12 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(settingsUiResult.destroyed, true);
   assert.strictEqual(settingsUiResult.remounted, true);
   assert.strictEqual(settingsUiResult.finalSubscribers, 0);
+  assert.deepStrictEqual(settingsUiResult.drafts, [
+    ['synthetic.draft', 'draft note', true], ['synthetic.draft', 'draft note'],
+    ['synthetic.draft', 'draft note'], ['synthetic.draft', 'draft note', 'synthetic.draft']
+  ], 'A23: actual DOM repaint must preserve drafts until explicit save/reset');
+  assert.strictEqual(settingsUiResult.pristineDraftUpdate, 'pristine');
+  assert.strictEqual(settingsUiResult.resetDraftsCleared, true);
 
   const settingsBfcacheLifecycle = await evaluate(client, `(async () => {
     const frame = document.createElement('iframe');
@@ -2644,11 +2677,56 @@ async function runBrowserAssertions(client) {
     collapsedChecks.sectionNames = [button(needSection)?.dataset.alertName, button(ackSection)?.dataset.alertName];
     button(ackSection).click(); await settle(); collapsedChecks.sectionRules = rules();
     details.collapsedChecks = collapsedChecks;
+    globalThis.__a21OperationCountTest = async () => {
+      const actionOperationCounts = [];
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(win.Node.prototype, 'textContent');
+        for (const size of [100, 300]) {
+          needRoot.innerHTML = '<div class="panel-group"></div>';
+          ackRoot.innerHTML = '<div class="panel-group"></div>';
+          payload = { Groups: { NeedAck: [], Acknowledged: [] } };
+          for (let index = 0; index < size; index++) {
+            const rows = [childData(10000 + index)];
+            const subject = 'synthetic counted group ' + index;
+            const panel = mount(needRoot, subject, rows); panel.querySelector('.panel-body').remove();
+            payload.Groups.NeedAck.push({ Subject: subject, Children: rows });
+          }
+          hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+          let enumerations = 0, subjectReads = 0;
+          const queryAll = needRoot.querySelectorAll;
+          needRoot.querySelectorAll = function(selector) {
+            if (selector === '.panel-group > .panel') enumerations++;
+            return queryAll.call(this, selector);
+          };
+          Object.defineProperty(win.Node.prototype, 'textContent', { ...descriptor, get() {
+            if (this.nodeType === 1 && this.getAttribute('ng-bind') === 'group.Subject') subjectReads++;
+            return descriptor.get.call(this);
+          } });
+          try { hooks.ensurePriorityActions(); }
+          finally {
+            delete needRoot.querySelectorAll;
+            Object.defineProperty(win.Node.prototype, 'textContent', descriptor);
+          }
+          actionOperationCounts.push({ size, enumerations, subjectReads,
+            actions: needRoot.querySelectorAll('.bosun-priority-action').length });
+          // Repaint context must not authorize a click after a duplicate DOM Subject appears.
+          const firstPanel = needRoot.querySelector('.panel');
+          const staleButton = button(firstPanel);
+          const clone = firstPanel.cloneNode(true); clone.querySelectorAll('.bosun-priority-action').forEach(node => node.remove());
+          firstPanel.parentElement.appendChild(clone);
+          const before = JSON.stringify(rules()); staleButton.click(); await settle();
+          if (JSON.stringify(rules()) !== before) throw new Error('A21: stale repaint context authorized a duplicate-Subject click');
+          hooks.ensurePriorityActions();
+          if (button(firstPanel) || button(clone)) throw new Error('A21: duplicate DOM Subject received an action');
+        }
+        return actionOperationCounts;
+      } finally { ui.destroy(); store.destroy(); frame.remove(); delete globalThis.__a21OperationCountTest; }
+    };
     details.noRequests = requests;
     const widthWithActions = doc.documentElement.scrollWidth;
     doc.querySelectorAll('.bosun-priority-action').forEach((node) => { node.style.display = 'none'; });
     details.narrow = widthWithActions <= Math.max(doc.documentElement.clientWidth, doc.documentElement.scrollWidth);
-    ui.destroy(); store.destroy(); frame.remove(); return details;
+    return details;
   })()`);
   const initialRowRules = ['keep.first', 'Case.Name', 'keep.last'];
   assert.strictEqual(priorityRowActions.addLabel, 'Добавить алерт в приоритетные');
@@ -2678,6 +2756,12 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(priorityRowActions.duplicates, 1);
   assert.strictEqual(priorityRowActions.nativeClicks, 0);
   assert.strictEqual(priorityRowActions.noRequests, 0);
+  const priorityActionOperationCounts = await evaluate(client, 'globalThis.__a21OperationCountTest()');
+  for (const { size, enumerations, subjectReads, actions } of priorityActionOperationCounts) {
+    assert.strictEqual(actions, size);
+    assert.strictEqual(enumerations, 1, `A21: ${size} groups caused ${enumerations} full enumerations`);
+    assert.ok(subjectReads <= size * 10, `A21: ${size} groups caused ${subjectReads} Subject reads`);
+  }
 
   const markerRepaintLifecycle = await evaluate(client, `(async () => {
     const frame = document.createElement('iframe'); frame.src = '/';
@@ -3190,7 +3274,7 @@ async function runBrowserAssertions(client) {
         return { openQuery() {}, cleanupExpired() {}, destroy() {} };
       }
     };
-    const directConfig = ${JSON.stringify(`alert imsi.channel.success.response.percent.low {
+    const directConfig = ${JSON.stringify(`alert synthetic.alert.query {
   $q_pct = promras(''' sum by(zone,name)(rr_imsi_success_response_percent) ''', '5m', '2h', '')
   $usage_graph = $q_pct
   warn = $q_pct < 90
@@ -3256,7 +3340,7 @@ async function runBrowserAssertions(client) {
     heading.appendChild(idNode);
     const subjectNode = document.createElement('span');
     subjectNode.setAttribute('ng-bind', 'child.Subject || child.AlertKey');
-    subjectNode.textContent = 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}';
+    subjectNode.textContent = 'synthetic.alert.query{name=synthetic-node,zone=synthetic-zone}';
     heading.appendChild(subjectNode);
     const agoNode = document.createElement('span');
     agoNode.setAttribute('ts-since', 'child.Ago');
@@ -3269,15 +3353,15 @@ async function runBrowserAssertions(client) {
     const payload = { Groups: { NeedAck: [{
       Subject: 'synthetic group',
       Children: [{
-        Alert: 'imsi.channel.success.response.percent.low',
-        AlertKey: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
-        Subject: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
+        Alert: 'synthetic.alert.query',
+        AlertKey: 'synthetic.alert.query{name=synthetic-node,zone=synthetic-zone}',
+        Subject: 'synthetic.alert.query{name=synthetic-node,zone=synthetic-zone}',
         Ago: '3m',
         State: {
           Id: 701,
-          Alert: 'imsi.channel.success.response.percent.low',
-          AlertKey: 'imsi.channel.success.response.percent.low{name=bercut1,zone=smssrv28}',
-          Tags: 'name=bercut1,zone=smssrv28',
+          Alert: 'synthetic.alert.query',
+          AlertKey: 'synthetic.alert.query{name=synthetic-node,zone=synthetic-zone}',
+          Tags: 'name=synthetic-node,zone=synthetic-zone',
           Expr: "promras('''sum(rate(non_authoritative_total[5m]))''', '5m', '2h', '')"
         }
       }]
@@ -3310,14 +3394,14 @@ async function runBrowserAssertions(client) {
     const unchangedHashFetchCount = hashFetchCount;
 
     activeHash = 'MULTI-H2';
-    activeConfig = ${JSON.stringify(`alert imsi.channel.success.response.percent.low {
+    activeConfig = ${JSON.stringify(`alert synthetic.alert.query {
   $q1 = promras('''sum(rate(first_total[5m]))''', '5m', '2h', '')
   $q2 = promras('''sum(rate(second_total[5m]))''', '5m', '2h', '')
   $usage_graph = merge($q1, $q2)
   warn = $q1 > 0
 }`)};
     const multiRefresh = hooks.ruleGraphResolver.refresh(
-      ['imsi.channel.success.response.percent.low'],
+      ['synthetic.alert.query'],
       { force: true }
     );
     const queryDuringHashCheck = hooks.getGrafanaQueryForPanel(panel);
@@ -3331,7 +3415,7 @@ async function runBrowserAssertions(client) {
     configFails = true;
     payload.Groups.NeedAck[0].Children[0].State.Expr =
       "promras('''sum(rate(fallback_total[5m]))''', '5m', '2h', '')";
-    await hooks.ruleGraphResolver.refresh(['imsi.channel.success.response.percent.low'], { force: true });
+    await hooks.ruleGraphResolver.refresh(['synthetic.alert.query'], { force: true });
     hooks.rebuildGrafanaQueryIndex(payload);
     hooks.ensureGrafanaQueryButtons();
     const safeFailureFallback = hooks.getGrafanaQueryForPanel(panel);
@@ -3340,7 +3424,7 @@ async function runBrowserAssertions(client) {
     activeHash = 'NETWORK-H4';
     configFails = false;
     configNetworkFails = true;
-    await hooks.ruleGraphResolver.refresh(['imsi.channel.success.response.percent.low'], { force: true });
+    await hooks.ruleGraphResolver.refresh(['synthetic.alert.query'], { force: true });
     hooks.rebuildGrafanaQueryIndex(payload);
     hooks.ensureGrafanaQueryButtons();
     const safeNetworkFailureFallback = hooks.getGrafanaQueryForPanel(panel);
@@ -3348,9 +3432,9 @@ async function runBrowserAssertions(client) {
 
     activeHash = 'MALFORMED-H5';
     configNetworkFails = false;
-    activeConfig = 'alert imsi.channel.success.response.percent.low {\\n  $usage_graph = promras(';
+    activeConfig = 'alert synthetic.alert.query {\\n  $usage_graph = promras(';
     const malformedSnapshot = await hooks.ruleGraphResolver.refresh(
-      ['imsi.channel.success.response.percent.low'],
+      ['synthetic.alert.query'],
       { force: true }
     );
     hooks.rebuildGrafanaQueryIndex(payload);
@@ -3390,21 +3474,21 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(usageGraphResolverResult, {
     pendingQuery: '',
     buttonsWhileConfigPending: 0,
-    directQuery: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    directQuery: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
     directButtons: 1,
     directConfigFetchCount: 1,
     directHashFetchCount: 2,
-    cachedQueryDuringFreshInterval: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    cachedQueryDuringFreshInterval: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
     cachedHashFetchCount: 2,
-    queryDuringUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
-    queryAfterUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
+    queryDuringUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
+    queryAfterUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
     unchangedHashFetchCount: 3,
     queryDuringHashCheck: '',
     rejectedQuery: '',
     buttonsAfterUnsupportedHash: 0,
-    safeFailureFallback: 'sum(rate(fallback_total{name="bercut1", zone="smssrv28"}[5m]))',
+    safeFailureFallback: 'sum(rate(fallback_total{name="synthetic-node", zone="synthetic-zone"}[5m]))',
     buttonsAfterSafeFallback: 1,
-    safeNetworkFailureFallback: 'sum(rate(fallback_total{name="bercut1", zone="smssrv28"}[5m]))',
+    safeNetworkFailureFallback: 'sum(rate(fallback_total{name="synthetic-node", zone="synthetic-zone"}[5m]))',
     buttonsAfterNetworkFallback: 1,
     malformedSnapshotReason: 'rule_index_unavailable',
     malformedRuleFallback: '',

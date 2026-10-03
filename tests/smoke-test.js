@@ -1221,7 +1221,7 @@ function createBaselineHarness(options = {}) {
   const settings = {
     features: { priorityAlerts: true },
     preferences: { priorityCritical: true },
-    priorityRules: { exactAlertNames: ['sms.channel.bound.bad'] }
+    priorityRules: { exactAlertNames: ['synthetic.alert.priority'] }
   };
   const child = { identity: 'resolved', alertName: 'other.alert', severity: 'critical' };
   const check = (state, options = settings) => JSON.parse(JSON.stringify(classify(state, options)));
@@ -1230,16 +1230,16 @@ function createBaselineHarness(options = {}) {
   });
   assert.deepStrictEqual(check(child), { priority: true, reasons: ['critical'] });
   assert.deepStrictEqual(check({ ...child, severity: 'warning' }), { priority: false, reasons: [] });
-  assert.deepStrictEqual(check({ ...child, severity: 'warning', alertName: 'sms.channel.bound.bad' }), {
+  assert.deepStrictEqual(check({ ...child, severity: 'warning', alertName: 'synthetic.alert.priority' }), {
     priority: true, reasons: ['exact-alert-name']
   });
   assert.deepStrictEqual(check(child, { ...settings, preferences: { priorityCritical: false } }), {
     priority: false, reasons: []
   });
-  assert.deepStrictEqual(check({ ...child, alertName: 'sms.channel.bound.bad' }), {
+  assert.deepStrictEqual(check({ ...child, alertName: 'synthetic.alert.priority' }), {
     priority: true, reasons: ['critical', 'exact-alert-name']
   });
-  assert.strictEqual(check({ ...child, severity: 'warning', alertName: 'sms.channel.bound.bad.extra' }).priority, false);
+  assert.strictEqual(check({ ...child, severity: 'warning', alertName: 'synthetic.alert.priority.extra' }).priority, false);
   for (const identity of ['ambiguous', 'conflicting', 'unresolved', undefined]) {
     assert.strictEqual(check({ ...child, identity }).priority, false);
   }

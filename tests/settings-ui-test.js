@@ -273,7 +273,51 @@ async function flush() {
   await Promise.resolve();
 }
 
+async function testUnsavedDraftsSurviveRepaint() {
+  for (const path of ['priorityRules.exactAlertNames', 'actionTemplates.note']) {
+    for (const repaint of ['mount', 'unrelated', 'same-leaf']) {
+      const harness = createDomHarness();
+      const api = loadSettingsUi(harness);
+      const store = createStore({ features: { copyButtons: false },
+        priorityRules: { exactAlertNames: ['old'] }, actionTemplates: { note: ['old'] } });
+      const ui = api.createSettingsUi({ settingsStore: store, confirmReset: () => true,
+        schema: ['features.copyButtons', 'priorityRules.exactAlertNames', 'actionTemplates.note'].map(path => ({ path })) });
+      ui.mount(harness.actions);
+      ui.open();
+      const control = harness.document.querySelector(`[data-setting-path="${path}"]`);
+      control.focus();
+      control.value = 'draft';
+      control.dispatchEvent(harness.createEvent('input', { bubbles: true }));
+      if (repaint === 'mount') {
+        ui.mount(harness.actions);
+        harness.document.getElementById('bosun-settings-modal').remove();
+        ui.mount(harness.actions);
+      } else store.external(repaint === 'unrelated' ? 'features.copyButtons' : path,
+        repaint === 'unrelated' ? true : ['external']);
+      assert.strictEqual(control.value, 'draft', `A23 ${path}: ${repaint} erased an unsaved draft`);
+      assert.strictEqual(harness.document.activeElement, control);
+      assert.strictEqual(store.updates.length, 0, 'Draft input must not write storage');
+      assert.strictEqual(harness.document.getElementById('bosun-settings-modal').listenerCount('change'), 1);
+      control.dispatchEvent(harness.createEvent('change', { bubbles: true }));
+      await flush();
+      assert.strictEqual(store.updates.length, 1, 'Remount duplicated the save handler');
+      assert.deepStrictEqual(store.updates[0], { [path]: ['draft'] });
+      assert.strictEqual(control.value, 'draft');
+      store.external(path, ['pristine-external']);
+      assert.strictEqual(control.value, 'pristine-external', 'Saved/pristine control ignored external update');
+      control.value = 'another draft';
+      harness.document.getElementById('bosun-settings-reset').click();
+      await flush();
+      assert.strictEqual(control.value, 'old', 'Explicit reset must discard draft');
+      ui.destroy();
+      assert.strictEqual(store.subscriberCount(), 0);
+      assert.strictEqual(harness.document.listenerCount('keydown'), 0);
+    }
+  }
+}
+
 async function main() {
+  await testUnsavedDraftsSurviveRepaint();
   const harness = createDomHarness();
   const api = loadSettingsUi(harness);
   assert.strictEqual(api.createSettingsUi({}), null, 'Incomplete settings store must fail closed');

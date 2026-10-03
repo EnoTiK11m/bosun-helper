@@ -131,6 +131,7 @@
     let resetOperation = 0;
     let updateSequence = 0;
     const pendingByPath = new Map();
+    const renderedValues = new WeakMap();
 
     function isOpen() {
       return Boolean(modal?.classList.contains('is-open'));
@@ -161,25 +162,28 @@
       });
     }
 
-    function renderSnapshot(snapshot = settingsStore.getSnapshot()) {
+    function renderSnapshot(snapshot = settingsStore.getSnapshot(), forcePaths = null) {
       if (destroyed || !modal || !snapshot) return;
       for (const control of modal.querySelectorAll('[data-setting-path]')) {
         const path = control.dataset.settingPath;
         const value = readPath(snapshot, path);
+        const preserveDraft = control.type !== 'checkbox' && renderedValues.has(control) &&
+          control.value !== renderedValues.get(control) && !forcePaths?.has(path);
         if (control.type === 'checkbox') {
           control.checked = value === true;
         } else if (control.tagName === 'TEXTAREA') {
-          control.value = Array.isArray(value) ? value.join('\n') : '';
+          if (!preserveDraft) control.value = Array.isArray(value) ? value.join('\n') : '';
           control.dataset.usesDefaults = value === null ? 'true' : 'false';
           const mode = modal.querySelector(`[data-template-mode-path="${path}"]`);
           if (mode) mode.textContent = value === null ? 'Используются встроенные значения' : '';
           const defaultButton = modal.querySelector(`[data-template-default-path="${path}"]`);
           if (defaultButton) {
-            defaultButton.disabled = value === null || pendingByPath.has(path) || resetOperation !== 0;
+            defaultButton.disabled = (value === null && !preserveDraft) || pendingByPath.has(path) || resetOperation !== 0;
           }
         } else {
-          control.value = value == null ? '' : String(value);
+          if (!preserveDraft) control.value = value == null ? '' : String(value);
         }
+        if (!preserveDraft) renderedValues.set(control, control.value);
         control.disabled = pendingByPath.has(path) || resetOperation !== 0;
       }
       const priorityReset = modal.querySelector('[data-priority-section-reset]');
@@ -200,7 +204,7 @@
       const operation = ++updateSequence;
       pendingByPath.set(path, operation);
       setStatus('Сохранение…');
-      renderSnapshot();
+      renderSnapshot(settingsStore.getSnapshot(), new Set([path]));
       try {
         const next = await settingsStore.update({ [path]: value });
         if (destroyed || pendingByPath.get(path) !== operation) return;
@@ -257,7 +261,7 @@
       const operation = ++updateSequence;
       for (const path of paths) pendingByPath.set(path, operation);
       setStatus('Сохранение…');
-      renderSnapshot();
+      renderSnapshot(settingsStore.getSnapshot(), new Set(paths));
       try {
         const next = await settingsStore.update({
           'features.priorityAlerts': false,
@@ -350,7 +354,7 @@
       const focusTarget = document.activeElement;
       resetOperation = operation;
       setStatus('Сброс настроек…');
-      renderSnapshot();
+      renderSnapshot(settingsStore.getSnapshot(), availablePaths);
       try {
         const next = await settingsStore.reset();
         if (destroyed || resetOperation !== operation) return;
