@@ -3438,7 +3438,7 @@
       bySubject.get(subject) === true);
   }
 
-  function resolvePriorityActionName(panel, root, section, counts) {
+  function resolvePriorityActionName(panel, root, section, counts, groupSubjectCounts = null) {
     if (!panel?.isConnected || !root?.contains(panel)) return '';
     if (isGroupPanel(panel)) {
       const children = getGroupChildPanels(panel);
@@ -3458,14 +3458,17 @@
           // lookup only when there is no strong DOM identity to contradict it.
           if (hasStrongGroupMarkerIdentityFromDom(panel)) return '';
           const subject = getGroupSubjectFromPanel(panel);
-          if (getGroupPanels(root).filter((group) => getGroupSubjectFromPanel(group) === subject).length !== 1) return '';
+          // Repaint uses only its ephemeral counts; click authorization scans fresh DOM.
+          const subjectCount = groupSubjectCounts ? groupSubjectCounts.get(subject)
+            : getGroupPanels(root).filter((group) => getGroupSubjectFromPanel(group) === subject).length;
+          if (subjectCount !== 1) return '';
           record = groupIndex.bySubject.get(subject);
         }
         return record?.name && record.count === Number(countMatch[1]) ? record.name : '';
       }
       if (Number(countMatch[1]) !== children.length) return '';
       const names = children.map((child) => findParentGroupPanelForChild(child) === panel
-        ? resolvePriorityActionName(child, root, section, counts) : '');
+        ? resolvePriorityActionName(child, root, section, counts, groupSubjectCounts) : '');
       return names.every((name) => name && name === names[0]) ? names[0] : '';
     }
     const heading = getChildHeading(panel);
@@ -3515,17 +3518,22 @@
   function ensurePriorityActions() {
     for (const [section, root] of [['NeedAck', getNeedsAckRoot()], ['Acknowledged', getAcknowledgedRoot()]]) {
       if (!root) continue;
-      const children = getChildAlertPanels(root), counts = new Map();
+      const children = getChildAlertPanels(root), groups = getGroupPanels(root), counts = new Map();
+      const groupSubjectCounts = new Map();
+      for (const group of groups) {
+        const subject = getGroupSubjectFromPanel(group);
+        groupSubjectCounts.set(subject, (groupSubjectCounts.get(subject) || 0) + 1);
+      }
       for (const child of children) {
         const id = getPanelIdFromHeading(getChildHeading(child));
         if (id) counts.set(id, (counts.get(id) || 0) + 1);
       }
-      for (const panel of [...children, ...getGroupPanels(root)]) {
+      for (const panel of [...children, ...groups]) {
         const heading = isGroupPanel(panel) ? getPanelHeading(panel) : getChildHeading(panel);
         const subject = isGroupPanel(panel) ? getGroupSubjectNode(panel) : getChildSubjectNode(panel);
         const buttons = Array.from(heading?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`) || []);
         const name = settingsStore?.update && alertDataIndexReady && subject
-          ? resolvePriorityActionName(panel, root, section, counts) : '';
+          ? resolvePriorityActionName(panel, root, section, counts, groupSubjectCounts) : '';
         if (!name) { buttons.forEach((button) => button.remove()); continue; }
         let button = buttons.shift();
         buttons.forEach((duplicate) => duplicate.remove());
