@@ -4673,6 +4673,7 @@ alert synthetic.count.values.label {
   );
 
   const grafanaEditorBindingResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/d/test?editPanel=1');
     const channelToken = 'browser-ambiguous-editor-token';
     const bridgeScript = document.createElement('script');
     bridgeScript.dataset.channelToken = channelToken;
@@ -4707,6 +4708,7 @@ alert synthetic.count.values.label {
         operationId,
         query,
         run: true,
+        targetIdentity: { origin: location.origin, pathname: '/d/test', editPanel: '1', orgId: null },
         deadlineAt: Date.now() + 5000
       }, window.location.origin);
       return response;
@@ -4763,6 +4765,31 @@ alert synthetic.count.values.label {
       hiddenText: hiddenModel.getText(),
       runClicks: validDom.getRunClicks()
     };
+
+    const routeDrift = [];
+    for (const phase of ['before-mutation', 'after-verification', 'transient']) {
+      history.replaceState({}, '', '/d/test?editPanel=1');
+      const dom = mountMonacoEditor();
+      const model = createModel('original');
+      const editor = {
+        getDomNode: () => dom.root, getModel: () => model.model
+      };
+      window.monaco = { editor: { getEditors: () => [editor] } };
+      let commits = 0;
+      dom.root.querySelector('textarea').addEventListener('change', () => {
+        commits += 1;
+        if (phase === 'after-verification' && commits === 2) {
+          history.pushState({}, '', '/d/other?editPanel=2');
+        } else if (phase === 'transient' && commits === 1) {
+          history.pushState({}, '', '/d/test?from=now-1h&editPanel=1&to=now#query');
+        }
+      });
+      if (phase === 'before-mutation') history.pushState({}, '', '/d/other?editPanel=2');
+      const result = await applyQuery('browser-a18-' + phase, 'synthetic_metric');
+      routeDrift.push({ phase, ok: result.ok, reason: result.reason || null,
+        text: model.getText(), runClicks: dom.getRunClicks(), commits });
+    }
+    history.replaceState({}, '', '/d/test?editPanel=1');
 
     const mismatchDom = mountMonacoEditor();
     const mismatchModel = createModel('up');
@@ -4853,6 +4880,7 @@ alert synthetic.count.values.label {
 
     return {
       valid,
+      routeDrift,
       mismatched,
       disconnected,
       ambiguous: {
@@ -4875,6 +4903,11 @@ alert synthetic.count.values.label {
       hiddenText: 'rate(hidden_total[5m])',
       runClicks: 1
     },
+    routeDrift: [
+      { phase: 'before-mutation', ok: false, reason: 'target_changed', text: 'original', runClicks: 0, commits: 0 },
+      { phase: 'after-verification', ok: false, reason: 'target_changed', text: 'synthetic_metric', runClicks: 0, commits: 2 },
+      { phase: 'transient', ok: true, reason: null, text: 'synthetic_metric', runClicks: 1, commits: 2 }
+    ],
     mismatched: { ok: false, text: 'up', runClicks: 0 },
     disconnected: { ok: false, text: 'up', runClicks: 0 },
     ambiguous: {

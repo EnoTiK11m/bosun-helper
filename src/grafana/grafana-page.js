@@ -36,6 +36,27 @@
     return Number.isFinite(deadlineAt) && Date.now() < deadlineAt;
   }
 
+  function normalizeTargetIdentity(target) {
+    if (!target || typeof target !== 'object' ||
+      !['origin', 'pathname', 'editPanel'].every((key) => typeof target[key] === 'string' &&
+        target[key].length > 0 && target[key].length <= 2048) ||
+      !(target.orgId === null || (typeof target.orgId === 'string' && target.orgId.length <= 2048))) return null;
+    return Object.freeze({ origin: target.origin, pathname: target.pathname,
+      editPanel: target.editPanel, orgId: target.orgId });
+  }
+
+  function matchesTarget(target) {
+    try {
+      const url = new URL(window.location.href);
+      return Boolean(target && url.origin === target.origin && url.pathname === target.pathname &&
+        url.searchParams.get('editPanel') === target.editPanel && url.searchParams.get('orgId') === target.orgId);
+    } catch (_) { return false; }
+  }
+
+  function targetChanged() {
+    return { ok: false, reason: 'target_changed', terminal: true };
+  }
+
   function isElementVisible(element) {
     if (!element || element.isConnected === false) return false;
     let current = element;
@@ -385,6 +406,7 @@
   }
 
   async function applyQueryViaMonaco(query, run, deadlineAt, operation) {
+    if (!matchesTarget(operation.targetIdentity)) return targetChanged();
     const binding = findPrometheusMonacoBinding();
     const model = binding?.model;
     const textarea = binding?.textarea;
@@ -409,10 +431,12 @@
 
     let writtenVersion;
     try {
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       operation.mutationAttempted = true;
       model.setValue(query);
       const writtenState = readMonacoModelState(model);
       writtenVersion = writtenState?.version;
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       if (
         !writtenState ||
         writtenState.text !== query ||
@@ -433,6 +457,7 @@
       }
       commitMonacoTextarea(textarea);
       await wait(500);
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       const nextState = confirmMonacoBinding(binding, query, writtenVersion);
       const nextText = nextState?.text ?? '';
       if (!nextState) {
@@ -457,6 +482,7 @@
       }
       commitMonacoTextarea(textarea);
       await wait(500);
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       if (
         !isBeforeDeadline(deadlineAt) ||
         hasAmbiguousEditorDom() ||
@@ -487,6 +513,7 @@
           terminal: true
         };
       }
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       operation.runAttempted = true;
       runButton.click();
 
@@ -497,6 +524,7 @@
         nextLength: nextText.length
       };
     } catch (err) {
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       let currentText = oldText;
       try {
         currentText = model.getValue();
@@ -522,6 +550,7 @@
   }
 
   async function applyQuery(query, run, deadlineAt, operation) {
+    if (!matchesTarget(operation.targetIdentity)) return targetChanged();
     if (!isBeforeDeadline(deadlineAt)) {
       return { ok: false, reason: 'operation-deadline-expired', terminal: true };
     }
@@ -535,6 +564,7 @@
       if (!isBeforeDeadline(deadlineAt)) {
         return { ok: false, reason: 'operation-deadline-expired', terminal: true };
       }
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       operation.mutationAttempted = true;
       view.dispatch({
         changes: { from: 0, to: oldText.length, insert: query },
@@ -544,9 +574,11 @@
 
       const nextText = view.state.doc.toString();
       const writtenDoc = view.state.doc;
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       if (normalizeText(nextText) === normalizeText(query)) {
         if (run) {
           await wait(150);
+          if (!matchesTarget(operation.targetIdentity)) return targetChanged();
           const currentBinding = findCodeMirrorView();
           if (
             !isBeforeDeadline(deadlineAt) ||
@@ -564,6 +596,7 @@
           if (!isBeforeDeadline(deadlineAt)) {
             return { ok: false, reason: 'operation-deadline-expired', terminal: true };
           }
+          if (!matchesTarget(operation.targetIdentity)) return targetChanged();
           operation.runAttempted = true;
           runButton.click();
         }
@@ -575,6 +608,7 @@
         };
       }
 
+      if (!matchesTarget(operation.targetIdentity)) return targetChanged();
       view.dispatch({
         changes: { from: 0, to: nextText.length, insert: oldText },
         selection: { anchor: oldText.length }
@@ -582,6 +616,7 @@
     }
 
     const monacoResult = await applyQueryViaMonaco(query, run, deadlineAt, operation);
+    if (!matchesTarget(operation.targetIdentity)) return targetChanged();
     if (monacoResult.ok) return monacoResult;
     if (monacoResult.terminal) return monacoResult;
 
@@ -613,14 +648,15 @@
     }
   }
 
-  function getOperation(operationId, query, run, deadlineAt) {
+  function getOperation(operationId, query, run, deadlineAt, targetIdentity) {
     pruneOperations();
     const existing = operations.get(operationId);
     if (existing) {
       if (
         existing.query !== query ||
         existing.run !== run ||
-        existing.deadlineAt !== deadlineAt
+        existing.deadlineAt !== deadlineAt ||
+        Object.keys(targetIdentity).some((key) => existing.targetIdentity[key] !== targetIdentity[key])
       ) {
         return Promise.resolve({ ok: false, reason: 'operation-id-collision' });
       }
@@ -635,6 +671,7 @@
       query,
       run,
       deadlineAt,
+      targetIdentity,
       promise: null,
       finishedAt: 0,
       status: 'pending',
@@ -662,6 +699,7 @@
         message: err?.message || String(err)
       }))
       .then((result) => {
+        if (!matchesTarget(operation.targetIdentity)) result = targetChanged();
         operation.status = (
           result?.reason === 'editor-binding-not-found' &&
           !operation.mutationAttempted &&
@@ -692,6 +730,7 @@
       : '';
     const run = event.data.run === true;
     const deadlineAt = Number(event.data.deadlineAt);
+    const targetIdentity = normalizeTargetIdentity(event.data.targetIdentity);
     let result;
     try {
       result = !query
@@ -704,7 +743,11 @@
             deadlineAt <= Date.now() ||
             deadlineAt > Date.now() + MAX_DEADLINE_AHEAD_MS
           ? { ok: false, reason: 'invalid-operation-deadline' }
-          : await getOperation(operationId, query, run, deadlineAt);
+        : !targetIdentity
+          ? { ok: false, reason: 'invalid-operation-target', terminal: true }
+        : !matchesTarget(targetIdentity)
+          ? targetChanged()
+          : await getOperation(operationId, query, run, deadlineAt, targetIdentity);
     } catch (err) {
       result = {
         ok: false,
@@ -713,6 +756,7 @@
       };
     }
 
+    if (targetIdentity && !matchesTarget(targetIdentity)) result = targetChanged();
     window.postMessage({
       type: RESULT_MESSAGE,
       channelToken: CHANNEL_TOKEN,
