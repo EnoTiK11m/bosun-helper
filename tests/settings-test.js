@@ -88,6 +88,28 @@ async function main() {
   assert.strictEqual(defaultsStore.get('features.priorityAlerts'), false);
   assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), true);
   assert.strictEqual(defaultsStore.get('preferences.priorityShowAcknowledged'), false);
+  assert.strictEqual(defaultsStore.get('preferences.priorityRuleAction'), true);
+  const oldHarness = createStorageHarness({ [api.VERSION_KEY]: 1,
+    'bosunSettingsV1:priorityRules.exactAlertNames': ['existing.alert'] });
+  const oldStore = api.createSettingsStore({ storage: oldHarness.storage, storageChanges: oldHarness.onChanged });
+  await oldStore.start();
+  assert.strictEqual(oldStore.get('preferences.priorityRuleAction'), true, 'Old schema-v1 data must keep the action enabled');
+  await oldStore.update({ 'preferences.priorityRuleAction': false });
+  const reloadedStore = api.createSettingsStore({ storage: oldHarness.storage, storageChanges: oldHarness.onChanged });
+  await reloadedStore.start();
+  assert.strictEqual(reloadedStore.get('preferences.priorityRuleAction'), false);
+  assert.deepStrictEqual(plain(reloadedStore.get('priorityRules.exactAlertNames')), ['existing.alert']);
+  await reloadedStore.update({ 'preferences.priorityRuleAction': true });
+  assert.strictEqual(oldStore.get('preferences.priorityRuleAction'), true, 'The preference must converge across tabs');
+  await assert.rejects(oldStore.update({ 'preferences.priorityRuleAction': 'false' }), /Invalid setting/);
+  await reloadedStore.reset();
+  assert.strictEqual(reloadedStore.get('preferences.priorityRuleAction'), true);
+  oldStore.destroy(); reloadedStore.destroy();
+  const malformedStore = api.createSettingsStore({ storage: createStorageHarness({ [api.VERSION_KEY]: 1,
+    'bosunSettingsV1:preferences.priorityRuleAction': 'false' }).storage });
+  await malformedStore.start();
+  assert.strictEqual(malformedStore.get('preferences.priorityRuleAction'), true, 'Malformed preference must use its boolean default');
+  malformedStore.destroy();
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), []);
   assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: 1 }], 'fresh start must not materialize every default leaf');
   await defaultsStore.update({
