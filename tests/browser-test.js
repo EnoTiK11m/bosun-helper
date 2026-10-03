@@ -260,6 +260,12 @@ function instrumentContentSource(source) {
     ensureAutoRefreshControls,
     ensureLastActionCopyButtons,
     ensureGrafanaQueryButtons,
+    async startPriorityActionSettings() {
+      await settingsStore.start();
+      installStorageChangeTracking();
+      applySettingsSnapshot(settingsStore.getSnapshot(), { initial: true });
+      return settingsStore;
+    },
     runDomRefreshPass,
     getLastActionMessageText,
     applyAlertsPayload,
@@ -2444,6 +2450,235 @@ async function runBrowserAssertions(client) {
   await client.send('Emulation.setDeviceMetricsOverride', {
     width: 600, height: 800, deviceScaleFactor: 1, mobile: false
   });
+  const priorityRowActions = await evaluate(client, `(async () => {
+    const frame = document.createElement('iframe'); frame.src = '/';
+    await new Promise((resolve) => { frame.onload = resolve; document.body.appendChild(frame); });
+    const win = frame.contentWindow, doc = frame.contentDocument;
+    const data = { bosunSettingsSchemaVersion: 1,
+      'bosunSettingsV1:features.priorityAlerts': true,
+      'bosunSettingsV1:preferences.priorityCritical': false,
+      'bosunSettingsV1:priorityRules.exactAlertNames': ['keep.first', 'Case.Name', 'keep.last'] };
+    const listeners = new Set(); let failWrite = false, requests = 0;
+    const storage = {
+      get(keys, callback) {
+        const result = {}; for (const key of keys === null ? Object.keys(data) : keys) {
+          if (key in data) result[key] = data[key];
+        } callback(result);
+      },
+      set(values, callback) {
+        if (failWrite) {
+          win.chrome.runtime.lastError = { message: 'synthetic write failure' };
+          callback(); win.chrome.runtime.lastError = null; return;
+        }
+        const changes = {};
+        for (const [key, value] of Object.entries(values)) {
+          changes[key] = { oldValue: data[key], newValue: value }; data[key] = value;
+        }
+        callback(); for (const listener of listeners) listener(changes, 'local');
+      },
+      remove(keys, callback) { for (const key of keys) delete data[key]; callback(); }
+    };
+    win.chrome = { runtime: { lastError: null }, storage: { local: storage,
+      onChanged: { addListener(fn) { listeners.add(fn); }, removeListener(fn) { listeners.delete(fn); } } } };
+    win.BosunHelperLocalConfig = { bosunHosts: ['not-current.invalid'] };
+    win.fetch = () => { requests += 1; throw new Error('Row actions must not fetch'); };
+    win.BosunHelperRefreshCoordinator = { createRefreshCoordinator() {
+      return { start() {}, stop() {}, requestRefresh() {} };
+    } };
+    win.eval(${JSON.stringify(settingsSource)}); win.eval(${JSON.stringify(settingsUiSource)});
+    win.eval(${JSON.stringify(alertsDataSource)}); win.eval(${JSON.stringify(needAckSeveritySource)});
+    win.eval(${JSON.stringify(prioritySource)}); win.eval(${JSON.stringify(singleAlertAgeSource)});
+    win.eval(${JSON.stringify(stylesSource)}); win.eval(${JSON.stringify(contentSource)});
+    const hooks = win.__BosunHelperBrowserTest;
+    const store = await hooks.startPriorityActionSettings(); hooks.injectStyles();
+    const toolbar = doc.createElement('div'); toolbar.id = 'row-test-toolbar'; doc.body.appendChild(toolbar);
+    const ui = win.BosunHelperSettingsUi.createSettingsUi({ settingsStore: store,
+      schema: win.BosunHelperSettings.SCHEMA, toolbarId: toolbar.id }); ui.mount(toolbar); ui.open();
+    const settle = () => new Promise((resolve) => win.setTimeout(resolve, 350));
+    const childData = (id, name = 'example.alert', severity = 'warning') => ({ Alert: name,
+      AlertKey: name + '{host=demo,env=test}', Subject: name + '{host=demo,env=test}',
+      Ago: new Date(Date.now() - 60000).toISOString(), State: { Id: id, CurrentStatus: severity } });
+    const records = [childData(8101), childData(8102), childData(8103, 'other.alert'),
+      childData(8104, 'case.name'), childData(8105, 'auto.critical', 'critical')];
+    const ackRecord = childData(8101, 'ack.example');
+    let payload = { Groups: { NeedAck: records.map((row, i) => ({ Subject: 'group ' + i, Children: [row] })),
+      Acknowledged: [{ Subject: 'ack group', Children: [ackRecord] }] } };
+    function root(section) {
+      const node = doc.createElement('div'); node.setAttribute('ts-ack-group', 'schedule.Groups.' + section);
+      node.innerHTML = '<div class="panel-group"></div>'; doc.body.appendChild(node); return node;
+    }
+    const needRoot = root('NeedAck'), ackRoot = root('Acknowledged');
+    let nativeClicks = 0;
+    function mount(root, subject, rows) {
+      const group = doc.createElement('div'); group.className = 'panel';
+      group.innerHTML = '<div class="panel-heading"><h4 class="panel-title"><span ng-bind="group.Subject"></span>' +
+        '<span class="pull-right ng-binding">' + rows.length + ' alerts</span><input type="checkbox"></h4></div>' +
+        '<div class="panel-body panel-group"></div>';
+      group.querySelector('[ng-bind]').textContent = subject;
+      group.querySelector('.panel-heading').addEventListener('click', () => nativeClicks++);
+      for (const row of rows) {
+        const child = doc.createElement('div'); child.className = 'panel'; child.setAttribute('ng-repeat', 'child in group.Children');
+        child.innerHTML = '<div class="panel-heading"><h4 class="panel-title"><span ng-show="state.Id">#' + row.State.Id +
+          '</span><span ng-bind="child.Subject || child.AlertKey"></span><span ts-since="child.Ago">1m-ago</span>' +
+          '<input type="checkbox"></h4></div>';
+        child.querySelector('[ng-bind]').textContent = row.Subject;
+        child.querySelector('.panel-heading').addEventListener('click', () => nativeClicks++);
+        group.querySelector('.panel-body').appendChild(child);
+      }
+      root.querySelector('.panel-group').appendChild(group); return group;
+    }
+    const groups = records.map((row, i) => mount(needRoot, 'group ' + i, [row]));
+    const ack = mount(ackRoot, 'ack group', [ackRecord]);
+    const child = groups[0].querySelector('[ng-repeat]');
+    const button = (panel) => panel.querySelector(':scope > .panel-heading .bosun-priority-action');
+    const flag = (panel) => !!panel.querySelector(':scope > .panel-heading .bosun-priority-marker');
+    const rules = () => store.getSnapshot().priorityRules.exactAlertNames;
+    const details = {};
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); hooks.startObserver(); await settle();
+    details.addLabel = button(child)?.getAttribute('aria-label');
+    details.singleGroup = !!button(groups[0]);
+    button(child).click(); await settle();
+    details.addRules = rules(); details.addFlag = flag(child) && flag(groups[0]);
+    details.removeLabel = button(child)?.getAttribute('aria-label');
+    details.settingsValue = doc.querySelector('[data-setting-path="priorityRules.exactAlertNames"]').value;
+    const reopenedStore = win.BosunHelperSettings.createSettingsStore({ storage, storageChanges: win.chrome.storage.onChanged });
+    await reopenedStore.start(); details.persistedRules = reopenedStore.getSnapshot().priorityRules.exactAlertNames;
+    reopenedStore.destroy();
+    button(groups[0]).click(); await settle(); details.removeRules = rules(); details.removedFlag = !flag(child) && !flag(groups[0]);
+    for (let i = 0; i < 3; i++) hooks.runDomRefreshPass({ preserveExistingOnNone: true });
+    details.duplicates = child.querySelectorAll('.bosun-priority-action').length;
+    details.nativeClicks = nativeClicks;
+    const checkbox = child.querySelector('input'); checkbox.click(); details.checkbox = checkbox.checked;
+    const oldId = child.querySelector('[ng-show]'); oldId.textContent = '#8999'; await settle();
+    details.strongMismatch = !button(child) && !button(groups[0]);
+    oldId.textContent = '#8101'; await settle();
+    const subjectNode = child.querySelector('[ng-bind]');
+    subjectNode.textContent = 'other.alert{host=demo,env=test}'; await settle();
+    details.subjectConflict = !button(child) && !button(groups[0]);
+    subjectNode.textContent = records[0].Subject; await settle();
+    const duplicatePayload = JSON.parse(JSON.stringify(payload));
+    duplicatePayload.Groups.NeedAck[0].Children.push(records[0]);
+    hooks.applyAlertsPayload(duplicatePayload, { source: 'follower' }); await settle();
+    details.snapshotAmbiguous = !button(child) && !button(groups[0]);
+    const conflictPayload = JSON.parse(JSON.stringify(payload));
+    conflictPayload.Groups.NeedAck[0].Children[0].Alert = 'conflicting.name';
+    hooks.applyAlertsPayload(conflictPayload, { source: 'follower' }); await settle();
+    details.nameConflict = !button(child) && !button(groups[0]);
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+    const originalHeading = child.querySelector(':scope > .panel-heading');
+    const freshHeading = originalHeading.cloneNode(true); freshHeading.querySelectorAll('.bosun-priority-action').forEach((node) => node.remove());
+    originalHeading.replaceWith(freshHeading); await settle(); details.repaint = !!button(child);
+    // Even a stale detached button cannot mutate the rules for a changed row identity.
+    const staleButton = button(child); child.querySelector('[ng-show]').textContent = '#8999';
+    staleButton.click(); await settle(); details.staleRules = rules();
+    child.querySelector('[ng-show]').textContent = '#8101'; await settle();
+    const duplicate = child.cloneNode(true); groups[0].querySelector('.panel-body').appendChild(duplicate); await settle();
+    details.duplicateIdentity = !button(child) && !button(duplicate) && !button(groups[0]); duplicate.remove(); await settle();
+    // All rendered children must safely resolve to one name; no first-child selection.
+    const same = mount(needRoot, 'same group', [records[0], records[1]]);
+    groups[0].remove(); groups[1].remove();
+    payload.Groups.NeedAck = [{ Subject: 'same group', Children: [records[0], records[1]] }, ...payload.Groups.NeedAck.slice(2)];
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle(); details.sameNameGroup = !!button(same);
+    const body = same.querySelector('.panel-body'); body.remove(); await settle(); details.collapsed = !!button(same);
+    same.appendChild(body); await settle(); details.expanded = !!button(same);
+    const mixed = mount(needRoot, 'mixed group', [records[0], records[2]]); same.remove(); groups[2].remove();
+    payload.Groups.NeedAck = [{ Subject: 'mixed group', Children: [records[0], records[2]] }, ...payload.Groups.NeedAck.slice(2)];
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle(); details.mixedNames = !button(mixed);
+    mixed.querySelector('[ng-show]').textContent = '#8999'; await settle(); details.unresolvedGroup = !button(mixed);
+    details.ackHiddenPresentation = !!button(ack.querySelector('[ng-repeat]')) && !flag(ack);
+    button(ack.querySelector('[ng-repeat]')).click(); await settle(); details.ackRules = rules();
+    details.ackStillHidden = !flag(ack) && !flag(ack.querySelector('[ng-repeat]'));
+    details.caseSensitive = button(groups[3].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
+    await store.update({ 'preferences.priorityCritical': true }); await settle();
+    details.criticalSeparate = flag(groups[4]) && button(groups[4].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
+    failWrite = true; button(groups[3].querySelector('[ng-repeat]')).click(); await settle();
+    details.failedRules = rules(); details.failedButtonEnabled = !button(groups[3].querySelector('[ng-repeat]')).disabled;
+    failWrite = false;
+    // AlertKey-only structured identity: rule editing must not depend on Alert.
+    const fallbackRow = childData(9101, 'fallback.example'); delete fallbackRow.Alert;
+    const fallbackGroup = mount(needRoot, 'fallback group', [fallbackRow]);
+    payload.Groups.NeedAck.push({ Subject: 'fallback group', Children: [fallbackRow] });
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+    details.alertKeyOnlyAction = !!button(fallbackGroup.querySelector('[ng-repeat]'));
+    button(fallbackGroup.querySelector('[ng-repeat]')).click(); await settle();
+    details.alertKeyOnlyRules = rules();
+    button(fallbackGroup.querySelector('[ng-repeat]')).click(); await settle();
+    const collapsedChecks = {};
+    const cases = [
+      ['single', [childData(9201)]],
+      ['multi', [childData(9202), childData(9203)]],
+      ['mixed', [childData(9204), childData(9205, 'other.example')]],
+      ['missingId', [childData(null)]],
+      ['duplicate', [childData(9206), childData(9206)]],
+      ['invalidKey', [{ ...childData(9207), AlertKey: 'example.alert{broken}' }]],
+      ['subjectOnly', [{ Subject: 'example.alert{host=demo}', State: { Id: 9208 } }]],
+      ['stateAlert', [{ ...childData(9209), Alert: undefined, State: { Id: 9209, Alert: 'example.alert' } }]]
+    ];
+    for (const [kind, rows] of cases) {
+      const subject = 'collapsed ' + kind;
+      const panel = mount(needRoot, subject, rows), body = panel.querySelector('.panel-body'); body.remove();
+      payload.Groups.NeedAck.push({ Subject: subject, Children: rows });
+      hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+      collapsedChecks[kind] = !!button(panel);
+      if (kind === 'single' || kind === 'multi') {
+        panel.appendChild(body); await settle();
+        collapsedChecks[kind + 'Expanded'] = panel.querySelectorAll(':scope > .panel-heading .bosun-priority-action').length;
+        body.remove(); await settle();
+        collapsedChecks[kind + 'Recollapsed'] = panel.querySelectorAll(':scope > .panel-heading .bosun-priority-action').length;
+      }
+    }
+    const duplicateSubjectRows = [childData(9210)];
+    const duplicateSubject = mount(needRoot, 'collapsed duplicate subject', duplicateSubjectRows);
+    duplicateSubject.querySelector('.panel-body').remove();
+    payload.Groups.NeedAck.push({ Subject: 'collapsed duplicate subject', Children: duplicateSubjectRows },
+      { Subject: 'collapsed duplicate subject', Children: [childData(9211)] });
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+    collapsedChecks.duplicateSubject = !!button(duplicateSubject);
+    // Identical group Subject across sections must still select its own snapshot.
+    const needSection = mount(needRoot, 'shared section subject', [childData(9212, 'section.need')]);
+    const ackSection = mount(ackRoot, 'shared section subject', [childData(9212, 'section.ack')]);
+    needSection.querySelector('.panel-body').remove(); ackSection.querySelector('.panel-body').remove();
+    payload.Groups.NeedAck.push({ Subject: 'shared section subject', Children: [childData(9212, 'section.need')] });
+    payload.Groups.Acknowledged.push({ Subject: 'shared section subject', Children: [childData(9212, 'section.ack')] });
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+    collapsedChecks.sectionNames = [button(needSection)?.dataset.alertName, button(ackSection)?.dataset.alertName];
+    button(ackSection).click(); await settle(); collapsedChecks.sectionRules = rules();
+    details.collapsedChecks = collapsedChecks;
+    details.noRequests = requests;
+    const widthWithActions = doc.documentElement.scrollWidth;
+    doc.querySelectorAll('.bosun-priority-action').forEach((node) => { node.style.display = 'none'; });
+    details.narrow = widthWithActions <= Math.max(doc.documentElement.clientWidth, doc.documentElement.scrollWidth);
+    ui.destroy(); store.destroy(); frame.remove(); return details;
+  })()`);
+  const initialRowRules = ['keep.first', 'Case.Name', 'keep.last'];
+  assert.strictEqual(priorityRowActions.addLabel, 'Добавить алерт в приоритетные');
+  assert.strictEqual(priorityRowActions.removeLabel, 'Убрать алерт из приоритетных');
+  assert.deepStrictEqual(priorityRowActions.addRules, [...initialRowRules, 'example.alert']);
+  assert.deepStrictEqual(priorityRowActions.persistedRules, priorityRowActions.addRules);
+  assert.strictEqual(priorityRowActions.settingsValue, priorityRowActions.addRules.join('\n'));
+  assert.deepStrictEqual(priorityRowActions.removeRules, initialRowRules);
+  assert.deepStrictEqual(priorityRowActions.staleRules, initialRowRules);
+  assert.deepStrictEqual(priorityRowActions.ackRules, [...initialRowRules, 'ack.example']);
+  assert.deepStrictEqual(priorityRowActions.failedRules, priorityRowActions.ackRules);
+  assert.strictEqual(priorityRowActions.alertKeyOnlyAction, true);
+  assert.deepStrictEqual(priorityRowActions.alertKeyOnlyRules, [...priorityRowActions.ackRules, 'fallback.example']);
+  assert.deepStrictEqual(priorityRowActions.collapsedChecks, {
+    single: true, singleExpanded: 1, singleRecollapsed: 1,
+    multi: true, multiExpanded: 1, multiRecollapsed: 1,
+    mixed: false, missingId: false, duplicate: false, invalidKey: false, subjectOnly: false, stateAlert: true,
+    duplicateSubject: false, sectionNames: ['section.need', 'section.ack'],
+    sectionRules: [...priorityRowActions.ackRules, 'section.ack']
+  });
+  for (const key of ['singleGroup', 'addFlag', 'removedFlag', 'checkbox', 'strongMismatch', 'repaint',
+    'subjectConflict', 'snapshotAmbiguous', 'nameConflict',
+    'duplicateIdentity', 'sameNameGroup', 'collapsed', 'expanded', 'mixedNames', 'unresolvedGroup',
+    'ackHiddenPresentation', 'ackStillHidden', 'caseSensitive', 'criticalSeparate', 'failedButtonEnabled', 'narrow']) {
+    assert.strictEqual(priorityRowActions[key], true, 'Priority row action: ' + key);
+  }
+  assert.strictEqual(priorityRowActions.duplicates, 1);
+  assert.strictEqual(priorityRowActions.nativeClicks, 0);
+  assert.strictEqual(priorityRowActions.noRequests, 0);
+
   const markerRepaintLifecycle = await evaluate(client, `(async () => {
     const frame = document.createElement('iframe'); frame.src = '/';
     await new Promise((resolve) => { frame.onload = resolve; document.body.appendChild(frame); });

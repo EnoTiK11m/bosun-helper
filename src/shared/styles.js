@@ -347,6 +347,24 @@
         pointer-events: none;
       }
 
+      .bosun-priority-action {
+        display: inline-block;
+        flex: 0 0 auto;
+        margin-left: 8px;
+        padding: 1px 6px;
+        border: 1px solid rgba(49, 93, 156, .45);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, .08);
+        color: inherit;
+        font-size: 12px;
+        line-height: 1.3;
+        vertical-align: middle;
+        cursor: pointer;
+      }
+      .bosun-priority-action:hover { background: rgba(49, 93, 156, .12); }
+      .bosun-priority-action:focus-visible { outline: 2px solid #315d9c; outline-offset: 2px; }
+      .bosun-priority-action:disabled { opacity: .6; cursor: wait; }
+
       div#${topBarId}.bosun-toolbar-fallback {
         width: 95%;
         margin: 10px auto 14px auto;

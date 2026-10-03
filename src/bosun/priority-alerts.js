@@ -22,5 +22,63 @@
     return { priority: reasons.length > 0, reasons };
   }
 
-  globalThis.BosunHelperPriorityAlerts = Object.freeze({ classify });
+  // Rule editing uses structured names, never human-readable Subject text.
+  function getRuleAlertName(child) {
+    const names = [child?.Alert, child?.State?.Alert]
+      .filter((value) => typeof value === 'string' && value.trim())
+      .map((value) => value.trim());
+    for (const key of [child?.AlertKey, child?.State?.AlertKey]) {
+      if (key == null || key === '') continue;
+      if (typeof key !== 'string') return '';
+      const match = key.trim().match(/^([^\s{},="'\\]+)(?:\{([^{}]*)\})?$/);
+      if (!match) return '';
+      const seenTags = new Set();
+      if (match[2]) for (const pair of match[2].split(',')) {
+        const tag = pair.match(/^([A-Za-z_][A-Za-z0-9_]*)=([^\s{},="'\\]+)$/);
+        if (!tag || seenTags.has(tag[1])) return '';
+        seenTags.add(tag[1]);
+      }
+      names.push(match[1]);
+    }
+    const unique = [...new Set(names)];
+    return unique.length === 1 && !/[\s{}]/.test(unique[0]) ? unique[0] : '';
+  }
+
+  function buildRuleIdentityIndex(payload, buildGroupKey = () => '') {
+    const sections = new Map();
+    const groupSections = new Map();
+    for (const section of ['NeedAck', 'Acknowledged']) {
+      const byId = new Map();
+      const groups = payload?.Groups?.[section];
+      for (const group of Array.isArray(groups) ? groups : []) {
+        const children = Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []);
+        for (const child of children) {
+          const id = child?.State?.Id == null ? '' : String(child.State.Id).trim();
+          if (!id) continue;
+          const name = getRuleAlertName(child);
+          const subjects = [child?.Subject, child?.AlertKey, child?.State?.AlertKey]
+            .filter((value) => typeof value === 'string' && value.trim())
+            .map((value) => value.replace(/\s+/g, ' ').trim());
+          byId.set(id, byId.has(id) || !name ? null : { name, subjects });
+        }
+      }
+      const byKey = new Map(), bySubject = new Map();
+      for (const group of Array.isArray(groups) ? groups : []) {
+        const children = Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []);
+        const records = children.map((child) => byId.get(String(child?.State?.Id ?? '').trim()));
+        const name = records.length && records.every((record) => record && record.name === records[0]?.name)
+          ? records[0].name : '';
+        const subject = typeof group?.Subject === 'string' ? group.Subject.replace(/\s+/g, ' ').trim() : '';
+        const record = { name, count: children.length };
+        const key = buildGroupKey(group);
+        if (key) byKey.set(key, byKey.has(key) ? null : record);
+        if (subject) bySubject.set(subject, bySubject.has(subject) ? null : record);
+      }
+      sections.set(section, byId);
+      groupSections.set(section, { byKey, bySubject });
+    }
+    return { childrenBySection: sections, groupsBySection: groupSections };
+  }
+
+  globalThis.BosunHelperPriorityAlerts = Object.freeze({ classify, getRuleAlertName, buildRuleIdentityIndex });
 })();
