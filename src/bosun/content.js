@@ -1961,6 +1961,7 @@
       if (latestAlertsPayload) rebuildAlertDataIndex(latestAlertsPayload, { skipGrafanaQueryIndex: true });
       applyPriorityMarkers();
     }
+    if (changedPaths.includes('preferences.priorityRuleAction')) ensurePriorityActions();
   }
 
   function loadState(callback) {
@@ -3104,7 +3105,7 @@
   }
 
   function rebuildAlertDataIndex(payload, options = {}) {
-    priorityRuleIdentityIndex = priorityApi?.buildRuleIdentityIndex?.(payload, buildGroupMarkerKeyFromData) || null;
+    priorityRuleIdentityIndex = priorityApi?.buildRuleIdentityIndex?.(payload) || null;
     const helpers = {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
@@ -3438,39 +3439,8 @@
       bySubject.get(subject) === true);
   }
 
-  function resolvePriorityActionName(panel, root, section, counts, groupSubjectCounts = null) {
-    if (!panel?.isConnected || !root?.contains(panel)) return '';
-    if (isGroupPanel(panel)) {
-      const children = getGroupChildPanels(panel);
-      const counter = getGroupCountNode(panel);
-      const countText = counter?.dataset.bosunOriginalAlertCount || counter?.textContent || '';
-      const countMatch = countText.trim().match(/^(\d+)\s+alerts?$/i);
-      if (!countMatch) return '';
-      if (!children.length) {
-        const groupIndex = priorityRuleIdentityIndex?.groupsBySection.get(section);
-        if (!groupIndex) return '';
-        const key = buildGroupMarkerKeyFromDom(panel);
-        let record;
-        if (groupIndex.byKey.has(key)) {
-          record = groupIndex.byKey.get(key);
-        } else {
-          // The existing group contract permits unique section-local Subject
-          // lookup only when there is no strong DOM identity to contradict it.
-          if (hasStrongGroupMarkerIdentityFromDom(panel)) return '';
-          const subject = getGroupSubjectFromPanel(panel);
-          // Repaint uses only its ephemeral counts; click authorization scans fresh DOM.
-          const subjectCount = groupSubjectCounts ? groupSubjectCounts.get(subject)
-            : getGroupPanels(root).filter((group) => getGroupSubjectFromPanel(group) === subject).length;
-          if (subjectCount !== 1) return '';
-          record = groupIndex.bySubject.get(subject);
-        }
-        return record?.name && record.count === Number(countMatch[1]) ? record.name : '';
-      }
-      if (Number(countMatch[1]) !== children.length) return '';
-      const names = children.map((child) => findParentGroupPanelForChild(child) === panel
-        ? resolvePriorityActionName(child, root, section, counts, groupSubjectCounts) : '');
-      return names.every((name) => name && name === names[0]) ? names[0] : '';
-    }
+  function resolvePriorityActionName(panel, root, section, counts) {
+    if (!panel?.isConnected || !root?.contains(panel) || isGroupPanel(panel)) return '';
     const heading = getChildHeading(panel);
     const id = getPanelIdFromHeading(heading);
     if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 || counts.get(id) !== 1) return '';
@@ -3493,11 +3463,12 @@
   }
 
   async function updatePriorityRuleFromRow(panel, expectedName, remove) {
-    if (priorityRuleUpdatePending || !settingsStore?.update) return;
+    if (priorityRuleUpdatePending || !settingsStore?.update || settingsSnapshot?.preferences?.priorityRuleAction === false) return;
     priorityRuleUpdatePending = true;
     ensurePriorityActions();
     try {
       await settingsStore.start();
+      if (settingsStore.getSnapshot().preferences?.priorityRuleAction === false) return;
       const context = getPriorityActionContext(panel);
       if (!context || resolvePriorityActionName(panel, context.root, context.section, context.counts) !== expectedName) return;
       const rules = settingsStore.getSnapshot().priorityRules.exactAlertNames;
@@ -3516,24 +3487,27 @@
   }
 
   function ensurePriorityActions() {
+    if (settingsSnapshot?.preferences?.priorityRuleAction === false) {
+      clearOwnedElements(`.${PRIORITY_ACTION_CLASS}`);
+      return;
+    }
     for (const [section, root] of [['NeedAck', getNeedsAckRoot()], ['Acknowledged', getAcknowledgedRoot()]]) {
       if (!root) continue;
-      const children = getChildAlertPanels(root), groups = getGroupPanels(root), counts = new Map();
-      const groupSubjectCounts = new Map();
-      for (const group of groups) {
-        const subject = getGroupSubjectFromPanel(group);
-        groupSubjectCounts.set(subject, (groupSubjectCounts.get(subject) || 0) + 1);
+      // Remove obsolete parent actions without touching Priority presentation.
+      for (const group of getGroupPanels(root)) {
+        getPanelHeading(group)?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`).forEach((button) => button.remove());
       }
+      const children = getChildAlertPanels(root), counts = new Map();
       for (const child of children) {
         const id = getPanelIdFromHeading(getChildHeading(child));
         if (id) counts.set(id, (counts.get(id) || 0) + 1);
       }
-      for (const panel of [...children, ...groups]) {
-        const heading = isGroupPanel(panel) ? getPanelHeading(panel) : getChildHeading(panel);
-        const subject = isGroupPanel(panel) ? getGroupSubjectNode(panel) : getChildSubjectNode(panel);
+      for (const panel of children) {
+        const heading = getChildHeading(panel);
+        const subject = getChildSubjectNode(panel);
         const buttons = Array.from(heading?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`) || []);
         const name = settingsStore?.update && alertDataIndexReady && subject
-          ? resolvePriorityActionName(panel, root, section, counts, groupSubjectCounts) : '';
+          ? resolvePriorityActionName(panel, root, section, counts) : '';
         if (!name) { buttons.forEach((button) => button.remove()); continue; }
         let button = buttons.shift();
         buttons.forEach((duplicate) => duplicate.remove());
@@ -3552,8 +3526,8 @@
         const remove = settingsSnapshot?.priorityRules?.exactAlertNames?.includes(name) === true;
         button.dataset.alertName = name;
         button.dataset.removeRule = String(remove);
-        // Compact action avoids adding a long label beside Copy/Grafana.
-        if (button.textContent !== '⚑') button.textContent = '⚑';
+        const label = remove ? '⚑ Убрать из приоритетных' : '⚑ В приоритетные';
+        if (button.textContent !== label) button.textContent = label;
         button.title = remove ? 'Убрать алерт из приоритетных' : 'Добавить алерт в приоритетные';
         button.setAttribute('aria-label', button.title);
         button.disabled = priorityRuleUpdatePending;

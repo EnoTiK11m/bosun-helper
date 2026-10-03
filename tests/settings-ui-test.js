@@ -330,7 +330,7 @@ async function main() {
       grafanaIntegration: true,
       priorityAlerts: false
     },
-    preferences: { autoRefreshIdleSeconds: 45, priorityCritical: true, priorityShowAcknowledged: false },
+    preferences: { autoRefreshIdleSeconds: 45, priorityCritical: true, priorityShowAcknowledged: false, priorityRuleAction: true },
     priorityRules: { exactAlertNames: ['saved.alert'] },
     actionTemplates: { note: ['synthetic note'], ack: null, close: [] }
   };
@@ -342,6 +342,7 @@ async function main() {
     'features.priorityAlerts',
     'preferences.priorityCritical',
     'preferences.priorityShowAcknowledged',
+    'preferences.priorityRuleAction',
     'priorityRules.exactAlertNames',
     'preferences.autoRefreshIdleSeconds',
     'actionTemplates.note',
@@ -375,6 +376,14 @@ async function main() {
   const priorityToggle = harness.document.querySelector('[data-setting-path="features.priorityAlerts"]');
   const criticalToggle = harness.document.querySelector('[data-setting-path="preferences.priorityCritical"]');
   const acknowledgedToggle = harness.document.querySelector('[data-setting-path="preferences.priorityShowAcknowledged"]');
+  const ruleActionToggle = harness.document.querySelector('[data-setting-path="preferences.priorityRuleAction"]');
+  assert.strictEqual(ruleActionToggle.checked, true);
+  ruleActionToggle.click(); await flush();
+  assert.strictEqual(store.getSnapshot().preferences.priorityRuleAction, false);
+  ui.mount(harness.actions);
+  assert.strictEqual(ruleActionToggle.checked, false, 'Remount must reflect the saved toggle');
+  store.external('preferences.priorityRuleAction', true);
+  assert.strictEqual(ruleActionToggle.checked, true);
   const priorityNames = harness.document.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
   assert.ok(priorityToggle && criticalToggle && acknowledgedToggle && priorityNames, 'Priority controls must render');
   assert.strictEqual(acknowledgedToggle.checked, false);
@@ -415,6 +424,7 @@ async function main() {
   assert.strictEqual(priorityToggle.checked, false);
   assert.strictEqual(criticalToggle.checked, true);
   assert.strictEqual(acknowledgedToggle.checked, false, 'Priority section reset must disable Acknowledged markers');
+  assert.strictEqual(ruleActionToggle.checked, true, 'Priority section reset must restore the action default');
   assert.strictEqual(priorityNames.value, '');
   assert.strictEqual(copyToggle.checked, false, 'Initial value must come from the store snapshot');
   assert.ok(harness.document.querySelector('.bosun-settings-reload-hint'));

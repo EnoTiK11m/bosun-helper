@@ -38,6 +38,8 @@
         Object.freeze({ path: 'features.priorityAlerts', label: 'Включить Priority Alerts' }),
         Object.freeze({ path: 'preferences.priorityCritical', label: 'Считать Critical приоритетными' }),
         Object.freeze({ path: 'preferences.priorityShowAcknowledged', label: 'Показывать приоритет в Acknowledged' }),
+        Object.freeze({ path: 'preferences.priorityRuleAction', label: 'Кнопка управления приоритетом в алерте',
+          hint: 'Показывать кнопку добавления/удаления Priority rule в раскрытом алерте.' }),
         Object.freeze({
           path: 'priorityRules.exactAlertNames',
           label: 'Точные имена алертов',
@@ -251,6 +253,7 @@
         'features.priorityAlerts',
         'preferences.priorityCritical',
         'preferences.priorityShowAcknowledged',
+        'preferences.priorityRuleAction',
         'priorityRules.exactAlertNames'
       ];
       if (
@@ -267,6 +270,7 @@
           'features.priorityAlerts': false,
           'preferences.priorityCritical': true,
           'preferences.priorityShowAcknowledged': false,
+          'preferences.priorityRuleAction': true,
           'priorityRules.exactAlertNames': []
         });
         if (destroyed || paths.some((path) => pendingByPath.get(path) !== operation)) return;

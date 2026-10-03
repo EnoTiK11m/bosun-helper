@@ -1264,6 +1264,7 @@ function createBaselineHarness(options = {}) {
   assert.strictEqual(index.childrenBySection.get('NeedAck').get('2')?.name, 'example.other',
     'A canonical AlertKey alone must resolve the exact rule name');
   assert.strictEqual(index.childrenBySection.get('Acknowledged').get('1').name, 'ack.alert');
+  assert.deepStrictEqual(Object.keys(index), ['childrenBySection'], 'Rule editing must not build group-action indexes');
   for (const id of ['3', '4', '5', '6', '7']) assert.strictEqual(index.childrenBySection.get('NeedAck').get(id), null);
   assert.strictEqual(buildIndex({ Groups: { NeedAck: {} } }).childrenBySection.get('NeedAck').size, 0);
   const ruleName = priorityContext.BosunHelperPriorityAlerts.getRuleAlertName;

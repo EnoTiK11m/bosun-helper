@@ -44,9 +44,8 @@
     return unique.length === 1 && !/[\s{}]/.test(unique[0]) ? unique[0] : '';
   }
 
-  function buildRuleIdentityIndex(payload, buildGroupKey = () => '') {
+  function buildRuleIdentityIndex(payload) {
     const sections = new Map();
-    const groupSections = new Map();
     for (const section of ['NeedAck', 'Acknowledged']) {
       const byId = new Map();
       const groups = payload?.Groups?.[section];
@@ -62,22 +61,9 @@
           byId.set(id, byId.has(id) || !name ? null : { name, subjects });
         }
       }
-      const byKey = new Map(), bySubject = new Map();
-      for (const group of Array.isArray(groups) ? groups : []) {
-        const children = Array.isArray(group?.Children) ? group.Children : (group?.Children ? [group.Children] : []);
-        const records = children.map((child) => byId.get(String(child?.State?.Id ?? '').trim()));
-        const name = records.length && records.every((record) => record && record.name === records[0]?.name)
-          ? records[0].name : '';
-        const subject = typeof group?.Subject === 'string' ? group.Subject.replace(/\s+/g, ' ').trim() : '';
-        const record = { name, count: children.length };
-        const key = buildGroupKey(group);
-        if (key) byKey.set(key, byKey.has(key) ? null : record);
-        if (subject) bySubject.set(subject, bySubject.has(subject) ? null : record);
-      }
       sections.set(section, byId);
-      groupSections.set(section, { byKey, bySubject });
     }
-    return { childrenBySection: sections, groupsBySection: groupSections };
+    return { childrenBySection: sections };
   }
 
   globalThis.BosunHelperPriorityAlerts = Object.freeze({ classify, getRuleAlertName, buildRuleIdentityIndex });

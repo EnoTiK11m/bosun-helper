@@ -2569,15 +2569,29 @@ async function runBrowserAssertions(client) {
     const details = {};
     hooks.applyAlertsPayload(payload, { source: 'follower' }); hooks.startObserver(); await settle();
     details.addLabel = button(child)?.getAttribute('aria-label');
-    details.singleGroup = !!button(groups[0]);
+    details.singleGroup = !button(groups[0]);
+    details.addText = button(child)?.textContent;
+    const copyButton = child.querySelector('.bosun-copy-alert-btn');
+    const copied = [];
+    Object.defineProperty(win.navigator, 'clipboard', { configurable: true,
+      value: { writeText: async (text) => { copied.push(text); } } });
+    details.placement = button(child)?.previousElementSibling === copyButton;
+    copyButton.click(); await Promise.resolve();
+    details.copyWorks = copied[0] === records[0].Subject;
+    // A repaint also removes a leftover button from the previous group UI.
+    const obsolete = doc.createElement('button'); obsolete.className = 'bosun-priority-action';
+    groups[0].querySelector('.panel-title').appendChild(obsolete);
+    hooks.ensurePriorityActions(); details.parentCleanup = !button(groups[0]);
     button(child).click(); await settle();
     details.addRules = rules(); details.addFlag = flag(child) && flag(groups[0]);
     details.removeLabel = button(child)?.getAttribute('aria-label');
+    details.removeText = button(child)?.textContent;
+    details.groupAccent = groups[0].querySelector('.panel-heading').classList.contains('bosun-priority-row') && !button(groups[0]);
     details.settingsValue = doc.querySelector('[data-setting-path="priorityRules.exactAlertNames"]').value;
     const reopenedStore = win.BosunHelperSettings.createSettingsStore({ storage, storageChanges: win.chrome.storage.onChanged });
     await reopenedStore.start(); details.persistedRules = reopenedStore.getSnapshot().priorityRules.exactAlertNames;
     reopenedStore.destroy();
-    button(groups[0]).click(); await settle(); details.removeRules = rules(); details.removedFlag = !flag(child) && !flag(groups[0]);
+    button(child).click(); await settle(); details.removeRules = rules(); details.removedFlag = !flag(child) && !flag(groups[0]);
     for (let i = 0; i < 3; i++) hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     details.duplicates = child.querySelectorAll('.bosun-priority-action').length;
     details.nativeClicks = nativeClicks;
@@ -2611,19 +2625,48 @@ async function runBrowserAssertions(client) {
     const same = mount(needRoot, 'same group', [records[0], records[1]]);
     groups[0].remove(); groups[1].remove();
     payload.Groups.NeedAck = [{ Subject: 'same group', Children: [records[0], records[1]] }, ...payload.Groups.NeedAck.slice(2)];
-    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle(); details.sameNameGroup = !!button(same);
-    const body = same.querySelector('.panel-body'); body.remove(); await settle(); details.collapsed = !!button(same);
-    same.appendChild(body); await settle(); details.expanded = !!button(same);
+    hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle(); details.sameNameGroup = !button(same) && Array.from(same.querySelectorAll('[ng-repeat]')).every(panel => !!button(panel));
+    const body = same.querySelector('.panel-body'); body.remove(); await settle(); details.collapsed = !button(same) && same.querySelectorAll('.bosun-priority-action').length === 0;
+    same.appendChild(body); await settle(); details.expanded = !button(same) && body.querySelectorAll('.bosun-priority-action').length === 2;
     const mixed = mount(needRoot, 'mixed group', [records[0], records[2]]); same.remove(); groups[2].remove();
     payload.Groups.NeedAck = [{ Subject: 'mixed group', Children: [records[0], records[2]] }, ...payload.Groups.NeedAck.slice(2)];
     hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle(); details.mixedNames = !button(mixed);
     mixed.querySelector('[ng-show]').textContent = '#8999'; await settle(); details.unresolvedGroup = !button(mixed);
-    details.ackHiddenPresentation = !!button(ack.querySelector('[ng-repeat]')) && !flag(ack);
+    const ackBody = ack.querySelector('.panel-body');
+    ackBody.remove(); hooks.ensurePriorityActions(); details.ackCollapsed = !button(ack);
+    ack.appendChild(ackBody); hooks.ensurePriorityActions();
+    details.ackHiddenPresentation = !button(ack) && !!button(ack.querySelector('[ng-repeat]')) && !flag(ack);
     button(ack.querySelector('[ng-repeat]')).click(); await settle(); details.ackRules = rules();
     details.ackStillHidden = !flag(ack) && !flag(ack.querySelector('[ng-repeat]'));
     details.caseSensitive = button(groups[3].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
     await store.update({ 'preferences.priorityCritical': true }); await settle();
     details.criticalSeparate = flag(groups[4]) && button(groups[4].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
+    const ruleActionToggle = doc.querySelector('[data-setting-path="preferences.priorityRuleAction"]');
+    const exactEditor = doc.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
+    const noteEditor = doc.querySelector('[data-setting-path="actionTemplates.note"]');
+    const visualState = () => Array.from(doc.querySelectorAll('.panel-heading')).map(heading => [
+      heading.classList.contains('bosun-priority-row'), heading.querySelectorAll('.bosun-priority-marker').length]);
+    const beforeToggle = visualState(), beforeRules = JSON.stringify(rules());
+    const oldButton = button(ack.querySelector('[ng-repeat]'));
+    const beforeNote = noteEditor.value;
+    exactEditor.value = 'unsaved exact draft'; noteEditor.value = 'unsaved note draft';
+    details.toggleDefault = ruleActionToggle.checked;
+    ruleActionToggle.click(); await settle();
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true }); ui.mount(toolbar);
+    details.toggleOff = doc.querySelectorAll('.bosun-priority-action').length === 0 && !ruleActionToggle.checked;
+    oldButton.click(); await settle();
+    details.toggleRulesUnchanged = JSON.stringify(rules()) === beforeRules;
+    details.togglePresentationUnchanged = JSON.stringify(visualState()) === JSON.stringify(beforeToggle);
+    const restored = win.BosunHelperSettings.createSettingsStore({ storage, storageChanges: win.chrome.storage.onChanged });
+    await restored.start(); details.togglePersisted = restored.get('preferences.priorityRuleAction') === false;
+    restored.destroy();
+    ruleActionToggle.click(); await settle();
+    hooks.runDomRefreshPass({ preserveExistingOnNone: true }); ui.mount(toolbar);
+    details.toggleOn = !!button(ack.querySelector('[ng-repeat]')) &&
+      groups[4].querySelectorAll('[ng-repeat] .bosun-priority-action').length === 1 &&
+      !button(ack) && groups.every(group => !button(group));
+    details.toggleDrafts = exactEditor.value === 'unsaved exact draft' && noteEditor.value === 'unsaved note draft';
+    exactEditor.value = rules().join('\\n'); noteEditor.value = beforeNote;
     failWrite = true; button(groups[3].querySelector('[ng-repeat]')).click(); await settle();
     details.failedRules = rules(); details.failedButtonEnabled = !button(groups[3].querySelector('[ng-repeat]')).disabled;
     failWrite = false;
@@ -2651,14 +2694,13 @@ async function runBrowserAssertions(client) {
       const subject = 'collapsed ' + kind;
       const panel = mount(needRoot, subject, rows), body = panel.querySelector('.panel-body'); body.remove();
       payload.Groups.NeedAck.push({ Subject: subject, Children: rows });
-      hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
+      hooks.applyAlertsPayload(payload, { source: 'follower' }); hooks.ensurePriorityActions();
       collapsedChecks[kind] = !!button(panel);
-      if (kind === 'single' || kind === 'multi') {
-        panel.appendChild(body); await settle();
-        collapsedChecks[kind + 'Expanded'] = panel.querySelectorAll(':scope > .panel-heading .bosun-priority-action').length;
-        body.remove(); await settle();
-        collapsedChecks[kind + 'Recollapsed'] = panel.querySelectorAll(':scope > .panel-heading .bosun-priority-action').length;
-      }
+      panel.appendChild(body); hooks.ensurePriorityActions();
+      collapsedChecks[kind + 'Expanded'] = !!button(panel);
+      collapsedChecks[kind + 'Children'] = Array.from(body.querySelectorAll('[ng-repeat]')).map(child => !!button(child));
+      body.remove(); hooks.ensurePriorityActions();
+      collapsedChecks[kind + 'Recollapsed'] = !!button(panel);
     }
     const duplicateSubjectRows = [childData(9210)];
     const duplicateSubject = mount(needRoot, 'collapsed duplicate subject', duplicateSubjectRows);
@@ -2670,67 +2712,34 @@ async function runBrowserAssertions(client) {
     // Identical group Subject across sections must still select its own snapshot.
     const needSection = mount(needRoot, 'shared section subject', [childData(9212, 'section.need')]);
     const ackSection = mount(ackRoot, 'shared section subject', [childData(9212, 'section.ack')]);
-    needSection.querySelector('.panel-body').remove(); ackSection.querySelector('.panel-body').remove();
+    // Same Subject and ID across sections must not mix child rule names.
     payload.Groups.NeedAck.push({ Subject: 'shared section subject', Children: [childData(9212, 'section.need')] });
     payload.Groups.Acknowledged.push({ Subject: 'shared section subject', Children: [childData(9212, 'section.ack')] });
     hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
-    collapsedChecks.sectionNames = [button(needSection)?.dataset.alertName, button(ackSection)?.dataset.alertName];
-    button(ackSection).click(); await settle(); collapsedChecks.sectionRules = rules();
+    collapsedChecks.sectionNames = [button(needSection.querySelector('[ng-repeat]'))?.dataset.alertName, button(ackSection.querySelector('[ng-repeat]'))?.dataset.alertName];
+    button(ackSection.querySelector('[ng-repeat]')).click(); await settle(); collapsedChecks.sectionRules = rules();
     details.collapsedChecks = collapsedChecks;
-    globalThis.__a21OperationCountTest = async () => {
-      const actionOperationCounts = [];
-      try {
-        const descriptor = Object.getOwnPropertyDescriptor(win.Node.prototype, 'textContent');
-        for (const size of [100, 300]) {
-          needRoot.innerHTML = '<div class="panel-group"></div>';
-          ackRoot.innerHTML = '<div class="panel-group"></div>';
-          payload = { Groups: { NeedAck: [], Acknowledged: [] } };
-          for (let index = 0; index < size; index++) {
-            const rows = [childData(10000 + index)];
-            const subject = 'synthetic counted group ' + index;
-            const panel = mount(needRoot, subject, rows); panel.querySelector('.panel-body').remove();
-            payload.Groups.NeedAck.push({ Subject: subject, Children: rows });
-          }
-          hooks.applyAlertsPayload(payload, { source: 'follower' }); await settle();
-          let enumerations = 0, subjectReads = 0;
-          const queryAll = needRoot.querySelectorAll;
-          needRoot.querySelectorAll = function(selector) {
-            if (selector === '.panel-group > .panel') enumerations++;
-            return queryAll.call(this, selector);
-          };
-          Object.defineProperty(win.Node.prototype, 'textContent', { ...descriptor, get() {
-            if (this.nodeType === 1 && this.getAttribute('ng-bind') === 'group.Subject') subjectReads++;
-            return descriptor.get.call(this);
-          } });
-          try { hooks.ensurePriorityActions(); }
-          finally {
-            delete needRoot.querySelectorAll;
-            Object.defineProperty(win.Node.prototype, 'textContent', descriptor);
-          }
-          actionOperationCounts.push({ size, enumerations, subjectReads,
-            actions: needRoot.querySelectorAll('.bosun-priority-action').length });
-          // Repaint context must not authorize a click after a duplicate DOM Subject appears.
-          const firstPanel = needRoot.querySelector('.panel');
-          const staleButton = button(firstPanel);
-          const clone = firstPanel.cloneNode(true); clone.querySelectorAll('.bosun-priority-action').forEach(node => node.remove());
-          firstPanel.parentElement.appendChild(clone);
-          const before = JSON.stringify(rules()); staleButton.click(); await settle();
-          if (JSON.stringify(rules()) !== before) throw new Error('A21: stale repaint context authorized a duplicate-Subject click');
-          hooks.ensurePriorityActions();
-          if (button(firstPanel) || button(clone)) throw new Error('A21: duplicate DOM Subject received an action');
-        }
-        return actionOperationCounts;
-      } finally { ui.destroy(); store.destroy(); frame.remove(); delete globalThis.__a21OperationCountTest; }
-    };
     details.noRequests = requests;
     const widthWithActions = doc.documentElement.scrollWidth;
     doc.querySelectorAll('.bosun-priority-action').forEach((node) => { node.style.display = 'none'; });
     details.narrow = widthWithActions <= Math.max(doc.documentElement.clientWidth, doc.documentElement.scrollWidth);
+    ui.destroy(); store.destroy(); frame.remove();
     return details;
   })()`);
   const initialRowRules = ['keep.first', 'Case.Name', 'keep.last'];
   assert.strictEqual(priorityRowActions.addLabel, 'Добавить алерт в приоритетные');
   assert.strictEqual(priorityRowActions.removeLabel, 'Убрать алерт из приоритетных');
+  assert.strictEqual(priorityRowActions.addText, '⚑ В приоритетные');
+  assert.strictEqual(priorityRowActions.removeText, '⚑ Убрать из приоритетных');
+  assert.strictEqual(priorityRowActions.parentCleanup, true);
+  assert.strictEqual(priorityRowActions.groupAccent, true);
+  assert.strictEqual(priorityRowActions.placement, true);
+  assert.strictEqual(priorityRowActions.copyWorks, true);
+  assert.strictEqual(priorityRowActions.ackCollapsed, true);
+  for (const field of ['toggleDefault', 'toggleOff', 'toggleOn', 'togglePersisted',
+    'toggleRulesUnchanged', 'togglePresentationUnchanged', 'toggleDrafts']) {
+    assert.strictEqual(priorityRowActions[field], true, 'Priority rule-action setting: ' + field);
+  }
   assert.deepStrictEqual(priorityRowActions.addRules, [...initialRowRules, 'example.alert']);
   assert.deepStrictEqual(priorityRowActions.persistedRules, priorityRowActions.addRules);
   assert.strictEqual(priorityRowActions.settingsValue, priorityRowActions.addRules.join('\n'));
@@ -2741,9 +2750,14 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(priorityRowActions.alertKeyOnlyAction, true);
   assert.deepStrictEqual(priorityRowActions.alertKeyOnlyRules, [...priorityRowActions.ackRules, 'fallback.example']);
   assert.deepStrictEqual(priorityRowActions.collapsedChecks, {
-    single: true, singleExpanded: 1, singleRecollapsed: 1,
-    multi: true, multiExpanded: 1, multiRecollapsed: 1,
-    mixed: false, missingId: false, duplicate: false, invalidKey: false, subjectOnly: false, stateAlert: true,
+    single: false, singleExpanded: false, singleRecollapsed: false, singleChildren: [true],
+    multi: false, multiExpanded: false, multiRecollapsed: false, multiChildren: [true, true],
+    mixed: false, mixedExpanded: false, mixedRecollapsed: false, mixedChildren: [true, true],
+    missingId: false, missingIdExpanded: false, missingIdRecollapsed: false, missingIdChildren: [false],
+    duplicate: false, duplicateExpanded: false, duplicateRecollapsed: false, duplicateChildren: [false, false],
+    invalidKey: false, invalidKeyExpanded: false, invalidKeyRecollapsed: false, invalidKeyChildren: [false],
+    subjectOnly: false, subjectOnlyExpanded: false, subjectOnlyRecollapsed: false, subjectOnlyChildren: [false],
+    stateAlert: false, stateAlertExpanded: false, stateAlertRecollapsed: false, stateAlertChildren: [true],
     duplicateSubject: false, sectionNames: ['section.need', 'section.ack'],
     sectionRules: [...priorityRowActions.ackRules, 'section.ack']
   });
@@ -2756,13 +2770,6 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(priorityRowActions.duplicates, 1);
   assert.strictEqual(priorityRowActions.nativeClicks, 0);
   assert.strictEqual(priorityRowActions.noRequests, 0);
-  const priorityActionOperationCounts = await evaluate(client, 'globalThis.__a21OperationCountTest()');
-  for (const { size, enumerations, subjectReads, actions } of priorityActionOperationCounts) {
-    assert.strictEqual(actions, size);
-    assert.strictEqual(enumerations, 1, `A21: ${size} groups caused ${enumerations} full enumerations`);
-    assert.ok(subjectReads <= size * 10, `A21: ${size} groups caused ${subjectReads} Subject reads`);
-  }
-
   const markerRepaintLifecycle = await evaluate(client, `(async () => {
     const frame = document.createElement('iframe'); frame.src = '/';
     await new Promise((resolve) => { frame.onload = resolve; document.body.appendChild(frame); });
