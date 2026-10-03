@@ -182,7 +182,7 @@ function createCoordinatorTab(name, clock, shared, options = {}) {
     visiblePollMs: 100,
     hiddenPollMs: 500,
     leaseMs: 240,
-    heartbeatMs: 40,
+    heartbeatMs: options.heartbeatMs || 40,
     storageKeyPrefix: 'test-coordinator'
   });
   return {
@@ -299,6 +299,174 @@ function createDeferred() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function testCoordinatorStaleOwnershipChecksCannotDemoteRestartedLeader() {
+  for (const phase of ['heartbeat', 'before-fetch', 'after-fetch', 'fetch-completion']) {
+    const clock = createFakeClock();
+    const shared = createSharedCoordination(clock);
+    const leaseKey = 'test-coordinator:lease:https://bosun.example.test';
+    let holdRead = false, releaseRead;
+    const storage = { ...shared.storage, get(keys, callback) {
+      shared.storage.get(keys, (items) => {
+        if (holdRead && keys.includes(leaseKey)) {
+          holdRead = false;
+          releaseRead = () => callback(items);
+        } else callback(items);
+      });
+    } };
+    let nextFetchGate = null;
+    const fetches = [];
+    const tab = createCoordinatorTab(`a19-${phase}`, clock, shared, {
+      storage, heartbeatMs: phase === 'heartbeat' ? 40 : 1000,
+      fetchSnapshot(options) {
+        fetches.push(options);
+        if (!nextFetchGate) return { phase, generation: options.generation };
+        const gate = nextFetchGate;
+        nextFetchGate = null;
+        return gate.promise;
+      }
+    });
+    async function lease() {
+      let value;
+      shared.storage.get([leaseKey], (items) => { value = items[leaseKey]; });
+      return value;
+    }
+    tab.coordinator.start();
+    await clock.advance(0);
+    await flushMicrotasks();
+    assert.strictEqual(tab.coordinator.getRole(), 'leader');
+    const initialTerm = (await lease()).term;
+    let oldFetchGate;
+    if (phase === 'heartbeat') {
+      holdRead = true;
+      await clock.advance(40);
+    } else {
+      if (phase !== 'before-fetch') nextFetchGate = oldFetchGate = createDeferred();
+      else holdRead = true;
+      tab.coordinator.requestRefresh('a19-old-refresh');
+      await clock.advance(100);
+      if (phase === 'after-fetch') {
+        holdRead = true;
+        oldFetchGate.resolve({ stale: true });
+        await flushMicrotasks();
+      }
+    }
+    if (phase !== 'fetch-completion') assert.ok(releaseRead, `${phase}: old lease read was not held`);
+    tab.coordinator.stop();
+    await flushMicrotasks();
+    const newFetchGate = createDeferred();
+    nextFetchGate = newFetchGate;
+    tab.coordinator.start();
+    await clock.advance(0);
+    await flushMicrotasks();
+    const newLease = await lease();
+    const newTerm = newLease.term;
+    const newFetch = fetches.at(-1);
+    assert.notStrictEqual(newTerm, initialTerm, 'A19 control: restart must create a new term');
+    assert.ok(newFetch.generation > fetches[0].generation, 'A19 control: restart must change generation');
+    assert.strictEqual(tab.coordinator.getRole(), 'leader');
+    const appliedAtRestart = tab.applied.length;
+    if (phase === 'fetch-completion') oldFetchGate.resolve({ stale: true });
+    else releaseRead();
+    await flushMicrotasks();
+    assert.strictEqual(tab.coordinator.getRole(), 'leader', `A19 ${phase}: stale completion demoted the new lifecycle`);
+    assert.strictEqual(newFetch.signal.aborted, false, `A19 ${phase}: stale completion aborted the new fetch`);
+    assert.strictEqual((await lease()).term, newTerm, 'Stale completion changed the new lease');
+    assert.strictEqual(tab.applied.length, appliedAtRestart, 'Stale completion applied a snapshot');
+    newFetchGate.resolve({ current: true });
+    await flushMicrotasks();
+    assert.strictEqual(tab.coordinator.ownsSnapshot(tab.applied.at(-1).payload), true, 'New term lost snapshot ownership');
+    const countBeforePoll = tab.fetchCount;
+    await clock.advance(100);
+    assert.ok(tab.fetchCount > countBeforePoll, 'Stale completion stopped the new polling');
+    if (phase === 'heartbeat') {
+      assert.ok((await lease()).expiresAt > newLease.expiresAt, 'Stale completion stopped the new heartbeat');
+    }
+    assert.strictEqual(tab.coordinator.getRole(), 'leader');
+    tab.coordinator.stop();
+    await flushMicrotasks();
+    assert.strictEqual(clock.timerCount, 0, 'Coordinator left timers after cleanup');
+    assert.strictEqual(shared.openChannelCount, 0);
+  }
+}
+
+async function testCoordinatorHeartbeatRetainsCurrentLeaseLossAndScheduling() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  const leaseKey = 'test-coordinator:lease:https://bosun.example.test';
+  const tab = createCoordinatorTab('a19-current', clock, shared);
+  function lease() {
+    let value;
+    shared.storage.get([leaseKey], (items) => { value = items[leaseKey]; });
+    return value;
+  }
+  tab.coordinator.start();
+  await clock.advance(0);
+  await flushMicrotasks();
+  const original = lease();
+  await clock.advance(80);
+  assert.strictEqual(tab.coordinator.getRole(), 'leader');
+  assert.strictEqual(lease().term, original.term);
+  assert.ok(lease().expiresAt >= original.expiresAt + 80, 'Normal heartbeat stopped scheduling/renewing');
+  shared.storage.set({ [leaseKey]: { version: 1, tabId: 'synthetic-peer', term: 'synthetic-peer-term',
+    visible: true, expiresAt: clock.now + 240 } });
+  await clock.advance(40);
+  assert.strictEqual(tab.coordinator.getRole(), 'follower', 'CURRENT heartbeat ignored real lease loss');
+  const fetchCount = tab.fetchCount;
+  await clock.advance(100);
+  assert.strictEqual(tab.fetchCount, fetchCount, 'Follower continued leader polling after real lease loss');
+  assert.strictEqual(lease().term, 'synthetic-peer-term', 'Lost owner overwrote the peer lease');
+  tab.coordinator.stop();
+  await flushMicrotasks();
+  assert.strictEqual(clock.timerCount, 0);
+}
+
+async function testCoordinatorMultipleStaleHeartbeatsAreNoOps() {
+  const clock = createFakeClock();
+  const shared = createSharedCoordination(clock);
+  const leaseKey = 'test-coordinator:lease:https://bosun.example.test';
+  const pending = [];
+  let holdRead = false;
+  const storage = { ...shared.storage, get(keys, callback) {
+    shared.storage.get(keys, (items) => {
+      if (holdRead && keys.includes(leaseKey)) {
+        holdRead = false;
+        pending.push(() => callback(items));
+      } else callback(items);
+    });
+  } };
+  const tab = createCoordinatorTab('a19-multiple', clock, shared, { storage });
+  tab.coordinator.start();
+  await clock.advance(0);
+  await flushMicrotasks();
+  for (let generation = 0; generation < 3; generation += 1) {
+    holdRead = true;
+    await clock.advance(40);
+    assert.strictEqual(pending.length, generation + 1);
+    tab.coordinator.stop();
+    await flushMicrotasks();
+    tab.coordinator.start();
+    await clock.advance(0);
+    await flushMicrotasks();
+    assert.strictEqual(tab.coordinator.getRole(), 'leader');
+  }
+  await flushMicrotasks();
+  const currentPayload = tab.applied.at(-1).payload;
+  assert.strictEqual(tab.coordinator.ownsSnapshot(currentPayload), true, 'A19 control: new snapshot not yet applied');
+  for (const release of pending.reverse()) {
+    release();
+    await flushMicrotasks();
+    assert.strictEqual(tab.coordinator.getRole(), 'leader');
+    assert.strictEqual(tab.coordinator.ownsSnapshot(currentPayload), true);
+  }
+  const fetchCount = tab.fetchCount;
+  await clock.advance(100);
+  assert.ok(tab.fetchCount > fetchCount);
+  tab.coordinator.stop();
+  await flushMicrotasks();
+  assert.strictEqual(clock.timerCount, 0);
+  assert.strictEqual(shared.openChannelCount, 0);
 }
 
 function createSoundRaceHarness() {
@@ -2531,6 +2699,11 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   const focusedCase = process.env.BOSUN_HELPER_REGRESSION_CASE || '';
   if (focusedCase) {
     const focusedCases = {
+      A19: async () => {
+        await testCoordinatorStaleOwnershipChecksCannotDemoteRestartedLeader();
+        await testCoordinatorHeartbeatRetainsCurrentLeaseLossAndScheduling();
+        await testCoordinatorMultipleStaleHeartbeatsAreNoOps();
+      },
       A18: testGrafanaRejectsTargetRouteDrift,
       A05: testRefreshCoordinatorRejoinTracksRotatedToken,
       A13: testSoundUnlockAndNotificationRacesRestoreMuteState
@@ -2541,6 +2714,9 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
     return;
   }
   await testRefreshCoordinatorLeaderFailoverAndStop();
+  await testCoordinatorStaleOwnershipChecksCannotDemoteRestartedLeader();
+  await testCoordinatorHeartbeatRetainsCurrentLeaseLossAndScheduling();
+  await testCoordinatorMultipleStaleHeartbeatsAreNoOps();
   await testGrafanaRejectsTargetRouteDrift();
   await testRefreshCoordinatorRejoinTracksRotatedToken();
   await testHiddenFollowerDefersSnapshotsUntilVisible();

@@ -52,10 +52,14 @@
     let pageShowListener = null;
     let deferredFollowerSnapshot = null;
     let activeFetchController = null;
+    let activeRefreshContext = null;
 
     function abortActiveFetch() {
       try { activeFetchController?.abort?.(); } catch (_) {}
       activeFetchController = null;
+      activeRefreshContext = null;
+      fetchInFlight = false;
+      refreshQueued = false;
     }
 
     async function applyDeferredFollowerSnapshot() {
@@ -141,10 +145,15 @@
       return items[leaseKey] || null;
     }
 
-    async function stillOwnsLease() {
-      if (!term) return false;
+    function isCurrentOperation(context) {
+      return !stopped && context.generation === lifecycleGeneration && context.term === term;
+    }
+
+    async function stillOwnsLease(context) {
+      if (!context.term || !isCurrentOperation(context)) return false;
       const lease = await readLease();
-      return validLease(lease) && lease.tabId === tabId && lease.term === term;
+      return isCurrentOperation(context) && validLease(lease) &&
+        lease.tabId === tabId && lease.term === context.term;
     }
 
     function clearTimer(name) {
@@ -186,26 +195,36 @@
         refreshQueued = true;
         return;
       }
+      const context = Object.freeze({ generation: expectedGeneration, term });
       fetchInFlight = true;
+      activeRefreshContext = context;
       const refreshController = typeof AbortController === 'function'
         ? new AbortController()
         : null;
       activeFetchController = refreshController;
       try {
-        if (!fallbackMode && !(await stillOwnsLease())) {
-          becomeFollower('lease-lost-before-fetch');
-          return;
+        if (!fallbackMode) {
+          const ownsLease = await stillOwnsLease(context);
+          if (!isCurrentOperation(context) || role !== 'leader') return;
+          if (!ownsLease) {
+            becomeFollower('lease-lost-before-fetch');
+            return;
+          }
         }
-        if (stopped || role !== 'leader' || expectedGeneration !== lifecycleGeneration) return;
+        if (!isCurrentOperation(context) || role !== 'leader') return;
         const payload = await fetchSnapshot({
           signal: refreshController?.signal,
           reason,
           generation: expectedGeneration
         });
-        if (stopped || role !== 'leader' || expectedGeneration !== lifecycleGeneration) return;
-        if (!fallbackMode && !(await stillOwnsLease())) {
-          becomeFollower('lease-lost-after-fetch');
-          return;
+        if (!isCurrentOperation(context) || role !== 'leader') return;
+        if (!fallbackMode) {
+          const ownsLease = await stillOwnsLease(context);
+          if (!isCurrentOperation(context) || role !== 'leader') return;
+          if (!ownsLease) {
+            becomeFollower('lease-lost-after-fetch');
+            return;
+          }
         }
         sequence += 1;
         lastAcceptedSequence = sequence;
@@ -224,14 +243,16 @@
           return;
         }
       } catch (error) {
+        if (!isCurrentOperation(context) || role !== 'leader') return;
         if (
           error?.name === 'AbortError' &&
           (refreshController?.signal?.aborted || stopped || expectedGeneration !== lifecycleGeneration || role !== 'leader')
         ) return;
         reportDiagnostics('refresh-coordinator-fetch-failed', error?.message || 'unknown-error');
       } finally {
+        if (!isCurrentOperation(context) || activeRefreshContext !== context) return;
+        activeRefreshContext = null;
         if (activeFetchController === refreshController) activeFetchController = null;
-        if (expectedGeneration !== lifecycleGeneration) return;
         fetchInFlight = false;
         const queued = refreshQueued;
         refreshQueued = false;
@@ -245,36 +266,39 @@
       clearTimer('heartbeat');
       if (stopped || fallbackMode) return;
       const expectedGeneration = lifecycleGeneration;
+      const context = Object.freeze({ generation: expectedGeneration, term });
       heartbeatTimer = setTimeout(async () => {
+        if (!isCurrentOperation(context)) return;
         heartbeatTimer = null;
-        if (stopped || expectedGeneration !== lifecycleGeneration) return;
         try {
           if (role === 'leader') {
-            if (!(await stillOwnsLease())) {
+            const ownsLease = await stillOwnsLease(context);
+            if (!isCurrentOperation(context) || role !== 'leader') return;
+            if (!ownsLease) {
               becomeFollower('lease-lost');
             } else {
               await storageSet({
                 [leaseKey]: {
                   version: 1,
                   tabId,
-                  term,
+                  term: context.term,
                   visible: Boolean(isVisible()),
                   expiresAt: Date.now() + leaseMs
                 }
               });
-              if (stopped || expectedGeneration !== lifecycleGeneration) return;
+              if (!isCurrentOperation(context)) return;
             }
           } else {
             const lease = await readLease();
-            if (stopped || expectedGeneration !== lifecycleGeneration) return;
+            if (!isCurrentOperation(context)) return;
             if (!validLease(lease)) await tryBecomeLeader(expectedGeneration);
           }
         } catch (error) {
-          if (stopped || expectedGeneration !== lifecycleGeneration) return;
+          if (!isCurrentOperation(context)) return;
           enterFallback(error);
           return;
         }
-        if (expectedGeneration === lifecycleGeneration) scheduleHeartbeat();
+        if (isCurrentOperation(context)) scheduleHeartbeat();
       }, heartbeatMs);
     }
 
@@ -315,6 +339,7 @@
         return false;
       }
 
+      abortActiveFetch();
       role = 'leader';
       deferredFollowerSnapshot = null;
       term = candidateTerm;
@@ -467,6 +492,7 @@
         scheduleRejoin();
         return;
       }
+      abortActiveFetch();
       fallbackMode = true;
       role = 'leader';
       deferredFollowerSnapshot = null;
