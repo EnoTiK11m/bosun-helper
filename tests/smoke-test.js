@@ -990,21 +990,57 @@ for (const malformedQuery of [
   );
 }
 for (const malformedTags of [
+  'host="a" "b"',
+  'host="a"x',
+  'host="a""b"',
+  'host="a"trailing',
+  'host="a" "b" "c"',
+  'host="a"b"c"',
+  'host="unterminated',
+  'host="a"  garbage',
+  'host="a""b""c"',
+  "host='a' 'b'",
+  'host="a" "b",env=test',
+  'env=test,host="a" "b"',
   'host=web-1,host=web-2',
   'host=web-1,broken,env=prod',
   'host="web-1'
 ]) {
+  assert.deepStrictEqual(Array.from(promqlApi.parseAlertTags(malformedTags)), [],
+    `Malformed tag list must be rejected entirely: ${malformedTags}`);
   assert.strictEqual(
     promqlApi.applyAlertTagsToPromQuery('up', malformedTags),
     '',
     `Malformed or conflicting tags must fail closed: ${malformedTags}`
   );
+  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', malformedTags, 'synthetic.alert{host=safe}'), '',
+    'Malformed tags must not fall back to AlertKey');
 }
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery('up', 'host=web-1,host=web-1'),
   'up{host="web-1"}',
   'Identical duplicate tags may deduplicate'
 );
+for (const [source, expectedTags] of [
+  ['host="a,b",env=test', [{ name: 'host', value: 'a,b' }, { name: 'env', value: 'test' }]],
+  [String.raw`host="a\"b"`, [{ name: 'host', value: 'a"b' }]],
+  [String.raw`host="a\\b"`, [{ name: 'host', value: 'a\\b' }]],
+  [String.raw`host="a\,b"`, [{ name: 'host', value: 'a,b' }]],
+  [String.raw`host='a\'b'`, [{ name: 'host', value: "a'b" }]],
+  [String.raw`host="a\qb"`, [{ name: 'host', value: 'aqb' }]],
+  [' host = "a"  , env = test ', [{ name: 'host', value: 'a' }, { name: 'env', value: 'test' }]],
+  ['host="a",host=a', [{ name: 'host', value: 'a' }]]
+]) {
+  assert.deepStrictEqual(Array.from(promqlApi.parseAlertTags(source), (tag) => ({ ...tag })), expectedTags,
+    `Existing tag decoding must remain unchanged: ${source}`);
+  const matchers = expectedTags.map(({ name, value }) => `${name}="${promqlApi.escapePromLabelValue(value)}"`);
+  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', source), `up{${matchers.join(', ')}}`);
+}
+assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', 'host="a",host="b"'), '',
+  'Conflicting quoted duplicates must still fail closed');
+for (const source of ['host="a",,env=test', 'host="a",', ',host="a"', String.raw`host=a\,b`]) {
+  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', source), '', 'Malformed separators must fail closed');
+}
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(
     'left_metric + label_replace(right_metric, "dst", `raw\\` , "src", "x") + tail_metric',

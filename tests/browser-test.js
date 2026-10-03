@@ -3427,6 +3427,10 @@ async function runBrowserAssertions(client) {
       `addtags(promras('''${right}''', '5m', '2h', '')${scaleRight ? ' * 100' : ''}, "branch_axis=second"))`,
       query: `${wrapper(operand(left, scaleLeft), 'first')} or ${wrapper(operand(right, scaleRight), 'second')}` };
   });
+  const a20MalformedQuotedTags = ['host="a" "b"', 'host="a"x', 'host="a""b"',
+    'host="a"trailing', 'host="a" "b" "c"', 'host="a"b"c"', 'host="unterminated',
+    'host="a"  garbage', 'host="a""b""c"', "host='a' 'b'",
+    'host="a" "b",env=test', 'env=test,host="a" "b"'];
   const stateExprFallbackResult = await evaluate(client, `(async () => {
     history.replaceState({}, '', '/');
     document.body.innerHTML = '';
@@ -3563,6 +3567,21 @@ alert synthetic.merge.rejected {
       malformedTags.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host=';
       const malformedLegacyTags = await resolved(malformedTags);
 
+      const malformedQuotedTags = [];
+      const quotedTagCases = ${JSON.stringify(a20MalformedQuotedTags)};
+      for (let index = 0; index < quotedTagCases.length; index += 1) {
+        const current = fixture('synthetic.expr.a', 940 + index, expr('up'));
+        current.payload.Groups.NeedAck[0].Children[0].State.Tags = quotedTagCases[index];
+        malformedQuotedTags.push(await resolved(current));
+      }
+      const quotedComma = fixture('synthetic.expr.a', 960, expr('up'));
+      quotedComma.payload.Groups.NeedAck[0].Children[0].State.Tags = 'host="a,b",env=test';
+      const validQuotedTags = await resolved(quotedComma);
+      quotedComma.payload.Groups.NeedAck[0].Children[0].State.Tags = quotedTagCases[0];
+      hooks.applyAlertsPayload(quotedComma.payload);
+      await settle();
+      const malformedQuotedRepaint = observe(quotedComma);
+
       const mergeActions = [];
       const mergeCases = ${JSON.stringify(discriminatorBrowserCases)};
       for (let index = 0; index < mergeCases.length; index += 1) {
@@ -3608,6 +3627,7 @@ alert synthetic.merge.rejected {
       return { verified, positiveReason, positive, missingResolution, missingResult,
         unresolvedReason, unresolvedResult, ambiguous, extractedUnsupported, unsupported,
         legacyResult, legacyQResult, dottedResult, dottedReason, malformedLegacyTags,
+        malformedQuotedTags, validQuotedTags, malformedQuotedRepaint,
         mergeActions, mergeConflict, rejectedMerge, malformedMergeTags,
         replacement, forbiddenReplacement, openedQueries };
     } finally {
@@ -3636,6 +3656,9 @@ alert synthetic.merge.rejected {
     dottedResult: noExprAction,
     dottedReason: 'legacy_prom',
     malformedLegacyTags: noExprAction,
+    malformedQuotedTags: a20MalformedQuotedTags.map(() => noExprAction),
+    validQuotedTags: { query: 'up{host="a,b", env="test"}', buttons: 1 },
+    malformedQuotedRepaint: noExprAction,
     mergeActions: expectedMergeQueries.map((query) => ({ query, buttons: 1 })),
     mergeConflict: noExprAction,
     rejectedMerge: noExprAction,
