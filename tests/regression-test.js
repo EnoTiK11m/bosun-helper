@@ -1314,7 +1314,8 @@ function createGrafanaPageContext(overrides = {}) {
     createRange: overrides.createRange || (() => ({ selectNodeContents() {} })),
     execCommand: overrides.execCommand || (() => true)
   };
-  const location = { origin: 'https://grafana.example.test' };
+  const location = { origin: 'https://grafana.example.test',
+    href: 'https://grafana.example.test/d/test?editPanel=1&orgId=1' };
   const window = {
     document,
     location,
@@ -1349,6 +1350,7 @@ function createGrafanaPageContext(overrides = {}) {
     setTimeout: overrides.setTimeout || ((callback) => { callback(); return 1; }),
     clearTimeout() {}
   };
+  context.URL = URL;
   context.globalThis = context;
   if (overrides.monaco) window.monaco = overrides.monaco;
   vm.runInNewContext(fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8'), context, {
@@ -1362,7 +1364,8 @@ async function dispatchGrafanaApply(
   operationId,
   query,
   run = true,
-  deadlineAt = Date.now() + 10_000
+  deadlineAt = Date.now() + 10_000,
+  targetIdentity = { origin: 'https://grafana.example.test', pathname: '/d/test', editPanel: '1', orgId: '1' }
 ) {
   const listener = harness.messageListeners[0];
   assert.ok(listener, 'Grafana bridge message listener was not installed');
@@ -1376,6 +1379,7 @@ async function dispatchGrafanaApply(
       operationId,
       query,
       run,
+      targetIdentity,
       deadlineAt
     }
   });
@@ -1470,6 +1474,56 @@ function createGrafanaMonacoHarness(options) {
     doms,
     get runClicks() { return runClicks; }
   };
+}
+
+async function testGrafanaRejectsTargetRouteDrift() {
+  for (const phase of ['queued', 'before-run', 'transient']) {
+    const timers = [], model = createTrackedMonacoModel('original'), dom = createMonacoDom();
+    const rig = createGrafanaMonacoHarness({ doms: [dom],
+      editors: [{ getDomNode: () => dom.root, getModel: () => model.api }],
+      setTimeout(callback) { timers.push(callback); return timers.length; }
+    });
+    const pending = dispatchGrafanaApply(rig.harness, `a18-${phase}`, 'synthetic_metric', true);
+    if (phase !== 'queued') {
+      await waitForGrafanaTimer(timers, phase);
+      timers.shift()();
+      await waitForGrafanaTimer(timers, phase);
+      assert.strictEqual(model.value, 'synthetic_metric', 'A18 control: insertion must precede route drift');
+    }
+    rig.harness.window.location.href = phase === 'transient'
+      ? 'https://grafana.example.test/d/test?orgId=1&editPanel=1&from=now-1h&to=now#query'
+      : 'https://grafana.example.test/d/other?editPanel=2&orgId=1';
+    const result = await settleGrafanaOperationWithTimers(pending, timers, phase);
+    assert.strictEqual(rig.runClicks, phase === 'transient' ? 1 : 0, `A18: stale Run in ${phase}`);
+    assert.strictEqual(result?.ok, phase === 'transient', `A18: false success in ${phase}`);
+    if (phase === 'queued') assert.strictEqual(model.value, 'original', 'A18: queued request mutated a new target');
+    if (phase !== 'transient') assert.strictEqual(result?.reason, 'target_changed');
+  }
+
+  const dom = createMonacoDom(), model = createTrackedMonacoModel('new panel query');
+  let mounted = false;
+  const rig = createGrafanaMonacoHarness({ doms: [dom], getEditors: () => mounted
+    ? [{ getDomNode: () => dom.root, getModel: () => model.api }] : [] });
+  const deadlineAt = Date.now() + 10_000;
+  const first = await dispatchGrafanaApply(rig.harness, 'a18-editor-wait', 'old query', true, deadlineAt);
+  assert.strictEqual(first.reason, 'editor-binding-not-found');
+  mounted = true;
+  rig.harness.window.location.href = 'https://grafana.example.test/d/test?editPanel=2&orgId=1';
+  const retry = await dispatchGrafanaApply(rig.harness, 'a18-editor-wait', 'old query', true, deadlineAt);
+  assert.strictEqual(retry.reason, 'target_changed');
+  assert.strictEqual(model.value, 'new panel query', 'A18: old retry mutated the newly visible model');
+  assert.strictEqual(rig.runClicks, 0);
+  const retargeted = await dispatchGrafanaApply(rig.harness, 'a18-editor-wait', 'old query', true,
+    deadlineAt, { origin: 'https://grafana.example.test', pathname: '/d/test', editPanel: '2', orgId: '1' });
+  assert.strictEqual(retargeted.reason, 'operation-id-collision', 'A18: an existing operation was retargeted');
+  assert.strictEqual(model.value, 'new panel query');
+
+  rig.harness.window.location.href = 'https://grafana.example.test/d/test?editPanel=1&orgId=1';
+  const malformed = await dispatchGrafanaApply(rig.harness, 'a18-missing-target', 'old query', true,
+    Date.now() + 10_000, null);
+  assert.strictEqual(malformed.reason, 'invalid-operation-target');
+  assert.strictEqual(model.value, 'new panel query');
+  assert.strictEqual(rig.runClicks, 0);
 }
 
 async function testGrafanaRetriesSafePreMutationFailureForSameOperation() {
@@ -2413,6 +2467,20 @@ async function testGrafanaCodeMirrorAwaitsRun() {
   assert.strictEqual(insertOnly?.ok, true);
   assert.strictEqual(docText, 'inspect query');
   assert.strictEqual(runCount, 1, 'Insert-only mode clicked Run queries');
+
+  for (const route of ['/d/other?editPanel=1&orgId=1', '/d/test?editPanel=2&orgId=1',
+    '/d/test?editPanel=1&orgId=2', '/unsupported']) {
+    harness.window.location.href = 'https://grafana.example.test/d/test?editPanel=1&orgId=1';
+    const waiting = dispatchGrafanaApply(harness, `a18-codemirror-${route}`, 'synthetic_metric');
+    await waitForGrafanaTimer(timers, 'A18 CodeMirror');
+    assert.strictEqual(docText, 'synthetic_metric');
+    harness.window.location.href = 'https://grafana.example.test' + route;
+    timers.shift()();
+    const cancelled = await waiting;
+    assert.strictEqual(cancelled.ok, false);
+    assert.strictEqual(cancelled.reason, 'target_changed');
+    assert.strictEqual(runCount, 1, 'A18: CodeMirror ran after route drift');
+  }
 }
 
 async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
@@ -2463,6 +2531,7 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
   const focusedCase = process.env.BOSUN_HELPER_REGRESSION_CASE || '';
   if (focusedCase) {
     const focusedCases = {
+      A18: testGrafanaRejectsTargetRouteDrift,
       A05: testRefreshCoordinatorRejoinTracksRotatedToken,
       A13: testSoundUnlockAndNotificationRacesRestoreMuteState
     };
@@ -2472,6 +2541,7 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
     return;
   }
   await testRefreshCoordinatorLeaderFailoverAndStop();
+  await testGrafanaRejectsTargetRouteDrift();
   await testRefreshCoordinatorRejoinTracksRotatedToken();
   await testHiddenFollowerDefersSnapshotsUntilVisible();
   await testHiddenFollowerRejectsSnapshotFromExpiredLeader();

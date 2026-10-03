@@ -147,6 +147,20 @@
     }
   }
 
+  function captureTargetIdentity() {
+    try {
+      const url = new URL(window.location.href);
+      // Freeze the panel and organization, not mutable time range or UI parameters.
+      return Object.freeze({ origin: url.origin, pathname: url.pathname,
+        editPanel: url.searchParams.get('editPanel'), orgId: url.searchParams.get('orgId') });
+    } catch (_) { return null; }
+  }
+
+  function matchesTarget(target) {
+    const current = captureTargetIdentity();
+    return Boolean(target && current && Object.keys(target).every((key) => target[key] === current[key]));
+  }
+
   function loadPendingQuery(requestId) {
     return new Promise((resolve) => {
       const storageKey = getStorageKey(requestId);
@@ -230,12 +244,13 @@
     return Array.from(valuesByRoot.values())[0].some((text) => text === expected);
   }
 
-  async function waitForVisibleQuery(query, deadlineAt) {
+  async function waitForVisibleQuery(query, deadlineAt, target) {
     while (Date.now() < deadlineAt) {
+      if (!matchesTarget(target)) return false;
       if (isQueryVisible(query)) return true;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    return isQueryVisible(query);
+    return matchesTarget(target) && isQueryVisible(query);
   }
 
   function ensureBridge() {
@@ -261,8 +276,9 @@
     return true;
   }
 
-  function applyViaBridge(query, run, operationId, deadlineAt) {
+  function applyViaBridge(query, run, operationId, deadlineAt, target) {
     return new Promise((resolve) => {
+      if (!matchesTarget(target)) { resolve('target_changed'); return; }
       if (!Number.isFinite(deadlineAt) || Date.now() >= deadlineAt || !ensureBridge()) {
         resolve(false);
         return;
@@ -288,10 +304,17 @@
 
         clearTimeout(timeoutId);
         window.removeEventListener('message', onMessage);
-        resolve(event.data.result?.ok === true);
+        resolve(!matchesTarget(target) || event.data.result?.reason === 'target_changed'
+          ? 'target_changed' : event.data.result?.ok === true);
       }
 
       window.addEventListener('message', onMessage);
+      if (!matchesTarget(target)) {
+        clearTimeout(timeoutId);
+        window.removeEventListener('message', onMessage);
+        resolve('target_changed');
+        return;
+      }
       window.postMessage({
         type: APPLY_MESSAGE,
         channelToken: bridgeToken,
@@ -299,21 +322,26 @@
         operationId,
         query,
         run,
-        deadlineAt
+        deadlineAt,
+        targetIdentity: target
       }, window.location.origin);
     });
   }
 
-  async function applyWithDeadline(query, run, deadlineAt, operationId) {
+  async function applyWithDeadline(query, run, deadlineAt, operationId, target) {
     while (Date.now() < deadlineAt) {
-      const pageReportedSuccess = await applyViaBridge(query, run, operationId, deadlineAt);
+      if (!matchesTarget(target)) return 'target_changed';
+      const pageReportedSuccess = await applyViaBridge(query, run, operationId, deadlineAt, target);
+      if (!matchesTarget(target) || pageReportedSuccess === 'target_changed') return 'target_changed';
       // Same-page scripts can observe and forge postMessage traffic, including
       // the channel token. Treat the page-world result as advisory and verify
       // the rendered editor value independently before deleting storage.
       if (
-        pageReportedSuccess &&
-        await waitForVisibleQuery(query, Math.min(deadlineAt, Date.now() + 2000))
+        pageReportedSuccess === true &&
+        await waitForVisibleQuery(query, Math.min(deadlineAt, Date.now() + 2000), target) &&
+        matchesTarget(target)
       ) return true;
+      if (!matchesTarget(target)) return 'target_changed';
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     return false;
@@ -321,6 +349,8 @@
 
   async function init() {
     if (!isConfiguredPanelPage()) return;
+    const target = captureTargetIdentity();
+    if (!target) return;
 
     const requestId = getRequestId();
     if (!requestId) return;
@@ -330,6 +360,11 @@
       return;
     }
     const payload = await loadPendingQuery(requestId);
+    if (!matchesTarget(target)) {
+      clearPendingQuery(requestId);
+      console.warn('[Bosun Helper] Grafana handoff cancelled: target_changed.');
+      return;
+    }
     const query = typeof payload?.query === 'string' ? payload.query.trim() : '';
     const run = payload?.run === true;
     const createdAt = Number(payload?.createdAt || 0);
@@ -358,15 +393,20 @@
       query,
       run,
       hardDeadlineAt,
-      operationId
+      operationId,
+      target
     );
-    if (applied) {
+    if (applied === true && matchesTarget(target)) {
       clearTimeout(expiryTimer);
       if (!markRequestConsumed(requestId, createdAt + PENDING_TTL_MS)) {
         console.warn('[Bosun Helper] Failed to mark the Grafana request as consumed.');
       }
       removeRequestParamFromUrl();
       clearPendingQuery(requestId);
+    } else if (applied === 'target_changed' || !matchesTarget(target)) {
+      clearTimeout(expiryTimer);
+      clearPendingQuery(requestId);
+      console.warn('[Bosun Helper] Grafana handoff cancelled: target_changed.');
     } else {
       console.warn('[Bosun Helper] Grafana query editor was not ready before timeout.');
     }

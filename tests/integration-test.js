@@ -436,6 +436,32 @@ async function testBosunInitialization() {
   assert.strictEqual(harness.reloadCount, 1, 'Visible idle dashboard must still auto-reload');
 }
 
+async function testGrafanaContentRejectsDelayedRouteDrift() {
+  for (const route of ['/d/other?editPanel=2', '/unsupported', '/d/test?editPanel=1&orgId=2']) {
+    const harness = createHarness('https://grafana.example.test/d/test?editPanel=1&orgId=1&bosunHelperRequest=a18');
+    harness.context.BosunHelperLocalConfig = {
+      grafanaHost: 'grafana.example.test',
+      grafanaPanelUrl: 'https://grafana.example.test/d/test?editPanel=1&orgId=1'
+    };
+    let release;
+    harness.context.chrome.storage.local.get = (_keys, callback) => {
+      release = () => callback({ 'bosunGrafanaPendingQueryV2:a18': {
+        query: 'synthetic_metric', run: true, createdAt: Date.now()
+      } });
+    };
+    runFiles(harness, ['src/grafana/grafana-content.js']);
+    const pending = harness.documentListeners.get('DOMContentLoaded')?.[0]?.();
+    const next = new URL(route, harness.location.origin);
+    Object.assign(harness.location, { href: next.href, pathname: next.pathname, search: next.search });
+    release();
+    await flushMicrotasks();
+    assert.strictEqual(harness.postedMessages.some(({ message }) =>
+      message.type === 'BOSUN_HELPER_APPLY_GRAFANA_QUERY'), false,
+    'A18: delayed storage must not send APPLY after target drift');
+    await pending;
+  }
+}
+
 async function testGrafanaContentIsolation() {
   const harness = createHarness(createConfiguredGrafanaUrl());
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
@@ -680,6 +706,7 @@ async function testGrafanaBridgeAuthenticationAndSingleton() {
       channelToken: 'secret-token',
       requestId: 'request-1',
       operationId: 'operation-1',
+      targetIdentity: { origin: harness.location.origin, pathname: '/d/test', editPanel: '1', orgId: null },
       deadlineAt,
       run: false,
       query: 'up'
@@ -779,6 +806,8 @@ async function testGrafanaContentBridgeCorrelationAndCleanup() {
   assert.ok(closing > 0, 'Unable to instrument Grafana content bridge');
   const instrumented = `${source.slice(0, closing)}
     globalThis.__testApplyViaBridge = applyViaBridge;
+    globalThis.__testCaptureTargetIdentity = captureTargetIdentity;
+    globalThis.__testApplyWithDeadline = applyWithDeadline;
   ${source.slice(closing)}`;
 
   function createBridgeHarness() {
@@ -789,7 +818,7 @@ async function testGrafanaContentBridgeCorrelationAndCleanup() {
 
   const expired = createBridgeHarness();
   const expiredResult = await expired.context.__testApplyViaBridge(
-    'up', false, 'expired-operation', Date.now() - 1
+    'up', false, 'expired-operation', Date.now() - 1, expired.context.__testCaptureTargetIdentity()
   );
   assert.strictEqual(expiredResult, false, 'Expired content operation did not fail closed');
   assert.strictEqual(expired.postedMessages.length, 0, 'Expired content operation posted a request');
@@ -797,7 +826,7 @@ async function testGrafanaContentBridgeCorrelationAndCleanup() {
 
   const harness = createBridgeHarness();
   const pending = harness.context.__testApplyViaBridge(
-    'up', false, 'operation-correlation', Date.now() + 10_000
+    'up', false, 'operation-correlation', Date.now() + 10_000, harness.context.__testCaptureTargetIdentity()
   );
   const apply = harness.postedMessages.at(-1)?.message;
   assert.strictEqual(apply?.type, 'BOSUN_HELPER_APPLY_GRAFANA_QUERY');
@@ -843,7 +872,7 @@ async function testGrafanaContentBridgeCorrelationAndCleanup() {
 
   const timeoutHarness = createBridgeHarness();
   const timedOut = timeoutHarness.context.__testApplyViaBridge(
-    'up', false, 'timeout-operation', Date.now() + 10_000
+    'up', false, 'timeout-operation', Date.now() + 10_000, timeoutHarness.context.__testCaptureTargetIdentity()
   );
   const timeoutListenerCount = timeoutHarness.windowListeners.get('message')?.length || 0;
   assert.strictEqual(timeoutListenerCount, 1);
@@ -851,6 +880,27 @@ async function testGrafanaContentBridgeCorrelationAndCleanup() {
   timeoutEntry.callback();
   assert.strictEqual(await timedOut, false, 'Bridge timeout did not fail closed');
   assert.strictEqual(timeoutHarness.windowListeners.get('message')?.length || 0, 0);
+
+  for (const reportedSuccess of [false, true]) {
+    const delayed = createBridgeHarness();
+    const operationId = `a18-content-wait-${reportedSuccess}`;
+    const waiting = delayed.context.__testApplyWithDeadline(
+      'up', true, Date.now() + 10_000, operationId, delayed.context.__testCaptureTargetIdentity()
+    );
+    const request = delayed.postedMessages.at(-1).message;
+    delayed.windowListeners.get('message')[0]({
+      source: delayed.window, origin: delayed.location.origin,
+      data: { ...request, type: 'BOSUN_HELPER_GRAFANA_QUERY_RESULT', result: { ok: reportedSuccess } }
+    });
+    await flushMicrotasks();
+    const wait = delayed.timeoutCallbacks.at(-1);
+    assert.ok(wait.delay < 2500, 'A18 control: retry/visible-editor wait was not reached');
+    delayed.location.href = 'https://grafana.example.com/d/other?editPanel=2';
+    wait.callback();
+    assert.strictEqual(await waiting, 'target_changed', 'A18: wait resumed on a different target');
+    assert.strictEqual(delayed.postedMessages.length, 1, 'A18: retry sent APPLY on the new panel');
+    assert.strictEqual(delayed.windowListeners.get('message')?.length || 0, 0);
+  }
 }
 
 function createActionPageHarness() {
@@ -1310,6 +1360,7 @@ async function testGrafanaHandoffDestroyCancelsDelayedSave() {
 }
 
 (async () => {
+  await testGrafanaContentRejectsDelayedRouteDrift();
   await testBosunInitialization();
   await testGrafanaContentIsolation();
   await testGrafanaContentRequiresExactConfiguredPanel();
