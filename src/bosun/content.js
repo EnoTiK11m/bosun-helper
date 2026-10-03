@@ -42,6 +42,9 @@
   const SOUND_FILE_ALERT = 'assets/sounds/bosun_notification_alert_chime.wav';
   const SOUND_FILE_SOFT = 'assets/sounds/bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
+  const PRIORITY_ACTION_CLASS = 'bosun-priority-action';
+  let priorityRuleIdentityIndex = null;
+  let priorityRuleUpdatePending = false;
   const COPY_ALL_BUTTON_CLASS = 'bosun-copy-all-alerts-btn';
   const COPY_LAST_ACTION_BUTTON_CLASS = 'bosun-copy-last-action-btn';
   const LAST_ACTION_LINK_CLASS = 'bosun-last-action-link';
@@ -1145,7 +1148,7 @@
     clearOwnedClass(PRIORITY_ROW_CLASS);
     alertDataIndexReady = false;
     document.querySelectorAll(
-      `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}`
+      `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}, .${PRIORITY_ACTION_CLASS}`
     ).forEach((element) => element.remove());
   }
 
@@ -1159,6 +1162,7 @@
     if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();
     ensureCopyButtons();
     ensureGrafanaQueryButtons();
+    ensurePriorityActions();
     if (isFeatureEnabled('lastActionEnhancements')) ensureLastActionCopyButtons();
     if (isFeatureEnabled('checkboxImprovements')) pageUtils?.ensureDashboardGroupCheckboxHitAreaGuards?.();
     markNoSelectElements();
@@ -3100,6 +3104,7 @@
   }
 
   function rebuildAlertDataIndex(payload, options = {}) {
+    priorityRuleIdentityIndex = priorityApi?.buildRuleIdentityIndex?.(payload, buildGroupMarkerKeyFromData) || null;
     const helpers = {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
@@ -3433,7 +3438,123 @@
       bySubject.get(subject) === true);
   }
 
+  function resolvePriorityActionName(panel, root, section, counts) {
+    if (!panel?.isConnected || !root?.contains(panel)) return '';
+    if (isGroupPanel(panel)) {
+      const children = getGroupChildPanels(panel);
+      const counter = getGroupCountNode(panel);
+      const countText = counter?.dataset.bosunOriginalAlertCount || counter?.textContent || '';
+      const countMatch = countText.trim().match(/^(\d+)\s+alerts?$/i);
+      if (!countMatch) return '';
+      if (!children.length) {
+        const groupIndex = priorityRuleIdentityIndex?.groupsBySection.get(section);
+        if (!groupIndex) return '';
+        const key = buildGroupMarkerKeyFromDom(panel);
+        let record;
+        if (groupIndex.byKey.has(key)) {
+          record = groupIndex.byKey.get(key);
+        } else {
+          // The existing group contract permits unique section-local Subject
+          // lookup only when there is no strong DOM identity to contradict it.
+          if (hasStrongGroupMarkerIdentityFromDom(panel)) return '';
+          const subject = getGroupSubjectFromPanel(panel);
+          if (getGroupPanels(root).filter((group) => getGroupSubjectFromPanel(group) === subject).length !== 1) return '';
+          record = groupIndex.bySubject.get(subject);
+        }
+        return record?.name && record.count === Number(countMatch[1]) ? record.name : '';
+      }
+      if (Number(countMatch[1]) !== children.length) return '';
+      const names = children.map((child) => findParentGroupPanelForChild(child) === panel
+        ? resolvePriorityActionName(child, root, section, counts) : '');
+      return names.every((name) => name && name === names[0]) ? names[0] : '';
+    }
+    const heading = getChildHeading(panel);
+    const id = getPanelIdFromHeading(heading);
+    if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 || counts.get(id) !== 1) return '';
+    const record = priorityRuleIdentityIndex?.childrenBySection.get(section)?.get(id);
+    // A strong ID miss/conflict never falls back to Subject or another section.
+    return record && record.subjects.includes(getPanelSubjectFromHeading(heading)) ? record.name : '';
+  }
+
+  function getPriorityActionContext(panel) {
+    for (const [section, root] of [['NeedAck', getNeedsAckRoot()], ['Acknowledged', getAcknowledgedRoot()]]) {
+      if (!root?.contains(panel)) continue;
+      const counts = new Map();
+      for (const child of getChildAlertPanels(root)) {
+        const id = getPanelIdFromHeading(getChildHeading(child));
+        if (id) counts.set(id, (counts.get(id) || 0) + 1);
+      }
+      return { root, section, counts };
+    }
+    return null;
+  }
+
+  async function updatePriorityRuleFromRow(panel, expectedName, remove) {
+    if (priorityRuleUpdatePending || !settingsStore?.update) return;
+    priorityRuleUpdatePending = true;
+    ensurePriorityActions();
+    try {
+      await settingsStore.start();
+      const context = getPriorityActionContext(panel);
+      if (!context || resolvePriorityActionName(panel, context.root, context.section, context.counts) !== expectedName) return;
+      const rules = settingsStore.getSnapshot().priorityRules.exactAlertNames;
+      const next = remove ? rules.filter((name) => name !== expectedName)
+        : rules.includes(expectedName) ? rules : [...rules, expectedName];
+      if (JSON.stringify(next) !== JSON.stringify(rules)) {
+        await settingsStore.update({ 'priorityRules.exactAlertNames': next });
+      }
+      clearToolbarStatus('storage-write');
+    } catch (error) {
+      handleSettingsWriteError('priorityRules.exactAlertNames', error);
+    } finally {
+      priorityRuleUpdatePending = false;
+      ensurePriorityActions();
+    }
+  }
+
+  function ensurePriorityActions() {
+    for (const [section, root] of [['NeedAck', getNeedsAckRoot()], ['Acknowledged', getAcknowledgedRoot()]]) {
+      if (!root) continue;
+      const children = getChildAlertPanels(root), counts = new Map();
+      for (const child of children) {
+        const id = getPanelIdFromHeading(getChildHeading(child));
+        if (id) counts.set(id, (counts.get(id) || 0) + 1);
+      }
+      for (const panel of [...children, ...getGroupPanels(root)]) {
+        const heading = isGroupPanel(panel) ? getPanelHeading(panel) : getChildHeading(panel);
+        const subject = isGroupPanel(panel) ? getGroupSubjectNode(panel) : getChildSubjectNode(panel);
+        const buttons = Array.from(heading?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`) || []);
+        const name = settingsStore?.update && alertDataIndexReady && subject
+          ? resolvePriorityActionName(panel, root, section, counts) : '';
+        if (!name) { buttons.forEach((button) => button.remove()); continue; }
+        let button = buttons.shift();
+        buttons.forEach((duplicate) => duplicate.remove());
+        if (!button) {
+          button = document.createElement('button');
+          button.type = 'button';
+          button.className = PRIORITY_ACTION_CLASS;
+          button.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            void updatePriorityRuleFromRow(panel, button.dataset.alertName, button.dataset.removeRule === 'true');
+          });
+          const neighbor = subject.parentElement?.querySelector(`.${GRAFANA_QUERY_BUTTON_CLASS}, .${COPY_BUTTON_CLASS}`);
+          (neighbor || subject).insertAdjacentElement('afterend', button);
+        }
+        const remove = settingsSnapshot?.priorityRules?.exactAlertNames?.includes(name) === true;
+        button.dataset.alertName = name;
+        button.dataset.removeRule = String(remove);
+        // Compact action avoids adding a long label beside Copy/Grafana.
+        if (button.textContent !== '⚑') button.textContent = '⚑';
+        button.title = remove ? 'Убрать алерт из приоритетных' : 'Добавить алерт в приоритетные';
+        button.setAttribute('aria-label', button.title);
+        button.disabled = priorityRuleUpdatePending;
+      }
+    }
+  }
+
   function applyPriorityMarkers() {
+    ensurePriorityActions();
     const enabled = isFeatureEnabled('priorityAlerts') && alertDataIndexReady;
     for (const { root, index, show } of [
       { root: getNeedsAckRoot(), index: null, show: enabled },
@@ -3661,7 +3782,7 @@
           `.${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}, .${SILENCED_BADGE_CLASS}, ` +
           `.${COPY_BUTTON_CLASS}, .${COPY_ALL_BUTTON_CLASS}, .${COPY_LAST_ACTION_BUTTON_CLASS}, ` +
           `.${LAST_ACTION_LINK_CLASS}, .${LAST_ACTION_TIME_TEXT_CLASS}, ` +
-          `.${GRAFANA_QUERY_BUTTON_CLASS}`
+          `.${GRAFANA_QUERY_BUTTON_CLASS}, .${PRIORITY_ACTION_CLASS}`
         )
       );
     }
@@ -3731,6 +3852,7 @@
       if (node.classList?.contains(OLD_NO_NOTE_ICON_CLASS) || node.closest?.(`.${OLD_NO_NOTE_ICON_CLASS}`)) return false;
       if (node.classList?.contains(HAS_NOTE_ICON_CLASS) || node.closest?.(`.${HAS_NOTE_ICON_CLASS}`)) return false;
       if (node.classList?.contains(PRIORITY_MARKER_CLASS) || node.closest?.(`.${PRIORITY_MARKER_CLASS}`)) return false;
+      if (node.classList?.contains(PRIORITY_ACTION_CLASS) || node.closest?.(`.${PRIORITY_ACTION_CLASS}`)) return false;
 
       if (
         node === document.body ||

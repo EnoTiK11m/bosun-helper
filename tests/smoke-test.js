@@ -1210,6 +1210,40 @@ function createBaselineHarness(options = {}) {
   assert.strictEqual(check({ ...child, severity: 'unknown' }).priority, false);
   assert.strictEqual(check({ ...child, alertName: '' }).priority, false);
   assert.strictEqual(check({ ...child, alertName: ' SMS.CHANNEL.BOUND.BAD ', severity: 'warning' }).priority, false);
+  const buildIndex = priorityContext.BosunHelperPriorityAlerts.buildRuleIdentityIndex;
+  const editChild = (id, fields) => ({ State: { Id: id }, ...fields });
+  const index = buildIndex({ Groups: {
+    NeedAck: [{ Children: [
+      editChild(1, { Alert: ' example.alert ', AlertKey: 'example.alert{host=demo}' }),
+      editChild(2, { AlertKey: 'example.other{env=test}' }),
+      editChild(3, { Alert: 'conflict.a', AlertKey: 'conflict.b{host=demo}' }),
+      editChild(4, { Subject: 'do.not.guess{host=demo}' }),
+      editChild(5, { Alert: 'duplicate.a' }), editChild(5, { Alert: 'duplicate.a' }),
+      editChild(6, { Alert: 'malformed', AlertKey: 'malformed{broken' }),
+      editChild(7, { Alert: 'name.a', State: { Id: 7, Alert: 'name.b' } })
+    ] }],
+    Acknowledged: [{ Children: editChild(1, { Alert: 'ack.alert' }) }]
+  } });
+  assert.strictEqual(index.childrenBySection.get('NeedAck').get('1').name, 'example.alert');
+  assert.strictEqual(index.childrenBySection.get('NeedAck').get('2')?.name, 'example.other',
+    'A canonical AlertKey alone must resolve the exact rule name');
+  assert.strictEqual(index.childrenBySection.get('Acknowledged').get('1').name, 'ack.alert');
+  for (const id of ['3', '4', '5', '6', '7']) assert.strictEqual(index.childrenBySection.get('NeedAck').get(id), null);
+  assert.strictEqual(buildIndex({ Groups: { NeedAck: {} } }).childrenBySection.get('NeedAck').size, 0);
+  const ruleName = priorityContext.BosunHelperPriorityAlerts.getRuleAlertName;
+  assert.strictEqual(ruleName({ Alert: ' example.alert ' }), 'example.alert');
+  assert.strictEqual(ruleName({ State: { Alert: 'example.alert' } }), 'example.alert');
+  assert.strictEqual(ruleName({ State: { AlertKey: 'example.alert{host=demo,env=test}' } }), 'example.alert');
+  assert.strictEqual(ruleName({ AlertKey: 'cpu.high' }), 'cpu.high');
+  assert.strictEqual(ruleName({ AlertKey: 'example.alert{}' }), 'example.alert');
+  for (const row of [
+    { Alert: 'example.one', AlertKey: 'example.two{host=demo}' },
+    { Alert: 'example.one', State: { Alert: 'example.two' } },
+    { AlertKey: 'example.one{host=demo}', State: { AlertKey: 'example.two{host=demo}' } },
+    { AlertKey: 'example.alert{broken}' }, { AlertKey: 'example.alert{host=demo,host=other}' },
+    { AlertKey: 'example.alert{host=demo} trailing' }, { AlertKey: 'example.alert{host=demo},other' },
+    { AlertKey: 'example.alert{host="demo"}' }, { Subject: 'example.alert{host=demo}' }
+  ]) assert.strictEqual(ruleName(row), '');
 }
 
 console.log('Smoke test passed');
