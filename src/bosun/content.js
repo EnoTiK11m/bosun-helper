@@ -3389,7 +3389,34 @@
     title.insertBefore(marker, title.firstChild);
   }
 
-  function resolveGroupPriority(groupPanel, index = null) {
+  function resolveVisibleChildrenPriority(groupPanel, index, domIdCounts) {
+    const panels = getGroupChildPanels(groupPanel);
+    if (!panels.length) return false;
+    const root = index ? getAcknowledgedRoot() : getNeedsAckRoot();
+    if (!root?.contains(groupPanel)) return false;
+    const counts = domIdCounts || new Map();
+    if (!domIdCounts) for (const panel of getChildAlertPanels(root)) {
+      const id = getPanelIdFromHeading(getChildHeading(panel));
+      if (id) counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    let priority = false;
+    const seenIds = new Set();
+    for (const panel of panels) {
+      const heading = getChildHeading(panel);
+      const id = getPanelIdFromHeading(heading);
+      // This is presentation aggregation of actual contained children, not a
+      // replacement API-group identity or a Subject fallback. No cached DOM flags.
+      if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 ||
+        seenIds.has(id) || counts.get(id) !== 1 || findParentGroupPanelForChild(panel) !== groupPanel) return false;
+      seenIds.add(id);
+      const state = resolveChildIndexedState(panel, groupPanel, index);
+      if (!state) return false;
+      priority ||= state.priority === true;
+    }
+    return priority;
+  }
+
+  function resolveGroupPriority(groupPanel, index = null, domIdCounts = null) {
     const groupKey = buildGroupMarkerKeyFromDom(groupPanel);
     const byKey = index ? index.groupHasPriorityByKey : groupHasPriorityByKey;
     const bySubject = index ? index.groupHasPriorityBySubject : groupHasPriorityBySubject;
@@ -3398,7 +3425,9 @@
     if (groupKey && byKey.has(groupKey)) {
       return byKey.get(groupKey) === true;
     }
-    if (hasStrongGroupMarkerIdentityFromDom(groupPanel)) return false;
+    if (hasStrongGroupMarkerIdentityFromDom(groupPanel)) {
+      return resolveVisibleChildrenPriority(groupPanel, index, domIdCounts);
+    }
     const subject = getGroupSubjectFromPanel(groupPanel);
     return Boolean(subject && countBySubject.get(subject) === 1 &&
       bySubject.get(subject) === true);
@@ -3415,14 +3444,19 @@
           Boolean(acknowledgedPriorityIndex)
       }
     ]) {
-      for (const panel of getChildAlertPanels(root)) {
+      const childPanels = getChildAlertPanels(root), domIdCounts = new Map();
+      for (const panel of childPanels) {
+        const id = getPanelIdFromHeading(getChildHeading(panel));
+        if (id) domIdCounts.set(id, (domIdCounts.get(id) || 0) + 1);
+      }
+      for (const panel of childPanels) {
         const title = getChildHeading(panel)?.querySelector('.panel-title');
         const priority = show && resolveChildIndexedState(panel, null, index)?.priority === true;
         ensurePriorityMarker(title, false, priority);
       }
       for (const panel of getGroupPanels(root)) {
         const title = getPanelHeading(panel)?.querySelector('.panel-title');
-        ensurePriorityMarker(title, true, show && resolveGroupPriority(panel, index));
+        ensurePriorityMarker(title, true, show && resolveGroupPriority(panel, index, domIdCounts));
       }
     }
   }
