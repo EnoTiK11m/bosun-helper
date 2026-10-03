@@ -85,13 +85,24 @@
 
   function unquoteTagValue(value) {
     const text = String(value || '').trim();
-    if (text.length < 2) return text;
     const quote = text[0];
-    if ((quote !== '"' && quote !== "'") || text[text.length - 1] !== quote) {
-      return text;
-    }
+    if (quote !== '"' && quote !== "'") return text;
 
-    return text.slice(1, -1).replace(/\\(.)/g, '$1');
+    let escaped = false;
+    for (let index = 1; index < text.length; index += 1) {
+      const char = text[index];
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        // The first unescaped closing quote must consume the entire value.
+        return index === text.length - 1
+          ? text.slice(1, index).replace(/\\(.)/g, '$1')
+          : null;
+      }
+    }
+    return null;
   }
 
   function parseAlertTagsStrict(rawTags, alertKey = '') {
