@@ -66,6 +66,28 @@
         "src/grafana/grafana-content.js"
       ],
       "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "https://bosun.example.com/*",
+        "https://bosun-test.example.com/*"
+      ],
+      "js": [
+        "src/bosun/group-identity-page.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://bosun.example.com/*",
+        "https://bosun-test.example.com/*"
+      ],
+      "js": [
+        "src/bosun/group-identity.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
     }
   ]
 }

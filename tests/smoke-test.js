@@ -1268,6 +1268,44 @@ function createBaselineHarness(options = {}) {
   for (const id of ['3', '4', '5', '6', '7']) assert.strictEqual(index.childrenBySection.get('NeedAck').get(id), null);
   assert.strictEqual(buildIndex({ Groups: { NeedAck: {} } }).childrenBySection.get('NeedAck').size, 0);
   const ruleName = priorityContext.BosunHelperPriorityAlerts.getRuleAlertName;
+  // TagSet.String writes values verbatim; AlertKey.Group keeps ParseTags' map
+  // even when OpenTSDB character validation reports an internal ASCII space.
+  for (const cluster of ['two words', 'two  words', 'three separate words']) {
+    const key=`example.alert{cluster=${cluster},host=node-one}`;
+    assert.strictEqual(ruleName({Alert:'example.alert',AlertKey:key,
+      State:{Alert:'example.alert',AlertKey:key}}),'example.alert',
+    'Bosun internal ASCII spaces in tag values must not suppress Priority');
+    assert.strictEqual(ruleName({AlertKey:key}),'example.alert');
+    assert.strictEqual(ruleName({State:{AlertKey:key}}),'example.alert');
+    assert.strictEqual(ruleName({AlertKey:key,State:{AlertKey:`example.alert{host=node-one,cluster=${cluster}}`}}),'example.alert');
+  }
+  assert.strictEqual(ruleName({AlertKey:'example.alert{cluster=two words,host=node-one}',
+    State:{AlertKey:'example.alert{host=node-one,cluster=two  words}'}}),'', 'Internal spaces are compared exactly, not collapsed');
+  for (const key of [
+    'example alert{cluster=two words}', 'example.alert{cl uster=two words}',
+    'example.alert{cluster =two words}', 'example.alert{cluster= two words}',
+    'example.alert{cluster=two words }', 'example.alert{cluster=   }',
+    'example.alert{cluster=two words, host=node-one}',
+    'example.alert{cluster=two words,}', 'example.alert{cluster=two,words}',
+    'example.alert{cluster=two=words}', 'example.alert{cluster="two words"}',
+    'example.alert{cluster=two words,cluster=two words}'
+  ]) assert.strictEqual(ruleName({Alert:'example.alert',AlertKey:key,State:{Alert:'example.alert',AlertKey:key}}),'');
+  for(const control of ['\t','\n','\r','\v','\f','\0','\x1f','\x7f','\x85','\u00a0','\u2009','\u2028']) {
+    const key=`example.alert{cluster=two${control}words}`;
+    assert.strictEqual(ruleName({Alert:'example.alert',AlertKey:key,State:{Alert:'example.alert',AlertKey:key}}),'');
+  }
+  // Bosun's OpenTSDB name processor permits digits, '.', '/', '-' in tag
+  // names (opentsdb/name.go); these are not PromQL label identifiers.
+  for (const tag of ['disk-name', 'cloud.zone', 'rack/slot', '1rack']) {
+    const key = `example.alert{${tag}=synthetic,host=node-one}`;
+    assert.strictEqual(ruleName({ Alert: 'example.alert', AlertKey: key,
+      State: { Alert: 'example.alert', AlertKey: key } }), 'example.alert',
+    'Valid Bosun AlertKey tag name must not suppress Priority: ' + tag);
+    assert.strictEqual(ruleName({ AlertKey: key }), 'example.alert');
+    assert.strictEqual(ruleName({ State: { AlertKey: key } }), 'example.alert');
+  }
+  assert.strictEqual(ruleName({AlertKey:'example.alert{disk-name=/,host=node-one}',
+    State:{AlertKey:'example.alert{host=node-one,disk-name=/}'}}),'example.alert', 'Tag order does not change canonical instance identity');
   assert.strictEqual(ruleName({ Alert: ' example.alert ' }), 'example.alert');
   assert.strictEqual(ruleName({ State: { Alert: 'example.alert' } }), 'example.alert');
   assert.strictEqual(ruleName({ State: { AlertKey: 'example.alert{host=demo,env=test}' } }), 'example.alert');
@@ -1277,10 +1315,28 @@ function createBaselineHarness(options = {}) {
     { Alert: 'example.one', AlertKey: 'example.two{host=demo}' },
     { Alert: 'example.one', State: { Alert: 'example.two' } },
     { AlertKey: 'example.one{host=demo}', State: { AlertKey: 'example.two{host=demo}' } },
+    { Alert: 'example.alert', AlertKey: 'example.alert{host=node-one}', State: {Alert:'example.alert',AlertKey:'example.alert{host=node-two}'} },
     { AlertKey: 'example.alert{broken}' }, { AlertKey: 'example.alert{host=demo,host=other}' },
     { AlertKey: 'example.alert{host=demo} trailing' }, { AlertKey: 'example.alert{host=demo},other' },
     { AlertKey: 'example.alert{host="demo"}' }, { Subject: 'example.alert{host=demo}' }
   ]) assert.strictEqual(ruleName(row), '');
+
+  for (const bad of [
+    'secret-alert-canary{broken}',
+    'secret-alert-canary{host=one,host=two}',
+    'secret-alert-canary{host=one',
+    'secret-alert-canary{host="one"}',
+    'secret-alert-canary{host= one two}',
+    'secret-alert-canary{host=one\ttwo}',
+    'secret-alert-canary{host=one\u00a0two}',
+    'secret-alert-canary{host=one\\two}',
+    'secret-alert-canary{зона=one}'
+  ]) for (const source of ['alertKey','stateAlertKey','both']) {
+    const good='secret-alert-canary{disk-name=/,host=one}';
+    const row={Alert:'secret-alert-canary',State:{Alert:'secret-alert-canary',AlertKey:source==='alertKey'?good:bad},
+      AlertKey:source==='stateAlertKey'?good:bad};
+    assert.strictEqual(ruleName(row),'','Invalid key cannot be ignored in favor of explicit names');
+  }
 }
 
 console.log('Smoke test passed');

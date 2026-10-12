@@ -278,6 +278,8 @@ function getHostDependentEntries(manifest) {
   ensure(Array.isArray(manifest.web_accessible_resources), 'Manifest web_accessible_resources is missing.');
 
   const entries = {
+    bosunIdentity: manifest.content_scripts.filter(entry => Array.isArray(entry.js) && entry.js.some(file =>
+      file === 'src/bosun/group-identity-page.js' || file === 'src/bosun/group-identity.js')),
     bosunContent: findOwnedEntry(
       manifest.content_scripts,
       (entry) => Array.isArray(entry.js) && entry.js.includes('src/bosun/content.js'),
@@ -307,6 +309,15 @@ function getHostDependentEntries(manifest) {
     )
   };
   ensure(entries.bosunContent !== entries.grafanaContent, 'Manifest content script roles overlap.');
+  if (entries.bosunIdentity.length) {
+    for (const [file, world] of [['src/bosun/group-identity-page.js', 'MAIN'], ['src/bosun/group-identity.js', 'ISOLATED']]) {
+      const owned = entries.bosunIdentity.filter(entry => entry.js.includes(file));
+      ensure(owned.length === 1 && owned[0].js.length === 1 && owned[0].world === world &&
+        owned[0].run_at === 'document_start', 'Identity script entries are incomplete or unsafe.');
+    }
+    ensure(entries.bosunIdentity.length === 2 && manifest.content_scripts.indexOf(entries.bosunIdentity.find(entry => entry.world === 'MAIN')) <
+      manifest.content_scripts.indexOf(entries.bosunIdentity.find(entry => entry.world === 'ISOLATED')), 'Identity guard injection order is unsafe.');
+  }
   ensure(entries.bosunResources !== entries.grafanaResources, 'Manifest resource roles overlap.');
   ensure(entries.bosunContent.js.includes('config.js'), 'Bosun content script config entry is missing.');
   ensure(entries.grafanaContent.js.includes('config.js'), 'Grafana content script config entry is missing.');
@@ -317,6 +328,7 @@ function updateManifest(manifest, config) {
   const entries = getHostDependentEntries(manifest);
   const matches = expectedManifestMatches(config);
   entries.bosunContent.matches = matches.bosun.slice();
+  for (const entry of entries.bosunIdentity) entry.matches = matches.bosun.slice();
   entries.grafanaContent.matches = matches.grafana.slice();
   entries.bosunResources.matches = matches.bosun.slice();
   entries.grafanaResources.matches = matches.grafana.slice();
@@ -362,6 +374,7 @@ function verifyGeneratedContents(configSource, manifestSource, expectedConfig) {
   const expected = expectedManifestMatches(expectedConfig);
   ensure(
     arraysEqual(entries.bosunContent.matches, expected.bosun) &&
+      entries.bosunIdentity.every(entry => arraysEqual(entry.matches, expected.bosun)) &&
       arraysEqual(entries.bosunResources.matches, expected.bosun),
     'Bosun manifest matches do not match the source configuration.'
   );
