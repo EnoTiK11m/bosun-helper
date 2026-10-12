@@ -22,24 +22,47 @@
     return { priority: reasons.length > 0, reasons };
   }
 
+  function parseRuleAlertKey(value) {
+    const reject = (kind, reason) => ({ kind, reason, name: '' });
+    if (value == null || value === '') return reject('missing', 'missing');
+    if (typeof value !== 'string') return reject('malformed', 'non-string-key');
+    if (/[\x00-\x1f\x7f-\x9f]/.test(value)) return reject('unsupported', 'unsupported-control-character');
+    const text = value.trim();
+    const envelope = text.match(/^([^{}]+)(?:\{([^{}]*)\})?$/);
+    if (!envelope) return reject('malformed', 'invalid-key-envelope');
+    const name = envelope[1];
+    if (!/^[^\s{},="'\\]+$/.test(name)) return reject('unsupported', 'unsupported-alert-name-syntax');
+    const tags = [], seen = new Set();
+    if (envelope[2]) for (const pair of envelope[2].split(',')) {
+      const tag = pair.match(/^([^=]+)=(.*)$/);
+      if (!tag) return reject('malformed', 'invalid-tag-pair');
+      // Bosun opentsdb/name.go permits these ASCII characters in tag names,
+      // including initial digits. This is not the PromQL label-name grammar.
+      if (!/^[A-Za-z0-9_./-]+$/.test(tag[1])) return reject('unsupported', 'unsupported-tag-name-syntax');
+      // AlertKey.Group accepts internal spaces despite OpenTSDB validation errors.
+      // Preserve them exactly; do not trim values or admit other whitespace.
+      if (!/^[^\s{},="'\\]+(?: +[^\s{},="'\\]+)*$/.test(tag[2])) return reject('unsupported', 'unsupported-tag-value-syntax');
+      if (seen.has(tag[1])) return reject('malformed', 'duplicate-tag-name');
+      seen.add(tag[1]); tags.push([tag[1], tag[2]]);
+    }
+    tags.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    return { kind: 'valid', reason: 'none', name,
+      identity: JSON.stringify([name, envelope[2] !== undefined, tags]) };
+  }
+
   // Rule editing uses structured names, never human-readable Subject text.
   function getRuleAlertName(child) {
     const names = [child?.Alert, child?.State?.Alert]
       .filter((value) => typeof value === 'string' && value.trim())
       .map((value) => value.trim());
+    const identities = [];
     for (const key of [child?.AlertKey, child?.State?.AlertKey]) {
       if (key == null || key === '') continue;
-      if (typeof key !== 'string') return '';
-      const match = key.trim().match(/^([^\s{},="'\\]+)(?:\{([^{}]*)\})?$/);
-      if (!match) return '';
-      const seenTags = new Set();
-      if (match[2]) for (const pair of match[2].split(',')) {
-        const tag = pair.match(/^([A-Za-z_][A-Za-z0-9_]*)=([^\s{},="'\\]+)$/);
-        if (!tag || seenTags.has(tag[1])) return '';
-        seenTags.add(tag[1]);
-      }
-      names.push(match[1]);
+      const parsed = parseRuleAlertKey(key);
+      if (parsed.kind !== 'valid') return '';
+      names.push(parsed.name); identities.push(parsed.identity);
     }
+    if (new Set(identities).size > 1) return '';
     const unique = [...new Set(names)];
     return unique.length === 1 && !/[\s{}]/.test(unique[0]) ? unique[0] : '';
   }

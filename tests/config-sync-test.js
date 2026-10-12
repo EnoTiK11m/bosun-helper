@@ -30,6 +30,14 @@ function createManifest() {
         matches: ['https://old-grafana.invalid/*'],
         js: ['config.js', 'src/grafana/grafana-content.js'],
         run_at: 'document_idle'
+      },
+      {
+        matches: ['https://old-bosun.invalid/*'], js: ['src/bosun/group-identity-page.js'],
+        world: 'MAIN', run_at: 'document_start'
+      },
+      {
+        matches: ['https://old-bosun.invalid/*'], js: ['src/bosun/group-identity.js'],
+        world: 'ISOLATED', run_at: 'document_start'
       }
     ],
     web_accessible_resources: [
@@ -117,6 +125,10 @@ function installConfigCli(root) {
     );
 
     const manifest = readManifest(root);
+    for (const entry of manifest.content_scripts.slice(2)) {
+      assert.deepStrictEqual(entry.matches, ['https://work.one.test/*', 'https://work.two.test/*']);
+      assert.strictEqual(entry.run_at, 'document_start');
+    }
     assert.deepStrictEqual(
       manifest.content_scripts[0].matches,
       ['https://work.one.test/*', 'https://work.two.test/*'],
@@ -171,6 +183,9 @@ function installConfigCli(root) {
 
     assert.deepStrictEqual(loadConfigFile(path.join(root, 'config.js')), exampleConfig);
     const generatedManifest = readManifest(root);
+    for (const entry of generatedManifest.content_scripts.slice(2)) {
+      assert.deepStrictEqual(entry.matches, ['https://bosun.example.com/*', 'https://bosun-stage.example.com/*']);
+    }
     assert.strictEqual(generatedManifest.version, '9.9.9');
     assert.deepStrictEqual(
       generatedManifest.content_scripts[0].exclude_matches,

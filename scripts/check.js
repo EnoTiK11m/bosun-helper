@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 assert.strictEqual(manifest.manifest_version, 3, 'manifest_version must be 3');
 assert.ok(Array.isArray(manifest.content_scripts), 'content_scripts must be an array');
-assert.strictEqual(manifest.content_scripts.length, 2, 'Expected separate Bosun and Grafana scripts');
+assert.strictEqual(manifest.content_scripts.length, 4, 'Expected Bosun, Grafana and two early identity scripts');
 
 const config = loadConfigFile(path.join(root, 'config.js'));
 const expectedBosunMatches = Array.from(new Set(
@@ -22,6 +22,19 @@ const sameStrings = (actual, expected) => Array.isArray(actual) &&
   actual.length === expected.length &&
   actual.every((value, index) => value === expected[index]);
 assert.ok(sameStrings(actualBosunMatches, expectedBosunMatches), 'Bosun config/manifest mismatch');
+for (const [file, world] of [
+  ['src/bosun/group-identity-page.js', 'MAIN'], ['src/bosun/group-identity.js', 'ISOLATED']
+]) {
+  const entries = manifest.content_scripts.filter(entry => entry.js?.includes(file));
+  assert.strictEqual(entries.length, 1, `Exactly one identity entry required: ${file}`);
+  assert.strictEqual(entries[0].world, world);
+  assert.strictEqual(entries[0].run_at, 'document_start');
+  assert.deepStrictEqual(entries[0].js, [file]);
+  assert.ok(sameStrings(entries[0].matches.slice().sort(), expectedBosunMatches), 'Identity reader host mismatch');
+  assert.ok(!entries[0].all_frames, 'Identity reader must only run in the top frame');
+}
+assert.ok(manifest.content_scripts.findIndex(entry => entry.js.includes('src/bosun/group-identity-page.js')) <
+  manifest.content_scripts.findIndex(entry => entry.js.includes('src/bosun/group-identity.js')), 'MAIN guard must precede isolated bootstrap');
 assert.ok(
   sameStrings(manifest.content_scripts[1].matches, expectedGrafanaMatches),
   'Grafana config/manifest mismatch'
