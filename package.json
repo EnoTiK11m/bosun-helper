@@ -1,14 +1,15 @@
 {
   "name": "bosun-helper",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Browser extension that improves the Bosun alert dashboard workflow",
   "scripts": {
     "check": "node scripts/check.js",
-    "test": "node tests/config-sync-test.js && node tests/settings-test.js && node tests/settings-ui-test.js && node tests/rule-graph-test.js && node tests/smoke-test.js && node tests/integration-test.js && node tests/regression-test.js",
+    "test": "node tests/package-internal-test.js && node tests/config-sync-test.js && node tests/settings-test.js && node tests/settings-ui-test.js && node tests/rule-graph-test.js && node tests/smoke-test.js && node tests/integration-test.js && node tests/regression-test.js",
     "test:browser": "node tests/browser-test.js",
     "sync-config": "node scripts/sync-config.js local",
-    "prepare-commit": "node scripts/sync-config.js public"
+    "prepare-commit": "node scripts/sync-config.js public",
+    "package:internal": "node scripts/package-internal.js"
   },
   "engines": {
     "node": ">=20"
