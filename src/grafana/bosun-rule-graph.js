@@ -14,6 +14,7 @@
   const MAX_ALERT_EXPRESSION_TOKENS = 32768;
   const MAX_BATCH_EXPRESSION_TOKENS = 1000000;
   const MAX_SYNTAX_DEPTH = 64;
+  const MAX_MERGE_BRANCHES = 16;
   const DEFAULT_TIMEOUT_MS = 10000;
   const DEFAULT_HASH_CHECK_INTERVAL_MS = 15000;
   const DEFAULT_FAILURE_RETRY_MS = 60000;
@@ -736,36 +737,90 @@
     return { type: 'error', reason };
   }
 
-  function buildDirectLegacyProm(tokens) {
-    const reject = () => graphError('legacy_prom');
+  function isGraphDuration(argument, allowEmpty = false) {
+    if (argument?.type !== 'string') return false;
+    const source = argument.value;
+    if (allowEmpty && source === '') return true;
+    if (typeof source !== 'string' || source.length > 128) return false;
+    if (!/^\+?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:ms|[smhdwny]))+$/.test(source)) {
+      return allowEmpty && source === '0';
+    }
+    const units = { ms: 1e6, s: 1e9, m: 60e9, h: 3600e9, d: 86400e9,
+      w: 604800e9, n: 2592000e9, y: 31536000e9 };
+    let nanos = 0;
+    for (const part of source.matchAll(/(\d+(?:\.\d*)?|\.\d+)(ms|[smhdwny])/g)) {
+      nanos += Number(part[1]) * units[part[2]];
+    }
+    return Number.isFinite(nanos) && nanos < 9223372036854775807 && (allowEmpty ? nanos >= 0 : nanos > 0);
+  }
+
+  function parseLegacyDuration(source) {
+    if (typeof source !== 'string' || source.length > 128) return null;
+    const text = source.replace(/^\+/, '');
+    if (text === '0') return 0n;
+    const units = { ms: 1000000n, s: 1000000000n, m: 60000000000n, h: 3600000000000n,
+      d: 86400000000000n, w: 604800000000000n, n: 2592000000000000n, y: 31536000000000000n };
+    let cursor = 0;
+    let total = 0n;
+    let nativeNanos = 0;
+    while (cursor < text.length) {
+      const part = text.slice(cursor).match(/^(\d+(?:\.\d*)?|\.\d+)(ms|[smhdwny])/);
+      if (!part) return null;
+      const [whole = '', fraction = ''] = part[1].split('.');
+      if (fraction.length > 9) return null;
+      const scale = 10n ** BigInt(fraction.length);
+      const numerator = (BigInt(whole || '0') * scale + BigInt(fraction || '0')) * units[part[2]];
+      if (numerator % scale !== 0n) return null; // Never round sub-nanosecond input.
+      total += numerator / scale;
+      // Upstream ParseDuration accumulates float64 before int64 conversion.
+      // Reject a rounded overflow even if the exact rational fits int64.
+      nativeNanos += (Number(whole || '0') + Number(fraction || '0') / Number(scale)) * Number(units[part[2]]);
+      if (total > 9223372036854775807n || nativeNanos >= 2 ** 63) return null;
+      cursor += part[0].length;
+    }
+    return cursor ? total : null;
+  }
+
+  function buildDirectLegacyProm(tokens, name) {
+    const isRate = name === 'promrate';
+    const count = isRate ? 8 : 7;
+    const reject = (detail = '') => graphError(`legacy_${name}${detail ? '_' + detail : ''}`);
     if (
-      tokens.length !== 17 || tokens[0].type !== 'identifier' || tokens[0].value !== 'prom' ||
-      tokens[1].type !== '(' || tokens[15].type !== ')' || tokens[16].type !== 'eof'
-    ) return reject();
+      tokens.length !== count * 2 + 3 || tokens[0].type !== 'identifier' || tokens[0].value !== name ||
+      tokens[1].type !== '(' || tokens[count * 2 + 1].type !== ')' || tokens[count * 2 + 2].type !== 'eof'
+    ) return reject('arity');
     const args = [];
-    for (let index = 0; index < 7; index += 1) {
+    for (let index = 0; index < count; index += 1) {
       const token = tokens[2 + index * 2];
       if (
-        token.type !== 'string' || token.value.includes('\\') || token.value.includes('$') ||
+        token.type !== 'string' || token.value.includes('\\') || /\$[A-Za-z_]/.test(token.value) ||
         (index !== 2 && /\s/.test(token.value)) ||
         (index === 2 ? !(token.quote === "'''" || (token.quote === '"' && token.value === '')) : token.quote !== '"') ||
-        (index < 6 && tokens[3 + index * 2].type !== ',')
-      ) return reject();
+        (index < count - 1 && tokens[3 + index * 2].type !== ',')
+      ) return reject('arguments');
       args.push(token.value);
     }
-    const [metric, grouping, filter, aggregation, step, start, end] = args;
-    if (!/^[A-Za-z_:][A-Za-z0-9_:]*$/.test(metric) || aggregation !== 'sum' || end !== '') return reject();
+    const [metric, grouping, filter, aggregation] = args;
+    const [step, start, end] = args.slice(isRate ? 5 : 4);
+    const rate = isRate ? args[4] : '';
+    if (!/^[A-Za-z_:][A-Za-z0-9_:.]*$/.test(metric)) return reject('metric');
+    if (!SAFE_AGGREGATIONS.has(aggregation)) return reject('aggregation');
     const labels = grouping === '' ? [] : grouping.split(',');
     if (
       labels.some((label) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(label) || label === '__name__') ||
       new Set(labels).size !== labels.length
-    ) return reject();
-    // Bosun durations are int64 nanoseconds. Reject before conversion can overflow.
-    for (const duration of [step, start]) {
-      const match = duration.match(/^([1-9][0-9]{0,18})(m|d)$/);
-      if (!match) return reject();
-      const nanos = BigInt(match[1]) * (match[2] === 'm' ? 60000000000n : 86400000000000n);
-      if (nanos > 9223372036854775807n) return reject();
+    ) return reject('grouping');
+    // Bosun parses these QueryRange arguments; they are validated, never copied
+    // into rate() or silently transferred to the Grafana time picker.
+    const stepNanos = parseLegacyDuration(step);
+    const startNanos = parseLegacyDuration(start);
+    const endNanos = end === '' ? 0n : parseLegacyDuration(end);
+    if (stepNanos === null || stepNanos <= 0n || startNanos === null || endNanos === null ||
+        startNanos <= endNanos) return reject('duration');
+    // Bosun inserts rateDuration as raw PromQL, not as a parsed Bosun duration.
+    if (isRate && (!/^(?:\d+(?:ms|[smhdwy]))+$/.test(rate) ||
+        !promqlApi?.analyzePromQuery?.(`rate(legacy_duration_probe[${rate}])`)?.ok)) {
+      return reject('duration');
     }
     const matchers = [];
     const matcherLabels = new Set();
@@ -780,25 +835,30 @@
           begin = index + 1;
         }
       }
-      if (quoted) return reject();
+      if (quoted) return reject('matchers');
       parts.push(filter.slice(begin));
       for (const part of parts) {
-        const match = part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(=~|=)\s*"([^"\x00-\x1f\x7f]*)"$/);
-        if (!match || matcherLabels.has(match[1])) return reject();
+        const match = part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"([^"\x00-\x1f\x7f]*)"$/);
+        if (!match || matcherLabels.has(match[1]) || match[1] === '__name__') return reject('matchers');
         const [, label, operator, value] = match;
         // A deliberately small RE2 grammar, not a JavaScript RegExp compatibility guess.
-        if (operator === '=~' && !/^(?:[A-Za-z0-9_-]+(?:\.\*)?|\.\*)(?:\|(?:[A-Za-z0-9_-]+(?:\.\*)?|\.\*))*$/.test(value)) {
-          return reject();
+        if (operator.includes('~') && !/^\^?(?:[A-Za-z0-9_-]|\.(?:\*|\+)?)+(?:\|(?:[A-Za-z0-9_-]|\.(?:\*|\+)?)+)*\$?$/.test(value)) {
+          return reject('matchers');
         }
         matcherLabels.add(label);
         matchers.push(`${label}${operator}"${value}"`);
       }
     }
     // Like Bosun's template, a nonempty original filter keeps braces, even if blank.
-    const selector = filter === '' ? '' : `{${matchers.join(', ')}}`;
-    const query = `sum(${metric}${selector}) by (${labels.join(', ')})`;
-    if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) return reject();
-    return { ...graphValue(query, [query], { signature: getQueryOutputSignature(query) }), legacyProm: true };
+    const dotted = metric.includes('.');
+    const selection = dotted
+      ? `{__name__="${metric}"${matchers.length ? ', ' + matchers.join(', ') : ''}}`
+      : metric + (filter === '' ? '' : `{${matchers.join(', ')}}`);
+    const body = isRate ? `rate(${selection}[${rate}])` : selection;
+    const query = `${aggregation}(${body}) by (${labels.join(', ')})`;
+    if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) return reject('query');
+    return { ...graphValue(query, [query], { signature: getQueryOutputSignature(query) }),
+      legacyProm: true, legacyPromrate: isRate };
   }
 
   function parseGraphExpression(expression, assignments, context) {
@@ -830,8 +890,10 @@
     }
     // A legacy call is permitted only as the complete selected expression, never
     // through a variable dependency, wrapper, arithmetic or backend prefix.
-    if (tokens.some((token) => token.type === 'identifier' && token.value.toLowerCase() === 'prom')) {
-      return context.stack.length === 1 ? buildDirectLegacyProm(tokens) : graphError('legacy_prom');
+    const legacy = tokens.find((token) => token.type === 'identifier' && ['prom', 'promrate'].includes(token.value.toLowerCase()));
+    if (legacy) {
+      const name = legacy.value.toLowerCase();
+      return context.stack.length === 1 ? buildDirectLegacyProm(tokens, name) : graphError(`legacy_${name}`);
     }
     let offset = 0;
 
@@ -874,6 +936,18 @@
       return resolved;
     }
 
+    function resolveMatcherString(name, beforeOrder = context.currentOrder, stack = []) {
+      context.nodes += 1;
+      if (context.nodes > MAX_RESOLVE_NODES || stack.length + context.stack.length >= MAX_RESOLVE_DEPTH ||
+          stack.includes(name)) return null;
+      const order = context.orders.get(name);
+      const value = assignments.get(name);
+      if (!Number.isInteger(order) || order >= beforeOrder || typeof value !== 'string') return null;
+      const alias = value.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
+      if (alias) return resolveMatcherString(alias[1], order, [...stack, name]);
+      return value.length <= 4096 && /^[A-Za-z0-9_.|:-]+$/.test(value) ? value : null;
+    }
+
     function parseCall(name) {
       const callOffset = offset - 1;
       consume('(');
@@ -909,11 +983,17 @@
         if (
           args.length !== 4 ||
           args[0]?.type !== 'string' ||
-          args[0].triple !== true
+          args[0].triple !== true ||
+          !isGraphDuration(args[1]) ||
+          !isGraphDuration(args[2]) ||
+          !isGraphDuration(args[3], true)
         ) return graphError('invalid_promras');
-        const query = String(args[0].value || '').trim();
+        let query = String(args[0].value || '').trim();
         if (!query || query.length > MAX_PROM_QUERY_LENGTH) return graphError('invalid_promras');
-        if (/\$[A-Za-z_]/.test(query)) return graphError('unresolved_variable');
+        if (/\$[A-Za-z_]/.test(query)) {
+          query = promqlApi?.substituteMatcherVariables?.(query, (name) => resolveMatcherString(name)) || '';
+          if (!query) return graphError('unresolved_variable');
+        }
         const validated = promqlApi?.applyAlertTagsToPromQuery?.(query, '', '');
         if (validated !== query) return graphError('invalid_promras');
         return graphValue(query, [query], { signature: getQueryOutputSignature(query) });
@@ -939,11 +1019,16 @@
           args[1]?.type !== 'string'
         ) return graphError('computed_graph');
         const branch = args[0];
-        const tag = args[1].value.match(/^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_-]+)$/);
-        const labels = branch.signature?.startsWith('labels:') ? branch.signature.slice(7).split(',') : null;
-        const addedTag = literalStrings[1] && tag && tag[0].length === args[1].value.length && !tag[1].startsWith('__') && labels &&
+        const tag = args[1].value.match(/^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_.-]+)$/);
+        // The older arithmetic signature deliberately understands less PromQL.
+        // For merge, prove the finite output schema structurally without changing
+        // the rules for Bosun arithmetic or touching any branch selector.
+        const analysis = promqlApi?.analyzePromQuery?.(branch.prom);
+        const labels = analysis?.ok && analysis.type === 'vector' ? analysis.labels : null;
+        const addedTag = literalStrings[1] && tag && tag[0].length === args[1].value.length &&
+          tag[1].length <= 128 && tag[2].length <= 1024 && !tag[1].startsWith('__') && labels &&
           !labels.includes(tag[1]) && !branch.transformed && !branch.discriminatorMerge
-          ? { key: tag[1], value: tag[2], prom: branch.prom, signature: branch.signature }
+          ? { key: tag[1], value: tag[2], prom: branch.prom, signature: `labels:${labels.slice().sort().join(',')}` }
           : null;
         return graphValue(branch.prom, branch.queries, {
           computed: true,
@@ -958,15 +1043,17 @@
           return graphError('multi_query_graph');
         }
         const queries = args.flatMap((arg) => arg.queries || []);
-        const left = args[0]?.addedTag;
-        const right = args[1]?.addedTag;
-        if (args.length === 2 && directAddtags.every(Boolean) && left && right &&
+        const branches = args.map((arg) => arg.addedTag);
+        const left = branches[0];
+        if (args.length <= MAX_MERGE_BRANCHES && directAddtags.every(Boolean) && branches.every(Boolean) &&
             context.stack.length === 1 && callOffset === 0 && current().type === 'eof' &&
-            left.signature === right.signature && left.key === right.key && left.value !== right.value) {
-          // A new, distinct discriminator makes cross-branch label sets disjoint.
-          // Keep each complete operand parenthesized, including existing arithmetic.
-          const wrap = (branch) => `label_replace((${branch.prom}), "${branch.key}", "${branch.value}", "", ".*")`;
-          const query = `${wrap(left)} or ${wrap(right)}`;
+            branches.every((branch) => branch.signature === left.signature && branch.key === left.key) &&
+            new Set(branches.map((branch) => branch.value)).size === branches.length) {
+          // The same new label with pairwise distinct values proves all branch
+          // label sets disjoint: ordinary OR cannot suppress another branch.
+          // A newline protects closing syntax from a trailing PromQL comment.
+          const wrap = (branch) => `label_replace((${branch.prom}${branch.prom.includes('#') ? '\n' : ''}), "${branch.key}", "${branch.value}", "", ".*")`;
+          const query = branches.map(wrap).join(' or ');
           if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) {
             return graphError('invalid_promras');
           }
@@ -1177,7 +1264,7 @@
     return result({
       ok: true,
       kind: 'single_query',
-      reason: resolved.legacyProm ? 'direct_prom' : (resolved.computed ? 'computed_graph' : 'direct_promras'),
+      reason: resolved.legacyPromrate ? 'direct_promrate' : (resolved.legacyProm ? 'direct_prom' : (resolved.computed ? 'computed_graph' : 'direct_promras')),
       source,
       query: resolved.prom,
       queries: resolved.queries,

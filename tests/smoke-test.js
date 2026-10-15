@@ -705,134 +705,72 @@ assert.deepStrictEqual(
     { name: 'env', value: 'prod' }
   ]
 );
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery('sum($metric)', { host: 'db' }),
-  'sum($metric)'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery('metric{host!="db"}', { host: 'web', env: 'prod' }),
-  'metric{host!="db", env="prod"}'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery('sum by (host) (rate(cpu_total[5m]))', { host: 'db' }),
-  'sum by (host) (rate(cpu_total{host="db"}[5m]))'
-);
-for (const testCase of [
-  {
-    name: 'label_replace-created destination label',
-    query: 'label_replace(up, "cluster", "prod", "job", ".*")',
-    tags: { cluster: 'prod' }
-  },
-  {
-    name: 'label_replace-overwritten destination label',
-    query: 'label_replace(up, "cluster", "$1", "instance", "(.*)")',
-    tags: { cluster: 'prod' }
-  },
-  {
-    name: 'label_join-created destination label',
-    query: 'label_join(up, "cluster", "-", "region", "zone")',
-    tags: { cluster: 'prod' }
-  },
-  {
-    name: 'nested output-derived destination label',
-    query: [
-      'sum by (cluster) (',
-      '  label_replace(rate(foo_total[5m]), "cluster", "$1", "instance", "(.*)")',
-      ')'
-    ].join('\n'),
-    tags: { cluster: 'prod' }
-  },
-  {
-    name: 'destination label created deeper in multiple function calls',
-    query: [
-      'sum(',
-      '  label_join(',
-      '    label_replace(rate(foo_total[5m]), "derived", "$1", "instance", "(.*)"),',
-      '    "cluster", "-", "region", "zone"',
-      '  )',
-      ')'
-    ].join('\n'),
-    tags: { derived: 'prod' }
-  },
-  {
-    name: 'mixed safe and output-derived alert tags',
-    query: 'label_replace(up, "cluster", "prod", "job", ".*")',
-    tags: { env: 'prod', cluster: 'prod' }
-  },
-  {
-    name: 'comments, whitespace, and nested parentheses around the destination label',
-    query: [
-      'sum by (cluster) (',
-      '  (',
-      '    label_replace (',
-      '      rate(foo_total[5m]), # source expression',
-      '      "cluster",',
-      '      "$1",',
-      '      "instance",',
-      '      "(.*)"',
-      '    )',
-      '  )',
-      ')'
-    ].join('\n'),
-    tags: { cluster: 'prod' }
+function assertPromOutputFilter(query, tags, rawTags = tags) {
+  const transformed = promqlApi.applyAlertTagsToPromQuery(query, rawTags);
+  const originalStart = transformed.indexOf(query);
+  assert.ok(originalStart >= 0, `Output filtering must preserve the complete original expression: ${query}`);
+  assert.strictEqual(transformed.slice(0, originalStart).trim(), '(', 'The original expression must be the complete left operand');
+  const suffix = transformed.slice(originalStart + query.length);
+  assert.ok(/^\s*\n\s*\)/.test(suffix), 'Wrapper must terminate a possible trailing comment');
+  const match = suffix.match(/^\s*\)\s+and\s+on\s*\(([^)]*)\)\s*([\s\S]+)$/);
+  assert.ok(match, 'The completed result must be intersected using explicit matching labels');
+  assert.deepStrictEqual(match[1].split(',').map(value => value.trim()).sort(), Object.keys(tags).sort());
+  assert.ok(match[2].includes('vector(1)'), 'Output filter must use a constant vector');
+  for (const [name, value] of Object.entries(tags)) {
+    const replacement = String(value).replace(/\$/g, '$$$$');
+    assert.ok(match[2].includes(`"${name}", "${promqlApi.escapePromLabelValue(replacement)}"`),
+      'Output filter must carry the exact escaped alert value');
   }
-]) {
-  assert.strictEqual(
-    promqlApi.applyAlertTagsToPromQuery(testCase.query, testCase.tags),
-    '',
-    `PromQL transformation must fail closed for ${testCase.name}`
-  );
+  assert.ok(transformed.length <= 16 * 1024, 'Output filter must remain within the handoff limit');
 }
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'label_replace(up, "cluster", "literal \\"label_join(fake, env)\\"", "job", ".*")',
-    { env: 'prod' }
-  ),
-  'label_replace(up{env="prod"}, "cluster", "literal \\"label_join(fake, env)\\"", "job", ".*")',
-  'Function-like text in string literals must not create output-derived labels'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    [
-      '# label_replace(fake, "env", "x", "source", ".*")',
-      'label_replace(up, "cluster", "prod", "job", ".*")'
-    ].join('\n'),
-    { env: 'prod' }
-  ),
-  [
-    '# label_replace(fake, "env", "x", "source", ".*")',
-    'label_replace(up{env="prod"}, "cluster", "prod", "job", ".*")'
-  ].join('\n'),
-  'Function-like text in comments must not create output-derived labels'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery('rate(http_requests_total[5m])', { env: 'prod' }),
-  'rate(http_requests_total{env="prod"}[5m])',
-  'Ordinary selectors without output-derived labels must remain supported'
-);
-for (const query of [
-  'count_values("sample_value", temperature)',
-  'sum(count_values("sample_value", temperature))',
-  'count_values("other_value", humidity) + count_values("sample_value", temperature)',
-  'count_values by (host) ("sample_value", temperature)',
-  'count_values without (zone) ("sample_value", temperature)',
-  'count_values("sample_value", temperature) by (host)',
-  'count_values ( \'sample_value\', (temperature + humidity) )',
-  'count_values(`sample_value`, temperature)',
-  [
-    'sum(count_values # output label',
-    '  ( # first argument',
-    '    "sample_value" # destination',
-    '    , rate(temperature{note="escaped \\\"quote\\\""}[5m])',
-    '  ))'
-  ].join('\n')
-]) {
-  assert.strictEqual(
-    promqlApi.applyAlertTagsToPromQuery(query, { sample_value: '7', host: 'synthetic-host' }),
-    '',
-    `A14: count_values output-label conflict must reject the entire transform: ${query}`
-  );
-}
+for (const [query, tags] of [
+  ['metric{host!="db"}', { host: 'web', env: 'prod' }],
+  ['sum by (host) (rate(cpu_total[5m]))', { host: 'db' }],
+  ['rate(http_requests_total[5m])', { env: 'prod' }],
+  ['label_replace(up, "cluster", "prod", "job", ".*")', { cluster: 'prod' }],
+  ['label_replace(up, "cluster", "$1", "instance", "(.*)")', { cluster: 'prod' }],
+  ['label_join(up, "cluster", "-", "region", "zone")', { cluster: 'prod' }],
+  ['sum by (cluster) (label_replace(rate(foo_total[5m]), "cluster", "$1", "instance", "(.*)"))', { cluster: 'prod' }],
+  ['label_replace(up, "cluster", "prod", "job", ".*")', { env: 'prod', cluster: 'prod' }],
+  ['# label_replace(fake, "env", "x", "source", ".*")\nlabel_replace(up, "cluster", "prod", "job", ".*")', { env: 'prod' }],
+  ['count_values("sample_value", temperature)', { sample_value: '7' }],
+  ['count_values by (host) ("sample_value", temperature)', { sample_value: '7', host: 'synthetic-host' }],
+  ['count_values without (zone) ("sample_value", temperature)', { sample_value: '7', host: 'synthetic-host' }],
+  ['count_values("sample_value", temperature) by (host)', { sample_value: '7', host: 'synthetic-host' }],
+  ["count_values ( 'sample_value', (temperature + humidity) )", { sample_value: '7' }],
+  ['count_values(`sample_value`, temperature)', { sample_value: '7' }],
+  ['count_values # output label\n  ( # first argument\n    "sample_value" # destination\n    , rate(temperature{note="escaped \\\"quote\\\""}[5m])\n  )', { sample_value: '7' }],
+  ['sum by # grouping comment\n  (host) (up)', { host: 'synthetic-host' }],
+  ['sum without # grouping comment\n  (instance) (up)', { host: 'synthetic-host', env: 'prod' }],
+  ['sum by \t# first\r\n \t# second\n (host, env) (up)', { host: 'synthetic-host', env: 'prod' }],
+  ['sum by # outer\n(host)(max without # inner\n(env)(up))', { host: 'synthetic-host' }],
+  ['sum(up) by # postfix\n(host)', { host: 'synthetic-host' }],
+  ['sum(up) without # postfix\n(instance)', { host: 'synthetic-host' }],
+  ['sum # before grouping\n by # before list\n(host)(up)', { host: 'synthetic-host' }],
+  ['sum by(host # inside list\n,env)(up # after selector\n)', { host: 'synthetic-host', env: 'prod' }],
+  ['up{note="by without # comment", quoted="escaped \\\"by\\\""}', { host: 'synthetic-host', env: 'prod' }],
+  ['label_join(up, "note", "by without # comment", "job")', { host: 'synthetic-host', env: 'prod' }],
+  ['count_values by # grouping comment\n(host)("sample_value", up)', { host: 'synthetic-host' }],
+  ['count_values without # grouping comment\n(env)("sample_value", up)', { host: 'synthetic-host' }],
+  ['sum by(zone,name)(synthetic_success_percent)', { name: 'channel-one', zone: 'zone-one' }],
+  ['left_metric / on(host) group_left(zone) right_metric offset 5m', { host: 'db' }],
+  ['metric{pattern=~"a,b|c",host!="db"} # metric_in_comment\n+ other', { host: 'web', zone: 'a' }],
+  ['left_metric atan2 right_metric', { host: 'web' }],
+  ['clamp(metric, -Inf, +Inf) + NaN', { host: 'web' }],
+  ['left_metric + label_replace(right_metric, "dst", `raw\\` , "src", "x") + tail_metric', { host: 'web' }]
+]) assertPromOutputFilter(query, tags);
+for (const [query, tags] of [
+  ['sum($metric)', { host: 'db' }],
+  ['rate($metric[$__rate_interval])', { host: 'db' }],
+  ['sum(label_join(label_replace(rate(foo_total[5m]), "derived", "$1", "instance", "(.*)"), "cluster", "-", "region", "zone"))', { derived: 'prod' }],
+  ['sum(count_values("sample_value", temperature))', { sample_value: '7' }],
+  ['count_values("sample_value", temperature)', { host: 'synthetic-host' }],
+  ['sum by(host)(up)', { host: 'synthetic-host', env: 'prod' }],
+  ['sum without(host)(up)', { host: 'synthetic-host' }],
+  ['sum # comment ending in by\n(up)', { host: 'synthetic-host' }],
+  ['sum by # missing closing list\n(host (up)', { host: 'synthetic-host' }],
+  ['sum without # unterminated string\n(host)(up{note="broken})', { host: 'synthetic-host' }]
+]) assert.strictEqual(promqlApi.applyAlertTagsToPromQuery(query, tags), '', 'Unproven output label availability must fail closed');
 for (const query of [
   'count_values(sample_value, temperature)',
   'count_values("sample-value", temperature)',
@@ -842,91 +780,8 @@ for (const query of [
   'count_values("sample_value")',
   'count_values("sample_value", temperature, humidity)',
   'count_values("sample_value", # missing expression\n)'
-]) {
-  assert.strictEqual(
-    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }),
-    '',
-    `A14: unproven count_values arguments must fail closed: ${query}`
-  );
-}
-for (const [query, expected] of [
-  ['count_values("sample_value", temperature)',
-    'count_values("sample_value", temperature{host="synthetic-host"})'],
-  ['count_values by (host) ("sample_value", temperature)',
-    'count_values by (host) ("sample_value", temperature{host="synthetic-host"})'],
-  ['sum(count_values("sample_value", rate(temperature[5m])))',
-    'sum(count_values("sample_value", rate(temperature{host="synthetic-host"}[5m])))'],
-  ['count_values( # destination\n "sample_value", temperature # expression\n)',
-    'count_values( # destination\n "sample_value", temperature{host="synthetic-host"} # expression\n)'],
-  ['temperature{note="count_values(\\\"host\\\", fake)"}',
-    'temperature{note="count_values(\\\"host\\\", fake)", host="synthetic-host"}'],
-  ['# count_values("host", fake)\ntemperature',
-    '# count_values("host", fake)\ntemperature{host="synthetic-host"}']
-]) {
-  assert.strictEqual(
-    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }),
-    expected,
-    `A14: independent tags and count_values text in strings/comments must remain safe: ${query}`
-  );
-}
-const a17Selector = 'up{host="synthetic-host", env="prod"}';
-for (const [query, expected] of [
-  ['sum by # grouping comment\n  (host) (up)', `sum by # grouping comment\n  (host) (${a17Selector})`],
-  ['sum without # grouping comment\n  (host) (up)', `sum without # grouping comment\n  (host) (${a17Selector})`],
-  ['sum by \t# first\r\n \t# second\n (host, env) (up)', `sum by \t# first\r\n \t# second\n (host, env) (${a17Selector})`],
-  ['sum without\n# first\n# second\n(host,env)(up)', `sum without\n# first\n# second\n(host,env)(${a17Selector})`],
-  ['sum by # outer\n(host)(max without # inner\n(env)(up))', `sum by # outer\n(host)(max without # inner\n(env)(${a17Selector}))`],
-  ['sum by(host)(up)', `sum by(host)(${a17Selector})`],
-  ['sum without(host)(up)', `sum without(host)(${a17Selector})`],
-  ['sum(up) by # postfix\n(host)', `sum(${a17Selector}) by # postfix\n(host)`],
-  ['sum(up) without # postfix\n(host)', `sum(${a17Selector}) without # postfix\n(host)`],
-  ['sum # comment ending in by\n(up)', `sum # comment ending in by\n(${a17Selector})`],
-  ['sum # before grouping\n by # before list\n(host)(up)', `sum # before grouping\n by # before list\n(host)(${a17Selector})`],
-  ['sum by(host # inside list\n,env)(up # after selector\n)', `sum by(host # inside list\n,env)(${a17Selector} # after selector\n)`],
-  ['up{note="by without # comment", quoted="escaped \\\"by\\\""}', 'up{note="by without # comment", quoted="escaped \\\"by\\\"", host="synthetic-host", env="prod"}'],
-  ['label_join(up, "note", "by without # comment", "job")', `label_join(${a17Selector}, "note", "by without # comment", "job")`],
-  ['count_values by # grouping comment\n(host)("sample_value", up)', `count_values by # grouping comment\n(host)("sample_value", ${a17Selector})`],
-  ['count_values without # grouping comment\n(env)("sample_value", up)', `count_values without # grouping comment\n(env)("sample_value", ${a17Selector})`]
-]) {
-  assert.strictEqual(
-    promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host', env: 'prod' }),
-    expected,
-    `A17: comments must preserve grouping labels and inject only real selectors: ${query}`
-  );
-}
-for (const query of ['sum by # missing closing list\n(host (up)', 'sum without # unterminated string\n(host)(up{note="broken})']) {
-  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }), '',
-    'A17: structurally invalid input must remain fail closed');
-}
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'sum by(zone,name)(rr_imsi_success_response_percent)',
-    'name=bercut1,zone=smssrv28'
-  ),
-  'sum by(zone,name)(rr_imsi_success_response_percent{name="bercut1", zone="smssrv28"})',
-  'A live-shaped naked vector selector must receive only the alert matchers'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'left_metric / on(host) group_left(zone) right_metric offset 5m',
-    { host: 'db' }
-  ),
-  'left_metric{host="db"} / on(host) group_left(zone) right_metric{host="db"} offset 5m'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'metric{pattern=~"a,b|c",host!="db"} # metric_in_comment\n+ other',
-    { host: 'web', zone: 'a' }
-  ),
-  'metric{pattern=~"a,b|c",host!="db", zone="a"} # metric_in_comment\n+ other{host="web", zone="a"}'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'rate($metric[$__rate_interval])',
-    { host: 'db' }
-  ),
-  'rate($metric[$__rate_interval])'
-);
+]) assert.strictEqual(promqlApi.applyAlertTagsToPromQuery(query, { host: 'synthetic-host' }), '',
+  'Malformed or unproven count_values arguments must fail closed');
 assert.strictEqual(
   promqlApi.extractPromrasQuery(
     "promras('''first_metric''')\npromras('''second_metric''')"
@@ -960,22 +815,6 @@ assert.strictEqual(
   ),
   '',
   'Naked selectors must fail closed until they are safely supported'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'left_metric atan2 right_metric',
-    { host: 'web' }
-  ),
-  'left_metric{host="web"} atan2 right_metric{host="web"}',
-  'atan2 must remain an operator'
-);
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'clamp(metric, -Inf, +Inf) + NaN',
-    { host: 'web' }
-  ),
-  'clamp(metric{host="web"}, -Inf, +Inf) + NaN',
-  'PromQL special float literals must not receive label matchers'
 );
 for (const malformedQuery of [
   'metric{host="web"',
@@ -1016,11 +855,7 @@ for (const malformedTags of [
   assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', malformedTags, 'synthetic.alert{host=safe}'), '',
     'Malformed tags must not fall back to AlertKey');
 }
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery('up', 'host=web-1,host=web-1'),
-  'up{host="web-1"}',
-  'Identical duplicate tags may deduplicate'
-);
+assertPromOutputFilter('up', { host: 'web-1' }, 'host=web-1,host=web-1');
 for (const [source, expectedTags] of [
   ['host="a,b",env=test', [{ name: 'host', value: 'a,b' }, { name: 'env', value: 'test' }]],
   [String.raw`host="a\"b"`, [{ name: 'host', value: 'a"b' }]],
@@ -1033,22 +868,13 @@ for (const [source, expectedTags] of [
 ]) {
   assert.deepStrictEqual(Array.from(promqlApi.parseAlertTags(source), (tag) => ({ ...tag })), expectedTags,
     `Existing tag decoding must remain unchanged: ${source}`);
-  const matchers = expectedTags.map(({ name, value }) => `${name}="${promqlApi.escapePromLabelValue(value)}"`);
-  assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', source), `up{${matchers.join(', ')}}`);
+  assertPromOutputFilter('up', Object.fromEntries(expectedTags.map(({ name, value }) => [name, value])), source);
 }
 assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', 'host="a",host="b"'), '',
   'Conflicting quoted duplicates must still fail closed');
 for (const source of ['host="a",,env=test', 'host="a",', ',host="a"', String.raw`host=a\,b`]) {
   assert.strictEqual(promqlApi.applyAlertTagsToPromQuery('up', source), '', 'Malformed separators must fail closed');
 }
-assert.strictEqual(
-  promqlApi.applyAlertTagsToPromQuery(
-    'left_metric + label_replace(right_metric, "dst", `raw\\` , "src", "x") + tail_metric',
-    { host: 'web' }
-  ),
-  'left_metric{host="web"} + label_replace(right_metric{host="web"}, "dst", `raw\\` , "src", "x") + tail_metric{host="web"}',
-  'Backtick raw strings and the tokens after them must be preserved byte-for-byte'
-);
 assert.strictEqual(
   promqlApi.extractPromrasQuery(`promras('''${'m'.repeat(16 * 1024 + 1)}''')`),
   '',
@@ -1080,12 +906,12 @@ assert.strictEqual(
 const boundedTags = Array.from({ length: 64 }, (_unused, index) => {
   return `tag_${index}=${'x'.repeat(90)}`;
 }).join(',');
-const expandingQuery = Array.from({ length: 180 }, (_unused, index) => `metric_${index}`).join(' + ');
+const expandingQuery = `up${' '.repeat(15 * 1024)}`;
 assert.ok(expandingQuery.length < 16 * 1024, 'Synthetic expansion input unexpectedly exceeds source bound');
 assert.strictEqual(
   promqlApi.applyAlertTagsToPromQuery(expandingQuery, boundedTags),
   '',
-  'Incremental tag expansion beyond the handoff limit must fail closed'
+  'A final output filter beyond the handoff limit must fail closed without partial publication'
 );
 
 function createBaselineHarness(options = {}) {

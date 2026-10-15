@@ -11,6 +11,15 @@ const { spawn, spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const CDP_TIMEOUT_MS = 15_000;
 
+function outputFilter(query, tags) {
+  let constant = 'vector(1)';
+  for (const [name, value] of Object.entries(tags)) {
+    const literal = JSON.stringify(String(value).replace(/\$/g, '$$$$'));
+    constant = `label_replace(${constant}, "${name}", ${literal}, "", ".*")`;
+  }
+  return `(\n${query}\n) and on (${Object.keys(tags).join(', ')}) (${constant})`;
+}
+
 if (typeof WebSocket !== 'function') {
   throw new Error('Browser tests require Node.js with global WebSocket support (Node.js 22+ recommended).');
 }
@@ -4112,7 +4121,7 @@ async function runBrowserAssertions(client) {
       }
     };
     const directConfig = ${JSON.stringify(`alert synthetic.alert.query {
-  $q_pct = promras(''' sum by(zone,name)(rr_imsi_success_response_percent) ''', '5m', '2h', '')
+  $q_pct = promras(''' sum by (name, zone) (sum by (account, name, zone) (session_bound) and on(account) (max_over_time(count by(account)(session_bound{account!~"retired|sandbox"})[24h:10m]) > 1)) ''', '5m', '2h', '')
   $usage_graph = $q_pct
   warn = $q_pct < 90
 }`)};
@@ -4251,7 +4260,7 @@ async function runBrowserAssertions(client) {
     activeHash = 'FAIL-H3';
     configFails = true;
     payload.Groups.NeedAck[0].Children[0].State.Expr =
-      "promras('''sum(rate(fallback_total[5m]))''', '5m', '2h', '')";
+      "promras('''sum by (name, zone) (rate(fallback_total[5m]))''', '5m', '2h', '')";
     await hooks.ruleGraphResolver.refresh(['synthetic.alert.query'], { force: true });
     hooks.rebuildGrafanaQueryIndex(payload);
     hooks.ensureGrafanaQueryButtons();
@@ -4311,21 +4320,21 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(usageGraphResolverResult, {
     pendingQuery: '',
     buttonsWhileConfigPending: 0,
-    directQuery: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
+    directQuery: outputFilter('sum by (name, zone) (sum by (account, name, zone) (session_bound) and on(account) (max_over_time(count by(account)(session_bound{account!~"retired|sandbox"})[24h:10m]) > 1))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
     directButtons: 1,
     directConfigFetchCount: 1,
     directHashFetchCount: 2,
-    cachedQueryDuringFreshInterval: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
+    cachedQueryDuringFreshInterval: outputFilter('sum by (name, zone) (sum by (account, name, zone) (session_bound) and on(account) (max_over_time(count by(account)(session_bound{account!~"retired|sandbox"})[24h:10m]) > 1))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
     cachedHashFetchCount: 2,
-    queryDuringUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
-    queryAfterUnchangedHashCheck: 'sum by(zone,name)(rr_imsi_success_response_percent{name="synthetic-node", zone="synthetic-zone"})',
+    queryDuringUnchangedHashCheck: outputFilter('sum by (name, zone) (sum by (account, name, zone) (session_bound) and on(account) (max_over_time(count by(account)(session_bound{account!~"retired|sandbox"})[24h:10m]) > 1))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
+    queryAfterUnchangedHashCheck: outputFilter('sum by (name, zone) (sum by (account, name, zone) (session_bound) and on(account) (max_over_time(count by(account)(session_bound{account!~"retired|sandbox"})[24h:10m]) > 1))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
     unchangedHashFetchCount: 3,
     queryDuringHashCheck: '',
     rejectedQuery: '',
     buttonsAfterUnsupportedHash: 0,
-    safeFailureFallback: 'sum(rate(fallback_total{name="synthetic-node", zone="synthetic-zone"}[5m]))',
+    safeFailureFallback: outputFilter('sum by (name, zone) (rate(fallback_total[5m]))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
     buttonsAfterSafeFallback: 1,
-    safeNetworkFailureFallback: 'sum(rate(fallback_total{name="synthetic-node", zone="synthetic-zone"}[5m]))',
+    safeNetworkFailureFallback: outputFilter('sum by (name, zone) (rate(fallback_total[5m]))', { name: 'synthetic-node', zone: 'synthetic-zone' }),
     buttonsAfterNetworkFallback: 1,
     malformedSnapshotReason: 'rule_index_unavailable',
     malformedRuleFallback: '',
@@ -4335,19 +4344,36 @@ async function runBrowserAssertions(client) {
   });
 
   const discriminatorBrowserCases = [
-    { labels: 'label_a', scaleLeft: false, scaleRight: false },
-    { labels: 'label_a, label_b', scaleLeft: true, scaleRight: false },
-    { labels: 'label_a, label_b, label_c', scaleLeft: false, scaleRight: true }
-  ].map(({ labels, scaleLeft, scaleRight }, index) => {
-    const left = `sum by (${labels}) (synthetic_a)`;
+    { labels: 'host, label_a', scaleLeft: false, scaleRight: false },
+    { labels: 'host, label_a, label_b', scaleLeft: true, scaleRight: false },
+    { labels: 'host, label_a, label_b, label_c', scaleLeft: false, scaleRight: true },
+    { labels: 'host, label_a', scaleLeft: false, scaleRight: false, complex: true }
+  ].map(({ labels, scaleLeft, scaleRight, complex }, index) => {
+    const left = complex ? `sum by (${labels}) (synthetic_a - synthetic_a * 0.5)` : `sum by (${labels}) (synthetic_a)`;
     const right = `sum by (${labels}) (synthetic_b)`;
+    const third = `sum by (${labels}) (avg_over_time(synthetic_c[10m]))`;
+    const secondValue = complex ? 'previous.day' : 'second';
     const operand = (query, scaled) => scaled ? `((${query}) * (100))` : query;
     const wrapper = (query, value) => `label_replace((${query}), "branch_axis", "${value}", "", ".*")`;
     return { name: `synthetic.merge.${index}`, expression:
       `merge(addtags(promras('''${left}''', '5m', '2h', '')${scaleLeft ? ' * 100' : ''}, "branch_axis=first"), ` +
-      `addtags(promras('''${right}''', '5m', '2h', '')${scaleRight ? ' * 100' : ''}, "branch_axis=second"))`,
-      query: `${wrapper(operand(left, scaleLeft), 'first')} or ${wrapper(operand(right, scaleRight), 'second')}` };
+      `addtags(promras('''${right}''', '5m', '2h', '')${scaleRight ? ' * 100' : ''}, "branch_axis=${secondValue}")` +
+      (complex ? `, addtags(promras('''${third}''', '5m', '2h', ''), "branch_axis=baseline"))` : ')'),
+      query: `${wrapper(operand(left, scaleLeft), 'first')} or ${wrapper(operand(right, scaleRight), secondValue)}` +
+        (complex ? ` or ${wrapper(third, 'baseline')}` : '') };
   });
+  discriminatorBrowserCases.push({ name: 'synthetic.matcher.interpolation',
+    prelude: '  $workers = ingestor|deliverer\n  $queues = urgent.one|batch.two\n',
+    expression: `promras('''sum by (host) (synthetic_queue{worker=~"$workers",queue=~"$queues"})''', '5m', '2h', '')`,
+    query: 'sum by (host) (synthetic_queue{worker=~"ingestor|deliverer",queue=~"urgent.one|batch.two"})' });
+  const { fixtures: legacyFixtures, expression: legacyExpression } = require('./legacy-prom-test');
+  discriminatorBrowserCases.push(...legacyFixtures.map((fixture) => {
+    const selector = `{__name__="${fixture.metric}"${fixture.filter ? ', ' + fixture.filter.replace(/,/g, ', ') : ''}}`;
+    const body = fixture.rate ? `rate(${selector}[${fixture.rate}])` : selector;
+    return { name: fixture.name, expression: legacyExpression(fixture), source: fixture.source,
+      tags: Object.fromEntries(fixture.group.split(',').filter(Boolean).map(label => [label, 'legacy-selected'])),
+      query: `sum(${body}) by (${fixture.group.split(',').filter(Boolean).join(', ')})` };
+  }));
   const a20MalformedQuotedTags = ['host="a" "b"', 'host="a"x', 'host="a""b"',
     'host="a"trailing', 'host="a" "b" "c"', 'host="a"b"c"', 'host="unterminated',
     'host="a"  garbage', 'host="a""b""c"', "host='a' 'b'",
@@ -4369,6 +4395,7 @@ async function runBrowserAssertions(client) {
     const previousFetch = globalThis.fetch;
     let activeHash = 'EXPR-H1';
     const config = ${JSON.stringify(`alert synthetic.expr.a {
+  $value = promras('''sum by (host) (rate(expr_a_total[5m]))''', '5m', '2h', '')
   warn = 1
 }
 alert synthetic.expr.b {
@@ -4379,18 +4406,18 @@ alert synthetic.expr.unresolved {
   warn = 1
 }
 alert synthetic.legacy.direct {
-  $usage_graph = prom("synthetic_legacy_total", "", '''env="demo"''', "sum", "1m", "1d", "")
+  $usage_graph = prom("synthetic_legacy_total", "host", '''env="demo"''', "sum", "1m", "1d", "")
   warn = 1
 }
 alert synthetic.legacy.q {
-  $q = prom("synthetic_legacy_q_total", "", "", "sum", "1m", "1d", "")
+  $q = prom("synthetic_legacy_q_total", "host", "", "sum", "1m", "1d", "")
   warn = 1
 }
 alert synthetic.legacy.dotted {
   $usage_graph = prom("synthetic.legacy.total", "", "", "sum", "1m", "1d", "")
   warn = 1
 }
-${discriminatorBrowserCases.map(({ name, expression }) => `alert ${name} {\n  $usage_graph = ${expression}\n  warn = 1\n}`).join('\n')}
+${discriminatorBrowserCases.map(({ name, expression, prelude = '', source = 'usage_graph' }) => `alert ${name} {\n${prelude}  $${source} = ${expression}\n  warn = 1\n}`).join('\n')}
 alert synthetic.merge.rejected {
   $usage_graph = ${discriminatorBrowserCases[0].expression.replace('branch_axis=second', 'branch_axis=first')}
   warn = 1
@@ -4414,10 +4441,10 @@ alert synthetic.merge.rejected {
     ${contentSource}
     const hooks = globalThis.__BosunHelperBrowserTest;
     const expr = (query) => "promras('''" + query + "''', '5m', '2h', '')";
-    function fixture(name, id, expression) {
-      const key = name + '{host=node' + id + '}';
+    function fixture(name, id, expression, rawTags = 'host=node' + id) {
+      const key = name + '{' + rawTags + '}';
       const child = { Alert: name, AlertKey: key, Subject: key, Ago: '3m',
-        State: { Id: id, Alert: name, AlertKey: key, Tags: 'host=node' + id, Expr: expression } };
+        State: { Id: id, Alert: name, AlertKey: key, Tags: rawTags, Expr: expression } };
       const root = document.createElement('div');
       root.setAttribute('ts-ack-group', 'schedule.Groups.NeedAck');
       const panel = document.createElement('div');
@@ -4459,7 +4486,7 @@ alert synthetic.merge.rejected {
       return observe(current);
     }
     try {
-      const a = fixture('synthetic.expr.a', 801, expr('sum(rate(expr_a_total[5m]))'));
+      const a = fixture('synthetic.expr.a', 801, expr('sum by (host) (rate(expr_a_total[5m]))'));
       const positive = await resolved(a);
       const verified = hooks.ruleGraphResolver.getSnapshot().available;
       const positiveReason = hooks.ruleGraphResolver.getResolution(a.name)?.reason;
@@ -4506,7 +4533,9 @@ alert synthetic.merge.rejected {
       const mergeActions = [];
       const mergeCases = ${JSON.stringify(discriminatorBrowserCases)};
       for (let index = 0; index < mergeCases.length; index += 1) {
-        const current = fixture(mergeCases[index].name, 820 + index, expr('fallback_must_not_win'));
+        const current = fixture(mergeCases[index].name, 820 + index, expr('fallback_must_not_win'),
+          mergeCases[index].tags === undefined ? undefined : Object.entries(mergeCases[index].tags)
+            .map(([name, value]) => name + '=' + value).join(','));
         mergeActions.push(await resolved(current));
         current.root.querySelector('.bosun-grafana-query-btn')?.click();
       }
@@ -4543,7 +4572,7 @@ alert synthetic.merge.rejected {
         return { pendingA, pendingNext, after, oldQuery };
       }
       const replacement = await replaceWhilePending(
-        fixture('synthetic.expr.b', 802, expr('sum(rate(expr_b_total[5m]))')), 'EXPR-H2');
+        fixture('synthetic.expr.b', 802, expr('sum by (host) (rate(expr_b_total[5m]))')), 'EXPR-H2');
       const forbiddenReplacement = await replaceWhilePending(missing, 'EXPR-H3');
       return { verified, positiveReason, positive, missingResolution, missingResult,
         unresolvedReason, unresolvedResult, ambiguous, extractedUnsupported, unsupported,
@@ -4558,13 +4587,12 @@ alert synthetic.merge.rejected {
     }
   })()`);
   const noExprAction = { query: '', buttons: 0 };
-  const expectedMergeQueries = discriminatorBrowserCases.map(({ query }, index) => query
-    .replace('synthetic_a)', `synthetic_a{host="node${820 + index}"})`)
-    .replace('synthetic_b)', `synthetic_b{host="node${820 + index}"})`));
+  const expectedMergeQueries = discriminatorBrowserCases.map(({ query, tags }, index) =>
+    tags && !Object.keys(tags).length ? query : outputFilter(query, tags || { host: 'node' + (820 + index) }));
   assert.deepStrictEqual(stateExprFallbackResult, {
     verified: true,
     positiveReason: 'no_usage_graph',
-    positive: { query: 'sum(rate(expr_a_total{host="node801"}[5m]))', buttons: 1 },
+    positive: { query: outputFilter('sum by (host) (rate(expr_a_total[5m]))', { host: 'node801' }), buttons: 1 },
     missingResolution: null,
     missingResult: noExprAction,
     unresolvedReason: 'unresolved_variable',
@@ -4572,31 +4600,31 @@ alert synthetic.merge.rejected {
     ambiguous: noExprAction,
     extractedUnsupported: '{__name__=~"synthetic_.*"}',
     unsupported: noExprAction,
-    legacyResult: { query: 'sum(synthetic_legacy_total{env="demo", host="node807"}) by ()', buttons: 1 },
-    legacyQResult: { query: 'sum(synthetic_legacy_q_total{host="node808"}) by ()', buttons: 1 },
+    legacyResult: { query: outputFilter('sum(synthetic_legacy_total{env="demo"}) by (host)', { host: 'node807' }), buttons: 1 },
+    legacyQResult: { query: outputFilter('sum(synthetic_legacy_q_total) by (host)', { host: 'node808' }), buttons: 1 },
     dottedResult: noExprAction,
-    dottedReason: 'legacy_prom',
+    dottedReason: 'direct_prom',
     malformedLegacyTags: noExprAction,
     malformedQuotedTags: a20MalformedQuotedTags.map(() => noExprAction),
-    validQuotedTags: { query: 'up{host="a,b", env="test"}', buttons: 1 },
+    validQuotedTags: { query: outputFilter('up', { host: 'a,b', env: 'test' }), buttons: 1 },
     malformedQuotedRepaint: noExprAction,
     mergeActions: expectedMergeQueries.map((query) => ({ query, buttons: 1 })),
-    mergeConflict: noExprAction,
+    mergeConflict: { query: outputFilter(discriminatorBrowserCases[0].query, { host: 'node830', branch_axis: 'first' }), buttons: 1 },
     rejectedMerge: noExprAction,
     malformedMergeTags: noExprAction,
     replacement: {
       pendingA: noExprAction, pendingNext: noExprAction,
-      after: { query: 'sum(rate(expr_b_total{host="node802"}[5m]))', buttons: 1 }, oldQuery: ''
+      after: { query: outputFilter('sum by (host) (rate(expr_b_total[5m]))', { host: 'node802' }), buttons: 1 }, oldQuery: ''
     },
     forbiddenReplacement: {
       pendingA: noExprAction, pendingNext: noExprAction, after: noExprAction, oldQuery: ''
     },
     openedQueries: [
-      'sum(rate(expr_a_total{host="node801"}[5m]))',
-      'sum(synthetic_legacy_total{env="demo", host="node807"}) by ()',
-      'sum(synthetic_legacy_q_total{host="node808"}) by ()',
+      outputFilter('sum by (host) (rate(expr_a_total[5m]))', { host: 'node801' }),
+      outputFilter('sum(synthetic_legacy_total{env="demo"}) by (host)', { host: 'node807' }),
+      outputFilter('sum(synthetic_legacy_q_total) by (host)', { host: 'node808' }),
       ...expectedMergeQueries,
-      'sum(rate(expr_b_total{host="node802"}[5m]))'
+      outputFilter('sum by (host) (rate(expr_b_total[5m]))', { host: 'node802' })
     ]
   }, 'State.Expr fallback must obey verified rule resolution, current identity and the common tag pipeline');
 
@@ -4722,6 +4750,16 @@ alert synthetic.count.values.label {
         grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
         grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
       };
+      countValuesChild.AlertKey = countValuesAlertName + '{sample_value=7}';
+      countValuesChild.Subject = countValuesChild.AlertKey;
+      countValuesChild.State.AlertKey = countValuesChild.AlertKey;
+      countValuesChild.State.Tags = 'sample_value=7';
+      subjectNode.textContent = countValuesChild.Subject;
+      hooks.applyAlertsPayload(countValuesPayload);
+      result.countValuesDerived = {
+        grafanaQuery: hooks.getGrafanaQueryForPanel(panel),
+        grafanaButtonCount: root.querySelectorAll('.bosun-grafana-query-btn').length
+      };
       return result;
     } finally {
       globalThis.fetch = previousFetch;
@@ -4730,15 +4768,19 @@ alert synthetic.count.values.label {
   assert.deepStrictEqual(outputDerivedLabelResult, {
     sourceAvailable: true,
     resolvedQuery: 'label_replace(up, "cluster", "prod", "job", ".*")',
-    grafanaQuery: '',
-    grafanaButtonCount: 0,
+    grafanaQuery: outputFilter('label_replace(up, "cluster", "prod", "job", ".*")', { cluster: 'prod' }),
+    grafanaButtonCount: 1,
     countValuesConflict: {
       resolvedQuery: 'count_values("sample_value", temperature)',
       grafanaQuery: '',
       grafanaButtonCount: 0
     },
     countValuesIndependent: {
-      grafanaQuery: 'count_values("sample_value", temperature{host="synthetic-host"})',
+      grafanaQuery: '',
+      grafanaButtonCount: 0
+    },
+    countValuesDerived: {
+      grafanaQuery: outputFilter('count_values("sample_value", temperature)', { sample_value: '7' }),
       grafanaButtonCount: 1
     }
   });
@@ -4840,8 +4882,9 @@ alert synthetic.count.values.label {
       hashFetchCount,
       actionCount: root.querySelectorAll('.bosun-grafana-query-btn').length,
       allQueriesPresent: Array.from(root.querySelectorAll('.panel')).every((panel, index) => {
-        return hooks.getGrafanaQueryForPanel(panel) ===
-          'browser_concurrent_metric_' + index + '{zone="z' + index + '"}';
+        const query = hooks.getGrafanaQueryForPanel(panel);
+        return query.startsWith('(\\nbrowser_concurrent_metric_' + index + '\\n) and on (zone)') &&
+          query.endsWith('(label_replace(vector(1), "zone", "z' + index + '", "", ".*"))');
       })
     };
   })()`);
@@ -5905,9 +5948,19 @@ alert synthetic.count.values.label {
         .find((button) => button.textContent === 'Вставить и выполнить')?.click();
     }, 0);
     const executed = await api.openQuery('up', document.body);
+    const legacyResults = [];
+    const legacyQueries = ${JSON.stringify(stateExprFallbackResult.mergeActions.slice(-legacyFixtures.length).map(action => action.query))};
+    for (let index = 0; index < legacyQueries.length; index += 1) {
+      setTimeout(() => {
+        const dialog = document.querySelector('.bosun-grafana-preview-dialog');
+        const choice = index >= 9 ? 'Вставить и выполнить' : 'Вставить';
+        Array.from(dialog?.querySelectorAll('button') || []).find(button => button.textContent === choice)?.click();
+      }, 0);
+      legacyResults.push(await api.openQuery(legacyQueries[index], document.body));
+    }
     window.open = originalOpen;
     api.destroy();
-    return { inserted, executed, previewSnapshot, saved, navigated, openerCleared: popup.opener === null };
+    return { inserted, executed, previewSnapshot, saved, navigated, legacyResults, openerCleared: popup.opener === null };
   })()`);
   assert.strictEqual(handoffResult.inserted, true);
   assert.strictEqual(handoffResult.executed, true);
@@ -5915,8 +5968,60 @@ alert synthetic.count.values.label {
   assert.ok(handoffResult.previewSnapshot.text.includes('<img src=x'));
   assert.strictEqual(handoffResult.saved[0].run, false);
   assert.strictEqual(handoffResult.saved[1].run, true);
-  assert.strictEqual(handoffResult.navigated.length, 2);
+  assert.strictEqual(handoffResult.navigated.length, 2 + legacyFixtures.length);
   assert.strictEqual(handoffResult.openerCleared, true);
+  assert.ok(handoffResult.legacyResults.every(Boolean));
+  assert.deepStrictEqual(handoffResult.saved.slice(2).map(({ query, run }) => ({ query, run })),
+    expectedMergeQueries.slice(-legacyFixtures.length).map((query, index) => ({ query, run: index >= 9 })));
+
+  const legacyEditorResult = await evaluate(client, `(async () => {
+    history.replaceState({}, '', '/d/test?editPanel=1');
+    const payloads = ${JSON.stringify(handoffResult.saved.slice(2))};
+    const results = [];
+    for (let index = 0; index < payloads.length; index += 1) {
+      const payload = payloads[index];
+      document.body.innerHTML = '<div class="query-row"><button>Code</button>' +
+        '<div class="monaco-editor" style="display:block;width:320px;height:48px">' +
+        '<textarea class="inputarea monaco-mouse-cursor-text" role="textbox" style="display:block;width:300px;height:32px"></textarea></div>' +
+        '<button id="legacy-run">Run queries</button></div>';
+      const root = document.querySelector('.monaco-editor');
+      let value = 'original';
+      let revision = 1;
+      let runClicks = 0;
+      let verifiedRun = true;
+      const model = { getValue: () => value, getVersionId: () => revision,
+        setValue(next) { value = next; revision += 1; } };
+      const editor = { getDomNode: () => root, getModel: () => model };
+      window.monaco = { editor: { getEditors: () => [editor], getModels: () => [model] } };
+      document.getElementById('legacy-run').addEventListener('click', () => {
+        runClicks += 1;
+        verifiedRun = verifiedRun && value === payload.query;
+      });
+      const requestId = 'legacy-browser-' + index;
+      const operationId = 'legacy-operation-' + index;
+      const result = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => { window.removeEventListener('message', onResult); reject(new Error('Legacy editor timeout')); }, 4000);
+        function onResult(event) {
+          if (event.source !== window || event.origin !== location.origin ||
+              event.data?.type !== 'BOSUN_HELPER_GRAFANA_QUERY_RESULT' ||
+              event.data?.channelToken !== 'browser-ambiguous-editor-token' ||
+              event.data?.requestId !== requestId || event.data?.operationId !== operationId) return;
+          clearTimeout(timeout);
+          window.removeEventListener('message', onResult);
+          resolve(event.data.result);
+        }
+        window.addEventListener('message', onResult);
+        window.postMessage({ type: 'BOSUN_HELPER_APPLY_GRAFANA_QUERY', channelToken: 'browser-ambiguous-editor-token',
+          requestId, operationId, query: payload.query, run: payload.run,
+          targetIdentity: { origin: location.origin, pathname: '/d/test', editPanel: '1', orgId: null },
+          deadlineAt: Date.now() + 5000 }, location.origin);
+      });
+      results.push({ ok: result?.ok === true, query: value, runClicks, verifiedRun });
+    }
+    return results;
+  })()`);
+  assert.deepStrictEqual(legacyEditorResult, handoffResult.saved.slice(2).map(({ query, run }) =>
+    ({ ok: true, query, runClicks: run ? 1 : 0, verifiedRun: true })));
 }
 
 async function main() {
