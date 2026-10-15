@@ -55,7 +55,7 @@ try {
     fs.copyFileSync(path.join(project, file), target);
   }
   for (const file of ['tests/ignored.js', 'scripts/dev.js', 'node_modules/ignored.js', '.git/ignored',
-    'config.local.extra.js', 'capture.json', 'notes.md']) {
+    'config.local.extra.js', 'bosun-rules.conf', 'capture.json', 'notes.md']) {
     fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     fs.writeFileSync(path.join(root, file), 'must-not-be-packaged');
   }

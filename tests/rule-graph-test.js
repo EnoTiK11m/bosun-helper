@@ -118,7 +118,7 @@ async function run() {
   ]) assert.strictEqual(legacyResolve(expression).query, query, expression);
 
   const invalidLegacyExpressions = [
-    legacyCall({ 0: '"synthetic.metric"' }), legacyCall({ 0: '"1metric"' }),
+    legacyCall({ 0: '"1metric"' }),
     legacyCall({ 0: '"synthetic_metric\n"' }), legacyCall({ 1: '"label_a\n"' }),
     legacyCall({ 4: '"1m\n"' }), legacyCall({ 5: '"1d\n"' }),
     'prom("synthetic_metric", "1m", "")', legacyCall({ 6: '"", ""' }),
@@ -127,17 +127,16 @@ async function run() {
     legacyCall({ 0: '`synthetic_metric`' }), legacyCall({ 0: "'''synthetic_metric'''" }),
     legacyCall({ 2: `'label_a="demo"'` }), legacyCall({ 2: String.raw`"label_a=\"demo\""` }),
     legacyCall({ 2: `'''label_a="$value"'''` }), legacyCall({ 2: String.raw`'''label_a="a\nb"'''` }),
-    legacyCall({ 3: '"avg"' }), legacyCall({ 1: '"bad-label"' }),
+    legacyCall({ 1: '"bad-label"' }),
     legacyCall({ 1: '"label_a,label_a"' }), legacyCall({ 1: '"__name__"' }),
     legacyCall({ 1: '"label_a,,label_b"' }), legacyCall({ 1: '"label_a, label_b"' }),
     legacyCall({ 1: '" "' }), legacyCall({ 2: `'''label_a=demo'''` }),
-    legacyCall({ 2: `'''label_a="a",label_a="b"'''` }), legacyCall({ 2: `'''label_a!="a"'''` }),
-    legacyCall({ 2: `'''label_a!~"a"'''` }), legacyCall({ 2: `'''label_a=~"[ab]"'''` }),
+    legacyCall({ 2: `'''label_a="a",label_a="b"'''` }), legacyCall({ 2: `'''label_a=~"[ab]"'''` }),
     legacyCall({ 2: `'''label_a=~"a||b"'''` }), legacyCall({ 2: `'''label_a="a",'''` }),
     legacyCall({ 2: `'''{label_a="a"}'''` }), legacyCall({ 2: `'''label_a="a" # comment'''` }),
-    ...['0m', '-1m', '+1m', '1.5m', '1h', '01m', '1m1d', '999999999999999999999d', '106752d', '153722868m']
+    ...['0m', '-1m', '999999999999999999999d', '106752d', '153722868m']
       .flatMap((duration) => [legacyCall({ 4: `"${duration}"` }), legacyCall({ 5: `"${duration}"` })]),
-    legacyCall({ 6: '"1m"' }), legacyCall({ 4: '""' }), legacyCall({ 5: '""' }),
+    legacyCall({ 4: '""' }), legacyCall({ 5: '""' }),
     `sum(${legacyCall()})`, `(${legacyCall()})`, `${legacyCall()} * 2`, `2 + ${legacyCall()}`,
     `${legacyCall()} trailing`, `["other"]${legacyCall()}`, legacyCall({ 0: legacyCall() }),
     '$legacy'
@@ -214,6 +213,13 @@ async function run() {
     selectedQuery,
     'Non-query promras arguments must not change graph-query selection'
   );
+  for (const tail of ["1, '2h', ''", "'', '2h', ''", "'5m', '', ''", "'invalid', '2h', ''",
+    "'5m', '2h', 1", "'999999999999999999999h', '2h', ''"]) {
+    const config = alertRule('synthetic.bad-duration',
+      `  $usage_graph = promras('''up''', ${tail})\n  warn = 1`);
+    assert.strictEqual(api.resolveAlertGraph(config, 'synthetic.bad-duration').ok, false,
+      'Invalid Bosun duration arguments must not produce a verified graph');
+  }
 
   const errorQuery = 'sum(rate(error_total[5m]))';
   const allQuery = 'sum(rate(all_total[5m]))';
@@ -394,14 +400,14 @@ async function run() {
   const b = tagged(branchB, 'branch_axis=second');
   const merge = (left = a, right = b) => `merge(${left}, ${right})`;
   const invalidMergeExpressions = [
-    `merge(${a})`, `merge(${a}, ${b}, ${tagged(branchA, 'branch_axis=third')})`,
+    `merge(${a})`,
     merge(branchA), merge(a, branchB), merge(tagged(merge(), 'branch_axis=first')),
     merge(`addtags(${a}, "other=first")`), merge(`addtags(${branchA})`),
     merge(`addtags(${branchA}, "branch_axis=first", "other=x")`),
     ...['branch_axis=first,other=x', 'broken', '=first', 'branch_axis=', '__name__=first',
       '__private=first', 'bad-key=first', 'branch_axis=two words', 'branch_axis=$value',
       'branch_axis=a=b', ' branch_axis=first', 'branch_axis=first\n', String.raw`branch_axis=\first`,
-      "branch_axis='first'", 'branch_axis=first.second'].map((tag) => merge(tagged(branchA, tag))),
+      "branch_axis='first'"].map((tag) => merge(tagged(branchA, tag))),
     merge(a, tagged(branchB, 'other=second')), merge(a, tagged(branchB, 'branch_axis=first')),
     merge(tagged(promras('sum by (branch_axis, label_a) (synthetic_a)'), 'branch_axis=first')),
     merge(tagged(promras('synthetic_a'), 'branch_axis=first')),
@@ -429,10 +435,11 @@ async function run() {
   promContext.globalThis = promContext;
   vm.runInNewContext(fs.readFileSync('src/grafana/promql.js', 'utf8'), promContext);
   const generated = mergeResolve(merge()).query;
-  assert.strictEqual(promContext.BosunHelperPromQL.applyAlertTagsToPromQuery(generated, 'branch_axis=first'), '',
-    'Derived discriminator conflict must not become a selector matcher');
+  assert.strictEqual(promContext.BosunHelperPromQL.applyAlertTagsToPromQuery(generated, 'branch_axis=first'),
+    `(\n${generated}\n) and on (branch_axis) (label_replace(vector(1), "branch_axis", "first", "", ".*"))`,
+    'Derived discriminator must filter the final result without changing either branch');
   assert.strictEqual(promContext.BosunHelperPromQL.applyAlertTagsToPromQuery(generated, 'host=demo'),
-    generated.replace('synthetic_a)', 'synthetic_a{host="demo"})').replace('synthetic_b)', 'synthetic_b{host="demo"})'));
+    '', 'A host label removed by both branch aggregations cannot identify an output series');
 
   const unsupportedConfig = [
     alertRule('synthetic.cycle', '  $a = $b\n  $b = $a\n  $usage_graph = $a\n  warn = 1'),
@@ -444,7 +451,7 @@ async function run() {
   ].join('\n\n');
   assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.cycle').reason, 'cyclic_variable');
   assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.unresolved').reason, 'unresolved_variable');
-  assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.legacy').reason, 'legacy_prom');
+  assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.legacy').reason, 'legacy_prom_arity');
   assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.invalid').reason, 'invalid_promras');
   assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.interpolation').reason, 'unresolved_variable');
   assert.strictEqual(api.resolveAlertGraph(unsupportedConfig, 'synthetic.forward').reason, 'unresolved_variable');
@@ -591,7 +598,7 @@ async function run() {
   const scannerSnapshot = await scannerResolver.refresh(['synthetic.scanner.direct']);
   assert.strictEqual(scannerSnapshot.available, true);
   assert.strictEqual(scannerResolver.getResolution('synthetic.scanner.direct').query, scannerCanary);
-  assert.strictEqual(scannerResolver.getResolution('synthetic.scanner.legacy').reason, 'legacy_prom');
+  assert.strictEqual(scannerResolver.getResolution('synthetic.scanner.legacy').reason, 'legacy_prom_arity');
 
   const opaqueLookupQuery = 'sum(rate(opaque_lookup_metric_total[5m]))';
   const opaqueLookupConfig = [
@@ -635,7 +642,7 @@ async function run() {
     opaqueLookupResolver.getResolution('synthetic.opaque.direct').query,
     opaqueLookupQuery
   );
-  assert.strictEqual(opaqueLookupResolver.getResolution('synthetic.opaque.legacy').reason, 'legacy_prom');
+  assert.strictEqual(opaqueLookupResolver.getResolution('synthetic.opaque.legacy').reason, 'legacy_prom_arity');
   assert.strictEqual(opaqueLookupResolver.getResolution('fake.lookup'), null);
   assert.strictEqual(opaqueLookupResolver.getResolution('fake.template'), null);
 

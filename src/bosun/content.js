@@ -2981,7 +2981,8 @@
       'no_usage_graph',
       'multi_query_graph',
       'computed_graph',
-      'legacy_prom',
+      ...['prom', 'promrate'].flatMap((name) => ['', 'arity', 'arguments', 'metric', 'grouping',
+        'aggregation', 'matchers', 'duration', 'query'].map((detail) => `legacy_${name}${detail ? '_' + detail : ''}`)),
       'unresolved_variable',
       'cyclic_variable',
       'invalid_promras',
@@ -3051,6 +3052,7 @@
     const entries = [];
     const idCounts = new Map();
     const keyCounts = new Map();
+    const rejectedTransforms = new Map();
 
     for (const group of getAlertGroupsFromPayload(payload)) {
       const children = sharedUtils?.normalizeNeedAckChildren
@@ -3061,11 +3063,14 @@
         const rawQuery = getRuleGraphRawQuery(child);
         const rawTags = child?.State?.Tags || child?.Tags || '';
         const alertKey = child?.State?.AlertKey || child?.AlertKey || '';
-        const query = applyAlertTagsToPromQuery(
-          rawQuery,
-          rawTags,
-          alertKey
-        );
+        const transformed = rawQuery && promqlApi?.transformAlertQuery?.(rawQuery, rawTags, alertKey);
+        const query = transformed
+          ? (transformed.ok ? transformed.query : '')
+          : applyAlertTagsToPromQuery(rawQuery, rawTags, alertKey);
+        // Only bounded reason codes and counts enter diagnostics, never instance data.
+        if (transformed && !transformed.ok && /^[a-z_]{1,64}$/.test(transformed.reason || '')) {
+          rejectedTransforms.set(transformed.reason, (rejectedTransforms.get(transformed.reason) || 0) + 1);
+        }
         const childId = child?.State?.Id != null ? String(child.State.Id) : null;
         const childKey = buildChildMarkerKeyFromData(child, group);
         entries.push({
@@ -3089,6 +3094,11 @@
       if (!entry.query) continue;
       if (entry.childId) grafanaQueryById.set(entry.childId, entry.query);
       if (entry.childKey) grafanaQueryByKey.set(entry.childKey, entry.query);
+    }
+    if (rejectedTransforms.size) {
+      reportDiagnostics('grafana-query-transform-rejected', Array.from(rejectedTransforms)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([reason, count]) => `${reason}=${count}`).join(','));
     }
   }
 
