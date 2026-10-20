@@ -356,13 +356,26 @@
     getGroupPanels: (root) => Array.from(root.querySelectorAll('.panel-group > .panel'))
       .filter((panel) => isGroupPanel(panel)),
     getGroupSubject: (panel) => getGroupSubjectFromPanel(panel),
+    getRawGroupSubject: (panel) => getGroupSubjectNode(panel)?.textContent,
     getGroupCountNode: (panel) => getGroupCountNode(panel),
     getRenderedChildAge: (panel) => panel
       ?.querySelector('[ng-repeat="child in group.Children"] [ts-since="child.Ago"]')
       ?.textContent,
     getDomChildCount: (panel) => getGroupChildPanels(panel).length,
-    hasStrongDomIdentity: hasStrongGroupMarkerIdentityFromDom
+    hasStrongDomIdentity: hasStrongGroupMarkerIdentityFromDom,
+    readModelIdentity: readSingleAlertAgeModelIdentity,
+    readExpandedModelIdentity: readSingleAlertAgeExpandedModelIdentity,
+    sanitizeExpandedReaderReason: groupIdentityApi?.expandedReaderReasonCode,
+    buildModelSnapshotIndexes: groupIdentityApi?.buildSnapshotIndexes
   }) || null;
+  // DevTools must select this extension's isolated execution context. No page bridge.
+  if (singleAlertAgeApi?.diagnostics) {
+    const diagnosticApi = singleAlertAgeApi.diagnostics;
+    globalThis.BosunHelperSingleAlertAgeDiagnostics = Object.freeze({
+      start: diagnosticApi.start, stop: diagnosticApi.stop,
+      report: diagnosticApi.report, clear: diagnosticApi.clear
+    });
+  }
   const actionTemplatesApi = globalThis.BosunHelperActionTemplates?.createActionTemplates?.({
     isActionPage: () => isActionPage(),
     settingsStore
@@ -3449,6 +3462,75 @@
     return combined;
   }
 
+  function readSingleAlertAgeModelIdentity(section, panel, countNode, payload) {
+    const diagnostic = singleAlertAgeApi?.diagnostics;
+    if (typeof groupIdentityApi?.read !== 'function') { diagnostic?.modelReader?.(panel, 'reader-unavailable'); return null; }
+    const rootForSection = () => section === 'NeedAck' ? getNeedsAckRoot() : getAcknowledgedRoot();
+    const root = rootForSection(), heading = getPanelHeading(panel);
+    const generation = alertsPayloadApplyVersion, settings = settingsSnapshot;
+    const subjectNode = getGroupSubjectNode(panel), subject = getGroupSubjectFromPanel(panel);
+    const current = () => payload === latestAlertsPayload && alertsPayloadApplyVersion === generation &&
+      settingsSnapshot === settings && isFeatureEnabled('singleAlertAge') && isDashboardEnhancementsPage() &&
+      panel.isConnected && root?.isConnected && rootForSection() === root && root.contains(panel) &&
+      panel.closest('[ts-ack-group]') === root && root.getAttribute('ts-ack-group') === 'schedule.Groups.' + section &&
+      getPanelHeading(panel) === heading && getGroupCountNode(panel) === countNode && countNode?.isConnected &&
+      getGroupSubjectNode(panel) === subjectNode && getGroupSubjectFromPanel(panel) === subject &&
+      getGroupChildPanels(panel).length === 0;
+    if (!heading || !subjectNode || !current()) { diagnostic?.modelReader?.(panel, 'stale-before-read'); return { status: 'stale' }; }
+    let identity = null;
+    let readerThrew = false;
+    diagnostic?.modelReader?.(panel, 'reader-called');
+    try { identity = groupIdentityApi.read(panel); } catch (_) { readerThrew = true; diagnostic?.modelReader?.(panel, 'reader-threw'); }
+    if (!current()) { diagnostic?.modelReader?.(panel, 'stale-after-read'); return { status: 'stale' }; }
+    // Do not introduce async bridge work or deferred writes. Reject unexpected
+    // thenables and consume their rejection without scheduling an age repaint.
+    if (identity && typeof identity.then === 'function') {
+      Promise.resolve(identity).catch(() => {});
+      diagnostic?.modelReader?.(panel, 'unexpected-promise');
+      return current() ? null : { status: 'stale' };
+    }
+    if (!readerThrew) diagnostic?.modelReader?.(panel, identity ? (identity.rejected ? 'reader-rejected' : 'reader-returned') : 'reader-empty');
+    return identity ? { status: 'read', identity } : null;
+  }
+
+  function readSingleAlertAgeExpandedModelIdentity(section, panel, countNode, payload) {
+    const diagnostic = singleAlertAgeApi?.diagnostics;
+    if (typeof groupIdentityApi?.readExpandedSingleton !== 'function') {
+      diagnostic?.modelReader?.(panel, 'reader-unavailable'); return null;
+    }
+    const rootForSection = () => section === 'NeedAck' ? getNeedsAckRoot() : getAcknowledgedRoot();
+    const root = rootForSection(), heading = getPanelHeading(panel);
+    const generation = alertsPayloadApplyVersion, settings = settingsSnapshot;
+    const subjectNode = getGroupSubjectNode(panel), subject = getGroupSubjectFromPanel(panel);
+    const children = getGroupChildPanels(panel), child = children.length === 1 ? children[0] : null;
+    const childHeading = child ? getChildHeading(child) : null;
+    const groupKey = buildGroupMarkerKeyFromDom(panel);
+    const current = () => payload === latestAlertsPayload && alertsPayloadApplyVersion === generation &&
+      settingsSnapshot === settings && isFeatureEnabled('singleAlertAge') && isDashboardEnhancementsPage() &&
+      panel.isConnected && root?.isConnected && rootForSection() === root && root.contains(panel) &&
+      panel.closest('[ts-ack-group]') === root && root.getAttribute('ts-ack-group') === 'schedule.Groups.' + section &&
+      getPanelHeading(panel) === heading && getGroupCountNode(panel) === countNode && countNode?.isConnected &&
+      getGroupSubjectNode(panel) === subjectNode && getGroupSubjectFromPanel(panel) === subject &&
+      child?.isConnected && getGroupChildPanels(panel).length === 1 && getGroupChildPanels(panel)[0] === child &&
+      getChildHeading(child) === childHeading && buildGroupMarkerKeyFromDom(panel) === groupKey;
+    if (!heading || !subjectNode || !childHeading || !groupKey || !current()) {
+      diagnostic?.modelReader?.(panel, 'stale-before-read'); return { status: 'stale' };
+    }
+    let identity = null, readerThrew = false;
+    diagnostic?.modelReader?.(panel, 'reader-called');
+    try { identity = groupIdentityApi.readExpandedSingleton(panel); }
+    catch (_) { readerThrew = true; diagnostic?.modelReader?.(panel, 'reader-threw'); }
+    if (!current()) { diagnostic?.modelReader?.(panel, 'stale-after-read'); return { status: 'stale' }; }
+    if (identity && typeof identity.then === 'function') {
+      Promise.resolve(identity).catch(() => {});
+      diagnostic?.modelReader?.(panel, 'unexpected-promise');
+      return current() ? null : { status: 'stale' };
+    }
+    if (!readerThrew) diagnostic?.modelReader?.(panel, identity ? (identity.rejected ? 'reader-rejected' : 'reader-returned') : 'reader-empty',
+      identity?.rejected ? (identity.reason || 'unknown') : null);
+    return identity ? { status: 'read', identity } : null;
+  }
+
   function resolveModelGroupPriority(panel, index) {
     if (!alertDataIndexReady || !groupIdentityApi || !modelGroupSnapshotIndexes) return null;
     const section = index ? 'Acknowledged' : 'NeedAck';
@@ -3653,20 +3735,25 @@
     applyNeedsAckMarkersFromData({ preserveExistingOnNone: true });
   }
 
-  async function fetchAlertsPayload(options = {}) {
+  async function fetchAlertsPayload(options = {}, diagnosticSource = 'regular') {
+    const received = payload => {
+      singleAlertAgeApi?.diagnostics?.received?.(payload, diagnosticSource);
+      return payload;
+    };
     if (!alertsDataApi?.fetchAlertsDataWithRetry && (!alertsDataApi?.fetchAlertsDataViaFetch || !alertsDataApi?.fetchAlertsDataViaXHR)) {
       throw new Error('alerts-data module unavailable');
     }
     try {
       if (alertsDataApi?.fetchAlertsDataWithRetry) {
-        return await alertsDataApi.fetchAlertsDataWithRetry(options);
+        return received(await alertsDataApi.fetchAlertsDataWithRetry(options));
       }
       try {
-        return await alertsDataApi.fetchAlertsDataViaFetch(options);
+        return received(await alertsDataApi.fetchAlertsDataViaFetch(options));
       } catch (_) {
-        return await alertsDataApi.fetchAlertsDataViaXHR(options);
+        return received(await alertsDataApi.fetchAlertsDataViaXHR(options));
       }
     } catch (err) {
+      singleAlertAgeApi?.diagnostics?.failed?.(diagnosticSource);
       if (err?.name === 'AbortError') throw err;
       console.warn('[Bosun plugin] Failed to refresh alerts data:', err);
       reportDiagnostics('refresh-failed', err?.message || 'unknown-error');
@@ -3724,7 +3811,7 @@
       applyVersion: alertsPayloadApplyVersion,
       lifecycle: markerPresentationLifecycle,
       controller,
-      promise: fetchAlertsPayload({ signal: controller?.signal })
+      promise: fetchAlertsPayload({ signal: controller?.signal }, 'prime')
     };
     primedAlertsPayload = entry;
     pendingPrimePresentation = entry;
@@ -3732,7 +3819,7 @@
       entry.payload = payload;
       if (isDashboardEnhancementsPage() && alertsPayloadApplyVersion === entry.applyVersion &&
         entry.lifecycle === markerPresentationLifecycle && !entry.controller?.signal.aborted) {
-        singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now() });
+        singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now(), previousPayload: latestAlertsPayload });
         if (isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
       }
       applyPrimeMarkerPresentation();
@@ -3761,13 +3848,16 @@
   }
 
   function applyAlertsPayload(payload, metadata = {}) {
+    if (metadata?.source === 'follower') singleAlertAgeApi?.diagnostics?.received?.(payload, 'follower');
     if (!isDashboardEnhancementsPage()) return;
     pendingPrimePresentation = null;
+    const previousAlertsPayload = latestAlertsPayload;
     latestAlertsPayload = payload;
     latestAlertsTrackerOwner = metadata?.source !== 'follower';
     alertsPayloadApplyVersion += 1;
     singleAlertAgeApi?.update?.(payload, {
       source: metadata?.source || 'direct',
+      previousPayload: previousAlertsPayload,
       fetchedAt: metadata?.fetchedAt || Date.now()
     });
     refreshRuleGraphDefinitions(payload);
@@ -4028,7 +4118,9 @@
       expectedExtensionClassNodes.clear();
 
       if (shouldRefreshUi) {
+        singleAlertAgeApi?.diagnostics?.repaint?.('start');
         if (isDashboardEnhancementsPage() && isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
+        singleAlertAgeApi?.diagnostics?.repaint?.('end');
         scheduleRefresh({ skipSingleAlertAge: true });
       }
 
@@ -4061,6 +4153,7 @@
         const observer = new MutationObserver(processMutations);
         observer.observe(root, {
           childList: true,
+          characterData: true,
           subtree: true,
           attributes: true,
           attributeOldValue: true,

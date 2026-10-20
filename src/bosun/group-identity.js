@@ -1,6 +1,18 @@
 (() => {
   'use strict';
 
+  const expandedReaderReasons = new Set([
+    'parent-reader-rejected','parent-not-singleton','visible-child-count','visible-child-structure','visible-id-count',
+    'visible-id-format','parent-model-membership','parent-child-count','child-scope-unavailable',
+    'child-binding-accessor','child-binding-inherited-parent','child-binding-inherited-other','child-binding-missing',
+    'child-parent-reference-mismatch','child-id-mismatch','visible-id-mismatch','child-alertkey-mismatch',
+    'child-alertkey-conflict','state-alias-same-identity','state-alias-same-id-no-key','state-alias-reference-mismatch',
+    'angular-changed','parent-scope-changed','child-scope-changed','group-membership-changed','parent-model-changed',
+    'child-model-changed','child-id-changed','child-alertkey-changed','state-alias-changed','parent-recheck-rejected',
+    'identity-changed','dom-changed','reader-exception'
+  ]);
+  const expandedReaderReasonCode = value => expandedReaderReasons.has(value) ? value : 'unknown';
+
   // Verify guard installation BEFORE page scripts can install fake blockers.
   // If injection order/MAIN support fails, permanently disable this document.
   let guarded = false;
@@ -15,7 +27,7 @@
 
   // A synchronous, request-scoped read. No identity cache, DOM attributes, storage,
   // timers or lasting listeners. The early MAIN guard authenticates event identity.
-  function read(panel) {
+  function readRequest(panel, request) {
     if (!guarded || !panel?.isConnected) return null;
     const bytes = crypto.getRandomValues(new Uint8Array(16));
     const nonce = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
@@ -30,7 +42,11 @@
       if (message?.version !== 1 || message.nonce !== nonce) return;
       received = true;
       const identity = message.identity;
-      if (identity === null) { result = { rejected: true }; return; }
+      if (identity === null) {
+        result = request === 'bosun-helper-age-expanded-identity-read-v1'
+          ? { rejected: true, reason: expandedReaderReasonCode(message.reason) } : { rejected: true };
+        return;
+      }
       if (!identity || !['NeedAck', 'Acknowledged'].includes(identity.section) ||
         !Array.isArray(identity.children) || !identity.children.length || identity.children.length > 100) return;
       const ids = new Set(), rows = [];
@@ -44,13 +60,16 @@
     window.addEventListener('bosun-helper-group-identity-result-v1', onResponse, true);
     try {
       dispatching = true;
-      panel.dispatchEvent(new CustomEvent('bosun-helper-group-identity-read-v1', { bubbles: true, detail: nonce }));
+      panel.dispatchEvent(new CustomEvent(request, { bubbles: true, detail: nonce }));
     } finally {
       dispatching = false;
       window.removeEventListener('bosun-helper-group-identity-result-v1', onResponse, true);
     }
     return result;
   }
+
+  function read(panel) { return readRequest(panel, 'bosun-helper-group-identity-read-v1'); }
+  function readExpandedSingleton(panel) { return readRequest(panel, 'bosun-helper-age-expanded-identity-read-v1'); }
 
   function buildSnapshotIndexes(payload, getGroupKey) {
     const indexes = {}, recordsBySection = {};
@@ -88,5 +107,5 @@
     return indexes;
   }
 
-  globalThis.BosunHelperGroupIdentity = { read, buildSnapshotIndexes };
+  globalThis.BosunHelperGroupIdentity = { read, readExpandedSingleton, expandedReaderReasonCode, buildSnapshotIndexes };
 })();
