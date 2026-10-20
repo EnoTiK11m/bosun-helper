@@ -1054,7 +1054,7 @@ function createBaselineHarness(options = {}) {
   assert.deepStrictEqual(check(child, { ...settings, features: { priorityAlerts: false } }), {
     priority: false, reasons: []
   });
-  assert.deepStrictEqual(check(child), { priority: true, reasons: ['critical'] });
+  assert.deepStrictEqual(check(child), { priority: false, reasons: [] });
   assert.deepStrictEqual(check({ ...child, severity: 'warning' }), { priority: false, reasons: [] });
   assert.deepStrictEqual(check({ ...child, severity: 'warning', alertName: 'synthetic.alert.priority' }), {
     priority: true, reasons: ['exact-alert-name']
@@ -1063,7 +1063,7 @@ function createBaselineHarness(options = {}) {
     priority: false, reasons: []
   });
   assert.deepStrictEqual(check({ ...child, alertName: 'synthetic.alert.priority' }), {
-    priority: true, reasons: ['critical', 'exact-alert-name']
+    priority: true, reasons: ['exact-alert-name']
   });
   assert.strictEqual(check({ ...child, severity: 'warning', alertName: 'synthetic.alert.priority.extra' }).priority, false);
   for (const identity of ['ambiguous', 'conflicting', 'unresolved', undefined]) {

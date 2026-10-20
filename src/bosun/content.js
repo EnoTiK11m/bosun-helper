@@ -1975,8 +1975,6 @@
     if (initial || changedPaths.includes('internal.diagnosticsEnabled')) updateDiagnosticsControl();
     if (initial || [
       'features.priorityAlerts',
-      'preferences.priorityCritical',
-      'preferences.priorityShowAcknowledged',
       'priorityRules.exactAlertNames'
     ].some((path) => changedPaths.includes(path))) {
       if (latestAlertsPayload) rebuildAlertDataIndex(latestAlertsPayload, { skipGrafanaQueryIndex: true });
@@ -3222,8 +3220,7 @@
       groupHasStrongIdentityBySubject.set(key, value);
     }
     for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
-    acknowledgedPriorityIndex = isFeatureEnabled('priorityAlerts') &&
-      settingsSnapshot?.preferences?.priorityShowAcknowledged === true
+    acknowledgedPriorityIndex = isFeatureEnabled('priorityAlerts')
       ? alertsDataApi?.rebuildAlertDataIndex?.(payload, helpers, 'Acknowledged') || null
       : null;
     alertDataIndexReady = true;
@@ -3682,8 +3679,7 @@
       {
         root: getAcknowledgedRoot(),
         index: acknowledgedPriorityIndex,
-        show: enabled && settingsSnapshot?.preferences?.priorityShowAcknowledged === true &&
-          Boolean(acknowledgedPriorityIndex)
+        show: enabled && Boolean(acknowledgedPriorityIndex)
       }
     ]) {
       const childPanels = getChildAlertPanels(root), domIdCounts = new Map();

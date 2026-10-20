@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  const SCHEMA_VERSION = 1;
+  const SCHEMA_VERSION = 2;
   const VERSION_KEY = 'bosunSettingsSchemaVersion';
   const STORAGE_PREFIX = 'bosunSettingsV1:';
   const ACTION_TYPES = Object.freeze(['note', 'ack', 'close']);
@@ -10,6 +10,21 @@
   const MAX_TOTAL_TEMPLATE_TEXT_LENGTH = 10000;
   const MAX_PRIORITY_ALERT_NAMES = 50;
   const MAX_PRIORITY_ALERT_NAME_LENGTH = 256;
+  const PREVIOUS_DEFAULTS = Object.freeze({
+    'features.noCommentFilter': true,
+    'features.acknowledgedCollapse': true,
+    'features.priorityAlerts': false,
+    'preferences.priorityRuleAction': true
+  });
+  const RETIRED_STORAGE_KEYS = ['bosunSettingsV1:preferences.priorityCritical', 'bosunSettingsV1:preferences.priorityShowAcknowledged'];
+  const DEFAULT_PRIORITY_ALERT_NAMES = Object.freeze([
+    'host.disk.free.space.low',
+    'host.disk.write.latency.high',
+    'host.disk.read.latency.high',
+    'sw.zfs.free.space.low',
+    'windows.disk.free.space.low',
+    'sms.channel.group.dlv.percent.low'
+  ]);
 
   const FEATURE_DEFAULTS = Object.freeze({
     singleAlertAge: true,
@@ -17,14 +32,14 @@
     copyButtons: true,
     lastActionEnhancements: true,
     silencedFilter: true,
-    noCommentFilter: true,
-    acknowledgedCollapse: true,
+    noCommentFilter: false,
+    acknowledgedCollapse: false,
     soundNotifications: true,
     visualNewAlertNotifications: true,
     autoRefresh: true,
     actionTemplates: true,
     grafanaIntegration: true,
-    priorityAlerts: false
+    priorityAlerts: true
   });
 
   const DEFAULTS = Object.freeze({
@@ -35,13 +50,11 @@
       noCommentFilterActive: false,
       acknowledgedCollapsed: false,
       soundEnabled: true,
-      priorityCritical: true,
-      priorityShowAcknowledged: false,
-      priorityRuleAction: true,
+      priorityRuleAction: false,
       autoRefreshEnabled: true,
       autoRefreshIdleSeconds: 60
     }),
-    priorityRules: Object.freeze({ exactAlertNames: Object.freeze([]) }),
+    priorityRules: Object.freeze({ exactAlertNames: DEFAULT_PRIORITY_ALERT_NAMES }),
     actionTemplates: Object.freeze({ note: null, ack: null, close: null }),
     internal: Object.freeze({ diagnosticsEnabled: false })
   });
@@ -125,10 +138,8 @@
     entry('preferences.soundEnabled', true, normalizeBoolean, 'bosunSoundAlertsEnabled'),
     entry('preferences.autoRefreshEnabled', true, normalizeBoolean, 'bosunAutoRefreshEnabled'),
     entry('preferences.autoRefreshIdleSeconds', 60, normalizeIdleSeconds, 'bosunAutoRefreshIdleSeconds'),
-    entry('preferences.priorityCritical', true, normalizeBoolean),
-    entry('preferences.priorityShowAcknowledged', false, normalizeBoolean),
-    entry('preferences.priorityRuleAction', true, normalizeBoolean),
-    entry('priorityRules.exactAlertNames', [], normalizeExactAlertNames)
+    entry('preferences.priorityRuleAction', false, normalizeBoolean),
+    entry('priorityRules.exactAlertNames', DEFAULT_PRIORITY_ALERT_NAMES, normalizeExactAlertNames)
   );
   for (const type of ACTION_TYPES) {
     schemaEntries.push(entry(`actionTemplates.${type}`, null, normalizeTemplates, `bosunActionTemplatesV1:${type}`));
@@ -141,9 +152,16 @@
   const ENTRY_BY_LEGACY_KEY = new Map(SCHEMA.filter((item) => item.legacyKey).map((item) => [item.legacyKey, item]));
   const SETTINGS_STORAGE_KEYS = Object.freeze(Array.from(new Set([
     VERSION_KEY,
+    ...RETIRED_STORAGE_KEYS,
     ...SCHEMA.map((item) => item.storageKey),
     ...SCHEMA.map((item) => item.legacyKey).filter(Boolean)
   ])));
+
+  function needsPreviousDefaults(items) {
+    const version = Number(items[VERSION_KEY]);
+    if (Number.isInteger(version) && version >= SCHEMA_VERSION) return false;
+    return SETTINGS_STORAGE_KEYS.some(key => Object.prototype.hasOwnProperty.call(items, key));
+  }
 
   function clone(value) {
     if (Array.isArray(value)) return value.map(clone);
@@ -406,6 +424,7 @@
         const loaded = {};
         const writes = {};
         const storedVersion = Number(items[VERSION_KEY]);
+        const preservePreviousDefaults = needsPreviousDefaults(items);
         if (!Number.isInteger(storedVersion) || storedVersion < SCHEMA_VERSION) {
           writes[VERSION_KEY] = SCHEMA_VERSION;
         }
@@ -413,12 +432,17 @@
           const hasCanonical = Object.prototype.hasOwnProperty.call(items, entry.storageKey);
           const canonical = entry.normalize(items[entry.storageKey]);
           const legacy = entry.legacyKey ? entry.normalize(items[entry.legacyKey]) : { valid: false };
+          const preserveDefault = preservePreviousDefaults && !hasCanonical && !legacy.valid &&
+            Object.prototype.hasOwnProperty.call(PREVIOUS_DEFAULTS, entry.path);
           const value = pathRevisions.get(entry.path) !== readPathRevisions.get(entry.path)
             ? readPath(snapshot, entry.path)
             : (canonical.valid
                 ? canonical.value
-                : (!hasCanonical && legacy.valid ? legacy.value : clone(entry.defaultValue)));
+                : (!hasCanonical && legacy.valid ? legacy.value : (preserveDefault ? PREVIOUS_DEFAULTS[entry.path] : clone(entry.defaultValue))));
           loaded[entry.path] = value;
+          if (preserveDefault && pathRevisions.get(entry.path) === readPathRevisions.get(entry.path)) {
+            writes[entry.storageKey] = value;
+          }
           if (
             pathRevisions.get(entry.path) === readPathRevisions.get(entry.path) &&
             !hasCanonical &&
@@ -435,7 +459,7 @@
               return Object.prototype.hasOwnProperty.call(writes, entry.storageKey);
             });
             authoritativeVersion = await callStorage('get', [
-              VERSION_KEY,
+              ...SETTINGS_STORAGE_KEYS,
               ...migrationEntries.flatMap((entry) => [entry.storageKey, entry.legacyKey].filter(Boolean))
             ]);
             for (const entry of migrationEntries) {
@@ -456,6 +480,10 @@
               if (legacy.valid) {
                 loaded[entry.path] = legacy.value;
                 writes[entry.storageKey] = clone(legacy.value);
+              } else if (preservePreviousDefaults && needsPreviousDefaults(authoritativeVersion || {}) &&
+                Object.prototype.hasOwnProperty.call(PREVIOUS_DEFAULTS, entry.path)) {
+                loaded[entry.path] = PREVIOUS_DEFAULTS[entry.path];
+                writes[entry.storageKey] = PREVIOUS_DEFAULTS[entry.path];
               } else {
                 loaded[entry.path] = clone(entry.defaultValue);
                 delete writes[entry.storageKey];

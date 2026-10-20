@@ -362,6 +362,10 @@
         cursor: pointer;
       }
       .bosun-priority-action:hover { background: rgba(49, 93, 156, .12); }
+      .bosun-priority-action, .bosun-priority-action * {
+        user-select: none;
+        -webkit-user-select: none;
+      }
       .bosun-priority-action:focus-visible { outline: 2px solid #315d9c; outline-offset: 2px; }
       .bosun-priority-action:disabled { opacity: .6; cursor: wait; }
 

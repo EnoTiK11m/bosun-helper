@@ -12,10 +12,6 @@
 
     const reasons = [];
     if (
-      settings?.preferences?.priorityCritical === true &&
-      resolvedChild.severity === 'critical'
-    ) reasons.push('critical');
-    if (
       Array.isArray(settings?.priorityRules?.exactAlertNames) &&
       settings.priorityRules.exactAlertNames.includes(alertName)
     ) reasons.push('exact-alert-name');

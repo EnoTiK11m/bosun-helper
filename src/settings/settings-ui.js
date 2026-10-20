@@ -36,8 +36,6 @@
       prioritySection: true,
       fields: Object.freeze([
         Object.freeze({ path: 'features.priorityAlerts', label: 'Включить Priority Alerts' }),
-        Object.freeze({ path: 'preferences.priorityCritical', label: 'Считать Critical приоритетными' }),
-        Object.freeze({ path: 'preferences.priorityShowAcknowledged', label: 'Показывать приоритет в Acknowledged' }),
         Object.freeze({ path: 'preferences.priorityRuleAction', label: 'Кнопка управления приоритетом в алерте',
           hint: 'Показывать кнопку добавления/удаления Priority rule в раскрытом алерте.' }),
         Object.freeze({
@@ -251,8 +249,6 @@
     async function handlePrioritySectionReset() {
       const paths = [
         'features.priorityAlerts',
-        'preferences.priorityCritical',
-        'preferences.priorityShowAcknowledged',
         'preferences.priorityRuleAction',
         'priorityRules.exactAlertNames'
       ];
@@ -267,11 +263,9 @@
       renderSnapshot(settingsStore.getSnapshot(), new Set(paths));
       try {
         const next = await settingsStore.update({
-          'features.priorityAlerts': false,
-          'preferences.priorityCritical': true,
-          'preferences.priorityShowAcknowledged': false,
-          'preferences.priorityRuleAction': true,
-          'priorityRules.exactAlertNames': []
+          'features.priorityAlerts': true,
+          'preferences.priorityRuleAction': false,
+          'priorityRules.exactAlertNames': (options.schema.find((entry) => entry?.path === 'priorityRules.exactAlertNames')?.defaultValue || []).slice()
         });
         if (destroyed || paths.some((path) => pendingByPath.get(path) !== operation)) return;
         setStatus('Сохранено');

@@ -296,6 +296,7 @@ function instrumentContentSource(source) {
     getGrafanaQueryForPanel,
     flashCopyButtonState,
     handleRouteChange,
+    installSelectionCopySanitizer,
     startObserver,
     setExtensionClass,
     isFeatureEnabled,
@@ -441,7 +442,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       ${content}
       const hooks = __BosunHelperBrowserTest;
       const settings = JSON.parse(JSON.stringify(BosunHelperSettings.DEFAULTS));
-      settings.features.priorityAlerts = true; settings.preferences.priorityCritical = false;
+      settings.features.priorityAlerts = true; settings.preferences.priorityRuleAction = true; settings.preferences.priorityCritical = false;
       settings.preferences.priorityShowAcknowledged = true;
       settings.priorityRules.exactAlertNames = ['synthetic.angular'];
       hooks.applySettingsSnapshot(settings, { initial: true });
@@ -1471,8 +1472,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       __BosunHelperBrowserTest.applySettingsSnapshot(settings,{changedPaths:['priorityRules.exactAlertNames']});})()`);
     assert.ok((await run('fixtureState()')).every(row=>!row.priority&&!row.accent),'Removing exact rule removes all instance markers');
     await run('__BosunHelperBrowserTest.setPreference("priorityCritical",true);');
-    assert.deepStrictEqual((await run('fixtureState()')).slice(0,4).map(row=>row.priority),[true,true,true,true],
-      'Automatic Critical Priority independently covers every critical instance');
+    assert.deepStrictEqual((await run('fixtureState()')).slice(0,4).map(row=>row.priority),[false,false,false,false],
+      'Retired Critical preference must never assign Priority without an exact rule');
     assert.strictEqual((await run('fixtureState()'))[4].priority,false,'Warning Acknowledged group has no automatic Critical Priority');
     await run(`(()=>{const settings=JSON.parse(JSON.stringify(BosunHelperSettings.DEFAULTS));
       settings.features.priorityAlerts=true;settings.preferences.priorityCritical=false;settings.preferences.priorityShowAcknowledged=true;
@@ -1480,8 +1481,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       __BosunHelperBrowserTest.applySettingsSnapshot(settings,{changedPaths:['priorityRules.exactAlertNames','preferences.priorityCritical']});})()`);
     await assertSiblings('Exact rule restored independently of automatic Critical Priority');
     await run('__BosunHelperBrowserTest.setPreference("priorityShowAcknowledged",false);');
-    assert.deepStrictEqual((await run('fixtureState()')).map(row=>row.priority),[true,true,true,false,false],
-      'Acknowledged visibility setting does not change any NeedAck instance');
+    assert.deepStrictEqual((await run('fixtureState()')).map(row=>row.priority),[true,true,true,false,true],
+      'Retired Acknowledged setting must not hide Priority in either section');
     await run('__BosunHelperBrowserTest.setPreference("priorityShowAcknowledged",true);');
     await assertSiblings('Acknowledged presentation restored');
     await mutateMain('siblingContainer.replaceWith(savedSiblingContainer);fixtureGroups.NeedAck=savedSiblingGroups;');
@@ -1766,7 +1767,7 @@ async function runPrimeMarkerStartupAssertions(client) {
           if (state().priority !== 4) throw Error('Collapsed prime markers');
         }
         hooks.setPreference('priorityShowAcknowledged', false);
-        if (state().priority !== 3) throw Error('Prime Acknowledged isolation');
+        if (state().priority !== 4) throw Error('Retired Acknowledged preference must be ignored');
         hooks.setPreference('priorityShowAcknowledged', true);
         settings.priorityRules.exactAlertNames = [];
         hooks.applySettingsSnapshot(settings, { changedPaths: ['priorityRules.exactAlertNames'] });
@@ -1976,7 +1977,7 @@ async function runBrowserAssertions(client) {
     const resetApplied = calls.resets === 1 &&
       document.querySelector('[data-setting-path="features.copyButtons"]').checked === true;
     const resetFocusPreserved = document.activeElement === resetButton;
-    const resetDraftsCleared = priorityDraft.value === '' && templateDraft.value === '';
+    const resetDraftsCleared = priorityDraft.value === BosunHelperSettings.DEFAULTS.priorityRules.exactAlertNames.join('\\n') && templateDraft.value === '';
     const templateAccessibility = ['note', 'ack', 'close'].every((type) => {
       const textarea = document.querySelector('[data-setting-path="actionTemplates.' + type + '"]');
       const defaultButton = document.querySelector('[data-template-default-path="actionTemplates.' + type + '"]');
@@ -4307,6 +4308,32 @@ async function runBrowserAssertions(client) {
     details.placement = button(child)?.previousElementSibling === copyButton;
     copyButton.click(); await Promise.resolve();
     details.copyWorks = copied[0] === records[0].Subject;
+    hooks.installSelectionCopySanitizer();
+    const selection=win.getSelection(),range=doc.createRange();
+    const selectionHeading=child.querySelector(':scope > .panel-heading');
+    const excludedLabel=button(child).textContent;
+    range.selectNodeContents(selectionHeading);selection.removeAllRanges();selection.addRange(range);
+    details.selectionCss=win.getComputedStyle(button(child)).userSelect;
+    details.pointerInteractive=win.getComputedStyle(button(child)).pointerEvents!=='none'&&!button(child).disabled;
+    details.selectedSubject=selection.toString().includes(records[0].Subject);
+    details.selectedPriority=selection.toString().includes(excludedLabel);
+    const clipboardData=new win.DataTransfer();
+    doc.dispatchEvent(new win.ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData}));
+    details.copiedSubject=clipboardData.getData('text/plain').includes(records[0].Subject);
+    details.copiedPriority=clipboardData.getData('text/plain').includes(excludedLabel);
+    const controlOnly=doc.createElement('span');controlOnly.textContent='synthetic-priority-control-only';button(child).append(controlOnly);
+    range.selectNodeContents(needRoot);selection.removeAllRanges();selection.addRange(range);
+    const bulkClipboard=new win.DataTransfer();
+    const bulkCopyEvent=new win.ClipboardEvent('copy',{bubbles:true,cancelable:true,clipboardData:bulkClipboard});
+    doc.dispatchEvent(bulkCopyEvent);details.copySanitized=bulkCopyEvent.defaultPrevented&&bulkClipboard.types.length===1&&bulkClipboard.types[0]==='text/plain';
+    const normalizeSpaces=text=>text.replace(/\\s+/g,' ').trim();
+    details.bulkSelection=records.every(row=>normalizeSpaces(selection.toString()).includes(normalizeSpaces(row.Subject)));
+    details.bulkCopy=records.every(row=>normalizeSpaces(bulkClipboard.getData('text/plain')).includes(normalizeSpaces(row.Subject)));
+    details.bulkExcluded=[selection.toString(),bulkClipboard.getData('text/plain')].every(text=>
+      !text.includes(excludedLabel)&&!text.includes(controlOnly.textContent)&&!text.includes('⚑'));
+    controlOnly.remove();
+    selection.removeAllRanges();
+    button(child).focus();details.keyboardFocusable=doc.activeElement===button(child)&&button(child).tabIndex===0;
     // A repaint also removes a leftover button from the previous group UI.
     const obsolete = doc.createElement('button'); obsolete.className = 'bosun-priority-action';
     groups[0].querySelector('.panel-title').appendChild(obsolete);
@@ -4380,10 +4407,10 @@ async function runBrowserAssertions(client) {
     ack.appendChild(ackBody); hooks.ensurePriorityActions();
     details.ackHiddenPresentation = !button(ack) && !!button(ack.querySelector('[ng-repeat]')) && !flag(ack);
     button(ack.querySelector('[ng-repeat]')).click(); await settle(); details.ackRules = rules();
-    details.ackStillHidden = !flag(ack) && !flag(ack.querySelector('[ng-repeat]'));
+    details.ackStillHidden = flag(ack) && flag(ack.querySelector('[ng-repeat]'));
     details.caseSensitive = button(groups[3].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
-    await store.update({ 'preferences.priorityCritical': true }); await settle();
-    details.criticalSeparate = flag(groups[4]) && button(groups[4].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
+    await new Promise(resolve=>storage.set({ 'bosunSettingsV1:preferences.priorityCritical': true },resolve)); await settle();
+    details.criticalSeparate = !flag(groups[4]) && button(groups[4].querySelector('[ng-repeat]'))?.title === 'Добавить алерт в приоритетные';
     const ruleActionToggle = doc.querySelector('[data-setting-path="preferences.priorityRuleAction"]');
     const exactEditor = doc.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
     const noteEditor = doc.querySelector('[data-setting-path="actionTemplates.note"]');
@@ -4479,6 +4506,17 @@ async function runBrowserAssertions(client) {
   assert.strictEqual(priorityRowActions.groupAccent, true);
   assert.strictEqual(priorityRowActions.placement, true);
   assert.strictEqual(priorityRowActions.copyWorks, true);
+  assert.strictEqual(priorityRowActions.selectionCss,'none');
+  assert.strictEqual(priorityRowActions.selectedSubject,true);
+  assert.strictEqual(priorityRowActions.selectedPriority,false);
+  assert.strictEqual(priorityRowActions.copiedSubject,true);
+  assert.strictEqual(priorityRowActions.copiedPriority,false);
+  assert.strictEqual(priorityRowActions.keyboardFocusable,true);
+  assert.strictEqual(priorityRowActions.pointerInteractive,true);
+  assert.strictEqual(priorityRowActions.copySanitized,true);
+  assert.strictEqual(priorityRowActions.bulkSelection,true);
+  assert.strictEqual(priorityRowActions.bulkCopy,true);
+  assert.strictEqual(priorityRowActions.bulkExcluded,true);
   assert.strictEqual(priorityRowActions.ackCollapsed, true);
   for (const field of ['toggleDefault', 'toggleOff', 'toggleOn', 'togglePersisted',
     'toggleRulesUnchanged', 'togglePresentationUnchanged', 'toggleDrafts']) {
@@ -4537,6 +4575,7 @@ async function runBrowserAssertions(client) {
     const hooks = win.__BosunHelperBrowserTest;
     const settings = JSON.parse(JSON.stringify(win.BosunHelperSettings.DEFAULTS));
     settings.features.priorityAlerts = true;
+    settings.priorityRules.exactAlertNames = ['synthetic.repaint'];
     hooks.applySettingsSnapshot(settings, { initial: true }); hooks.injectStyles();
     const row = { Alert: 'synthetic.repaint', Subject: 'synthetic.repaint{host=demo}',
       AlertKey: 'synthetic.repaint{host=demo}', Ago: new Date(Date.now() - 17 * 60 * 1000).toISOString(), State: {
@@ -4851,10 +4890,10 @@ async function runBrowserAssertions(client) {
   const expectedCollapsed = collapsedPriorityIdentity.cases.map(testCase => !testCase.skew && !testCase.duplicateSubject);
   assert.deepStrictEqual(collapsedPriorityIdentity.exactRemoved, expectedCollapsed.map(() => false));
   assert.deepStrictEqual(collapsedPriorityIdentity.snapshotRemoved, expectedCollapsed.map(() => false));
-  assert.deepStrictEqual(collapsedPriorityIdentity.critical, expectedCollapsed);
-  assert.deepStrictEqual(collapsedPriorityIdentity.ackOn, expectedCollapsed);
+  assert.deepStrictEqual(collapsedPriorityIdentity.critical, expectedCollapsed.map(()=>false));
+  assert.deepStrictEqual(collapsedPriorityIdentity.ackOn, expectedCollapsed.map(()=>false));
   assert.deepStrictEqual(collapsedPriorityIdentity.ackOff,
-    expectedCollapsed.map((value, i) => collapsedPriorityIdentity.cases[i].section === 'NeedAck' && value));
+    expectedCollapsed.map(()=>false));
   const indicatorLifecycle = await evaluate(client, `(async () => {
     const results = {};
     for (const mode of ['normal']) {
@@ -5031,6 +5070,7 @@ async function runBrowserAssertions(client) {
     hooks.injectStyles();
     const snapshot = JSON.parse(JSON.stringify(BosunHelperSettings.DEFAULTS));
     snapshot.features.priorityAlerts = true;
+    snapshot.priorityRules.exactAlertNames = ['critical.alert'];
     const change = (path, value) => {
       const before = JSON.parse(JSON.stringify(snapshot));
       const [section, name] = path.split('.');
@@ -5146,6 +5186,7 @@ async function runBrowserAssertions(client) {
     change('priorityRules.exactAlertNames', []);
     const exactOff = [count(mounted.group, true), ...mounted.children.map((panel) => count(panel))];
     change('preferences.priorityCritical', true);
+    change('priorityRules.exactAlertNames', ['critical.alert']);
     const remounted = mount('priority group', [critical, warning]);
     hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     remounted.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
@@ -5154,6 +5195,7 @@ async function runBrowserAssertions(client) {
     hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'replacement', Children: [child(201, 'other.alert', 'warning')] }] } });
     replacement.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     const replaced = [count(replacement.group, true), count(replacement.children[0])];
+    change('priorityRules.exactAlertNames', ['first.alert','second.alert','same.alert']);
     const ambiguous = mount('ambiguous', [child(301, 'first.alert', 'critical')]);
     hooks.applyAlertsPayload({ Groups: { NeedAck: [{ Subject: 'ambiguous', Children: [
       child(301, 'first.alert', 'critical'), child(301, 'second.alert', 'critical')
@@ -5177,6 +5219,7 @@ async function runBrowserAssertions(client) {
       NeedAck: [{ Subject: 'need live', Children: [needLiveChild] }],
       Acknowledged: [{ Subject: 'ack live', Children: [ackLiveCritical, ackLiveWarning] }]
     } };
+    change('priorityRules.exactAlertNames', ['need.live','ack.critical']);
     hooks.applyAlertsPayload(dualPayload);
     const ackDefaultOff = [count(needLive.group, true), count(ackLive.group, true)];
     change('preferences.priorityShowAcknowledged', true);
@@ -5200,6 +5243,7 @@ async function runBrowserAssertions(client) {
     change('priorityRules.exactAlertNames', []);
     change('preferences.priorityCritical', true);
     change('preferences.priorityShowAcknowledged', false);
+    change('priorityRules.exactAlertNames', ['need.live','ack.critical']);
     const ackToggledOff = [count(needLive.group, true), count(ackLive.group, true),
       ...ackLive.children.map((panel) => count(panel))];
     change('preferences.priorityShowAcknowledged', true);
@@ -5211,6 +5255,7 @@ async function runBrowserAssertions(client) {
     hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     ackReplacement.expand(); hooks.runDomRefreshPass({ preserveExistingOnNone: true });
     const ackRemount = [count(ackReplacement.group, true), ...ackReplacement.children.map((panel) => count(panel))];
+    change('priorityRules.exactAlertNames', ['first','second','same']);
     const ackAmbiguous = mount('ack ambiguous', [child(701, 'first', 'critical')], true);
     hooks.applyAlertsPayload({ Groups: { Acknowledged: [{ Subject: 'ack ambiguous', Children: [
       child(701, 'first', 'critical'), child(701, 'second', 'critical')
@@ -5223,6 +5268,7 @@ async function runBrowserAssertions(client) {
     const ackMismatchCounts = [count(ackMismatch.group, true), count(ackMismatch.children[0])];
     hooks.applyAlertsPayload({ Groups: { Acknowledged: [] } });
     const ackDisappeared = [count(ackMismatch.group, true), count(ackMismatch.children[0])];
+    change('priorityRules.exactAlertNames', ['need.collision']);
     const needCollisionChild = child(901, 'need.collision', 'critical');
     const ackCollisionChild = child(901, 'ack.collision', 'warning');
     const needCollision = mount('need collision', [needCollisionChild]);
@@ -5286,12 +5332,12 @@ async function runBrowserAssertions(client) {
     ackTint: 'rgba(49, 93, 156, 0.1)',
     warningStyle: ['rgb(255, 245, 210)', 'rgba(49, 93, 156, 0.1)'],
     unknownCount: 1, unknownStyle: ['rgb(232, 232, 232)', 'rgba(49, 93, 156, 0.1)'], routeCleanup: 0,
-    disabled: [0, 0, 0], reenabled: [1, 1, 0], criticalOff: [0, 0],
+    disabled: [0, 0, 0], reenabled: [1, 1, 0], criticalOff: [1, 1],
     exactOn: [1, 0, 1], exactOff: [0, 0, 0], domReplacement: [1, 1, 0], replaced: [0, 0],
     ambiguousCounts: [0, 0], mismatchCounts: [0, 0], acknowledgedCounts: [0, 0],
-    ackDefaultOff: [1, 0], ackEnabledCollapsed: [1, 1], ackExpanded: [1, 1, 0],
-    ackNote: 0, ackClicks: 1, ackRepeated: [1, 1, 0], bothCriticalOff: [0, 0],
-    ackExactOn: [0, 1, 0, 1], ackToggledOff: [1, 0, 0, 0], bothDisabled: [0, 0, 0, 0],
+    ackDefaultOff: [1, 1], ackEnabledCollapsed: [1, 1], ackExpanded: [1, 1, 0],
+    ackNote: 0, ackClicks: 1, ackRepeated: [1, 1, 0], bothCriticalOff: [1, 1],
+    ackExactOn: [0, 1, 0, 1], ackToggledOff: [1, 1, 1, 0], bothDisabled: [0, 0, 0, 0],
     ackRemount: [1, 1, 0], ackAmbiguousCounts: [0, 0], ackMismatchCounts: [0, 0], ackDisappeared: [0, 0],
     sectionCollision: [1, 1, 0, 0], sectionCollisionSkew: [1, 1, 0, 0],
     ackAmbiguousKeyCounts: [0, 0], ackConflictingCounts: [0, 0]

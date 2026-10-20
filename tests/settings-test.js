@@ -72,7 +72,7 @@ function plain(value) {
 
 async function main() {
   const api = loadApi();
-  assert.strictEqual(api.SCHEMA_VERSION, 1);
+  assert.strictEqual(api.SCHEMA_VERSION, 2);
   assert.strictEqual(api.VERSION_KEY, 'bosunSettingsSchemaVersion');
 
   const defaultsHarness = createStorageHarness();
@@ -85,10 +85,53 @@ async function main() {
   assert.deepStrictEqual(plain(defaultsStore.getSnapshot()), plain(api.DEFAULTS));
   assert.strictEqual(defaultsStore.get('features.grafanaIntegration'), true);
   assert.strictEqual(defaultsStore.get('preferences.autoRefreshIdleSeconds'), 60);
-  assert.strictEqual(defaultsStore.get('features.priorityAlerts'), false);
-  assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), true);
-  assert.strictEqual(defaultsStore.get('preferences.priorityShowAcknowledged'), false);
-  assert.strictEqual(defaultsStore.get('preferences.priorityRuleAction'), true);
+  assert.strictEqual(defaultsStore.get('features.priorityAlerts'), true);
+  assert.strictEqual(defaultsStore.get('preferences.priorityRuleAction'), false);
+  for (const name of ['singleAlertAge','checkboxImprovements','copyButtons','lastActionEnhancements','silencedFilter',
+    'visualNewAlertNotifications','soundNotifications','autoRefresh','grafanaIntegration','priorityAlerts']) {
+    assert.strictEqual(defaultsStore.get('features.'+name),true,'New-install default: '+name);
+  }
+  for (const path of ['features.noCommentFilter','features.acknowledgedCollapse','preferences.noCommentFilterActive',
+    'preferences.acknowledgedCollapsed','preferences.showSilenced','preferences.priorityRuleAction']) {
+    assert.strictEqual(defaultsStore.get(path),false,'New-install default: '+path);
+  }
+  const previousDefaults={'features.noCommentFilter':true,'features.acknowledgedCollapse':true,
+    'features.priorityAlerts':false,'preferences.priorityRuleAction':true};
+  const upgradeHarness=createStorageHarness({[api.VERSION_KEY]:1,
+    'bosunSettingsV1:priorityRules.exactAlertNames':['custom.priority'],
+    'bosunSettingsV1:preferences.priorityCritical':true,
+    'bosunSettingsV1:preferences.priorityShowAcknowledged':false});
+  const upgradeA=api.createSettingsStore({storage:upgradeHarness.storage,storageChanges:upgradeHarness.onChanged});
+  const upgradeB=api.createSettingsStore({storage:upgradeHarness.storage,storageChanges:upgradeHarness.onChanged});
+  await Promise.all([upgradeA.start(),upgradeB.start()]);
+  for(const [path,value] of Object.entries(previousDefaults)){
+    assert.strictEqual(upgradeA.get(path),value,'Preserve previous implicit setting: '+path);
+    assert.strictEqual(upgradeB.get(path),value);
+    assert.strictEqual(upgradeHarness.data[api.STORAGE_PREFIX+path],value);
+  }
+  assert.strictEqual(upgradeHarness.data[api.VERSION_KEY],2);
+  assert.deepStrictEqual(plain(upgradeA.get('priorityRules.exactAlertNames')),['custom.priority']);
+  assert.strictEqual('priorityCritical' in upgradeA.getSnapshot().preferences,false);
+  assert.strictEqual('priorityShowAcknowledged' in upgradeA.getSnapshot().preferences,false);
+  const reloadedUpgrade=api.createSettingsStore({storage:upgradeHarness.storage});await reloadedUpgrade.start();
+  assert.strictEqual(reloadedUpgrade.get('features.priorityAlerts'),false,'Upgrade defaults survive restart');
+  await upgradeA.reset();
+  assert.deepStrictEqual(plain(upgradeA.getSnapshot()),plain(api.DEFAULTS));
+  assert.deepStrictEqual(plain(upgradeB.getSnapshot()),plain(api.DEFAULTS));
+  assert.strictEqual('bosunSettingsV1:preferences.priorityCritical' in upgradeHarness.data,false);
+  assert.strictEqual('bosunSettingsV1:preferences.priorityShowAcknowledged' in upgradeHarness.data,false);
+  upgradeA.destroy();upgradeB.destroy();reloadedUpgrade.destroy();
+  // A delayed storage event must not let migration overwrite a newer explicit value.
+  const upgradeRace=createStorageHarness({[api.VERSION_KEY]:1});const originalGet=upgradeRace.storage.get;let reads=0;
+  upgradeRace.storage.get=(keys,callback)=>{
+    if(++reads===2){upgradeRace.data[api.STORAGE_PREFIX+'features.priorityAlerts']=true;
+      upgradeRace.data[api.STORAGE_PREFIX+'preferences.priorityRuleAction']=false;}
+    originalGet(keys,callback);
+  };
+  const racingUpgrade=api.createSettingsStore({storage:upgradeRace.storage});await racingUpgrade.start();
+  assert.strictEqual(racingUpgrade.get('features.priorityAlerts'),true);
+  assert.strictEqual(racingUpgrade.get('preferences.priorityRuleAction'),false);
+  racingUpgrade.destroy();
   const oldHarness = createStorageHarness({ [api.VERSION_KEY]: 1,
     'bosunSettingsV1:priorityRules.exactAlertNames': ['existing.alert'] });
   const oldStore = api.createSettingsStore({ storage: oldHarness.storage, storageChanges: oldHarness.onChanged });
@@ -103,27 +146,42 @@ async function main() {
   assert.strictEqual(oldStore.get('preferences.priorityRuleAction'), true, 'The preference must converge across tabs');
   await assert.rejects(oldStore.update({ 'preferences.priorityRuleAction': 'false' }), /Invalid setting/);
   await reloadedStore.reset();
-  assert.strictEqual(reloadedStore.get('preferences.priorityRuleAction'), true);
+  assert.strictEqual(reloadedStore.get('preferences.priorityRuleAction'), false);
   oldStore.destroy(); reloadedStore.destroy();
-  const malformedStore = api.createSettingsStore({ storage: createStorageHarness({ [api.VERSION_KEY]: 1,
+  const malformedStore = api.createSettingsStore({ storage: createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:preferences.priorityRuleAction': 'false' }).storage });
   await malformedStore.start();
-  assert.strictEqual(malformedStore.get('preferences.priorityRuleAction'), true, 'Malformed preference must use its boolean default');
+  assert.strictEqual(malformedStore.get('preferences.priorityRuleAction'), false, 'Malformed preference must use its boolean default');
   malformedStore.destroy();
-  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), []);
-  assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: 1 }], 'fresh start must not materialize every default leaf');
+  const priorityDefaults = ['host.disk.free.space.low', 'host.disk.write.latency.high', 'host.disk.read.latency.high',
+    'sw.zfs.free.space.low', 'windows.disk.free.space.low', 'sms.channel.group.dlv.percent.low'];
+  assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), priorityDefaults);
+  assert.strictEqual(new Set(api.DEFAULTS.priorityRules.exactAlertNames).size, priorityDefaults.length);
+  assert.deepStrictEqual(plain(api.SCHEMA.find(item => item.path === 'priorityRules.exactAlertNames').defaultValue), priorityDefaults);
+  for (const saved of [undefined, [], ['custom.alert'], ['host.disk.free.space.low', 'custom.alert']]) {
+    const harness = createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION,
+      'bosunSettingsV1:features.priorityAlerts': true,
+      ...(saved === undefined ? {} : { 'bosunSettingsV1:priorityRules.exactAlertNames': saved }) });
+    const store = api.createSettingsStore({ storage: harness.storage, storageChanges: harness.onChanged });
+    await store.start();
+    assert.deepStrictEqual(plain(store.get('priorityRules.exactAlertNames')), saved ?? priorityDefaults, 'Saved rules must never be merged or reset on upgrade');
+    assert.strictEqual(store.get('features.priorityAlerts'), true);
+    assert.deepStrictEqual(harness.setCalls, [], 'Loading an existing configuration must not rewrite user rules');
+    store.destroy();
+  }
+  assert.deepStrictEqual(defaultsHarness.setCalls, [{ [api.VERSION_KEY]: api.SCHEMA_VERSION }], 'fresh start must not materialize every default leaf');
   await defaultsStore.update({
     'features.priorityAlerts': true,
     'priorityRules.exactAlertNames': [' alpha.alert ', '', 'beta.alert', 'alpha.alert', 7]
   });
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
-  await defaultsStore.update({ 'features.priorityAlerts': false, 'preferences.priorityCritical': false });
+  await defaultsStore.update({ 'features.priorityAlerts': false });
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
-  await defaultsStore.update({ 'preferences.priorityShowAcknowledged': true });
-  assert.strictEqual(defaultsStore.get('preferences.priorityShowAcknowledged'), true);
-  await defaultsStore.update({ 'preferences.priorityShowAcknowledged': false });
+  for (const retired of ['preferences.priorityCritical', 'preferences.priorityShowAcknowledged']) {
+    await assert.rejects(defaultsStore.update({ [retired]: true }), /Unknown setting/);
+    assert.throws(() => defaultsStore.get(retired), /Unknown setting/);
+  }
   assert.deepStrictEqual(plain(defaultsStore.get('priorityRules.exactAlertNames')), ['alpha.alert', 'beta.alert']);
-  assert.strictEqual(defaultsStore.get('preferences.priorityCritical'), false);
   await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': 'alpha.alert' }), /Invalid setting/);
   await assert.rejects(defaultsStore.update({ 'priorityRules.exactAlertNames': ['x'.repeat(257)] }), /Invalid setting/);
   await assert.rejects(defaultsStore.update({
@@ -165,12 +223,13 @@ async function main() {
   assert.deepStrictEqual(migrated.actionTemplates.ack, ['first', 'second']);
   assert.deepStrictEqual(migrated.actionTemplates.close, ['done']);
   await new Promise((resolve) => queueMicrotask(resolve));
-  assert.strictEqual(migrationHarness.data[api.VERSION_KEY], 1);
+  assert.strictEqual(migrationHarness.data[api.VERSION_KEY], api.SCHEMA_VERSION);
   const migratedCanonicalKeys = Object.keys(migrationHarness.setCalls.at(-1) || {}).filter((key) => key.startsWith(api.STORAGE_PREFIX));
   assert.deepStrictEqual(
     migratedCanonicalKeys.sort(),
-    Array.from(api.SCHEMA).filter((entry) => entry.legacyKey).map((entry) => entry.storageKey).sort(),
-    'startup migration must write only canonical leaves backed by valid legacy data'
+    Array.from(api.SCHEMA).filter((entry) => entry.legacyKey || ['features.noCommentFilter','features.acknowledgedCollapse',
+      'features.priorityAlerts','preferences.priorityRuleAction'].includes(entry.path)).map((entry) => entry.storageKey).sort(),
+    'startup migration must preserve legacy data and previous implicit defaults'
   );
   assert.strictEqual(
     migrationHarness.setCalls.some((call) => Object.keys(call).some((key) => key.startsWith('bosunActionTemplatesV1:'))),
@@ -270,7 +329,7 @@ async function main() {
   );
 
   const authoritativeHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:features.copyButtons': false,
     'bosunSettingsV1:preferences.showSilenced': true,
     bosunShowSilenced: true
@@ -284,7 +343,7 @@ async function main() {
   assert.deepStrictEqual(authoritativeHarness.setCalls, [], 'valid canonical/version storage must not be rewritten on start');
 
   const damagedHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:features.copyButtons': 'yes',
     'bosunSettingsV1:preferences.showSilenced': true,
     'bosunSettingsV1:preferences.autoRefreshIdleSeconds': 'broken',
@@ -300,7 +359,7 @@ async function main() {
   assert.strictEqual(damagedStore.get('features.copyButtons'), true);
   assert.strictEqual(damagedStore.get('preferences.showSilenced'), true);
   assert.strictEqual(damagedStore.get('preferences.autoRefreshIdleSeconds'), 60);
-  assert.deepStrictEqual(plain(damagedStore.get('priorityRules.exactAlertNames')), []);
+  assert.deepStrictEqual(plain(damagedStore.get('priorityRules.exactAlertNames')), priorityDefaults);
   assert.strictEqual(damagedStore.get('actionTemplates.note'), null);
   for (const invalidIdle of [null, true, false, [], [30], {}, '   ', '30seconds']) {
     await assert.rejects(
@@ -312,7 +371,7 @@ async function main() {
   assert.strictEqual(damagedStore.get('preferences.autoRefreshIdleSeconds'), 30);
 
   const delayedHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:preferences.showSilenced': true
   });
   let releaseDelayedGet = null;
@@ -384,7 +443,7 @@ async function main() {
     'stale migration verification read rolled back a newer non-migrating leaf'
   );
 
-  const futureRaceHarness = createStorageHarness({ [api.VERSION_KEY]: 1 });
+  const futureRaceHarness = createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   let releaseFutureRaceGet = null;
   futureRaceHarness.storage.get = (keys, callback) => {
     const captured = {};
@@ -410,7 +469,7 @@ async function main() {
   assert.strictEqual(futureRaceHarness.data['bosunSettingsV99:futureOnly'], 'preserve-me');
 
   const delayedFutureDelivery = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     bosunShowSilenced: true
   });
   let releaseDelayedFutureGet = null;
@@ -440,7 +499,7 @@ async function main() {
   await delayedFutureStart;
   assert.strictEqual(delayedFutureDelivery.data[api.VERSION_KEY], 99, 'migration downgraded future version before delayed onChanged');
   assert.strictEqual(
-    delayedFutureDelivery.setCalls.some((call) => call[api.VERSION_KEY] === 1),
+    delayedFutureDelivery.setCalls.some((call) => call[api.VERSION_KEY] === api.SCHEMA_VERSION),
     false,
     'migration wrote schema v1 after authoritative future version appeared'
   );
@@ -468,7 +527,7 @@ async function main() {
   });
   const inverseFutureStart = inverseFutureStore.start();
   await new Promise((resolve) => inverseFutureHarness.storage.set({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:features.copyButtons': false
   }, resolve));
   releaseInverseFutureGet();
@@ -476,7 +535,7 @@ async function main() {
   assert.strictEqual(inverseFutureStore.get('features.copyButtons'), false, 'stale future get overrode newer supported schema');
   await inverseFutureStore.update({ 'features.copyButtons': true });
 
-  const delayedFutureUpdateHarness = createStorageHarness({ [api.VERSION_KEY]: 1 });
+  const delayedFutureUpdateHarness = createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   const delayedFutureUpdateStore = api.createSettingsStore({
     storage: delayedFutureUpdateHarness.storage,
     storageChanges: delayedFutureUpdateHarness.onChanged,
@@ -496,7 +555,7 @@ async function main() {
     'update must not write after an authoritative future schema appears'
   );
 
-  const delayedFutureResetHarness = createStorageHarness({ [api.VERSION_KEY]: 1 });
+  const delayedFutureResetHarness = createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   const delayedFutureResetStore = api.createSettingsStore({
     storage: delayedFutureResetHarness.storage,
     storageChanges: delayedFutureResetHarness.onChanged,
@@ -509,7 +568,7 @@ async function main() {
   assert.deepStrictEqual(delayedFutureResetHarness.removeCalls, []);
 
   const delayedFutureMirrorWarnings = [];
-  const delayedFutureMirrorHarness = createStorageHarness({ [api.VERSION_KEY]: 1 });
+  const delayedFutureMirrorHarness = createStorageHarness({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   const delayedFutureMirrorStore = api.createSettingsStore({
     storage: delayedFutureMirrorHarness.storage,
     storageChanges: delayedFutureMirrorHarness.onChanged,
@@ -531,7 +590,7 @@ async function main() {
   assert.ok(delayedFutureMirrorWarnings.some((message) => /live legacy change/.test(message)));
 
   const reorderedUpdateHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     'bosunSettingsV1:features.copyButtons': true
   });
   const reorderedUpdateStore = api.createSettingsStore({
@@ -545,9 +604,9 @@ async function main() {
   const olderUpdate = reorderedUpdateStore.update({ 'features.copyButtons': false });
   const newerUpdate = reorderedUpdateStore.update({ 'features.copyButtons': true });
   assert.strictEqual(reorderedUpdateReads.length, 2);
-  reorderedUpdateReads[1].callback({ [api.VERSION_KEY]: 1 });
+  reorderedUpdateReads[1].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await newerUpdate;
-  reorderedUpdateReads[0].callback({ [api.VERSION_KEY]: 1 });
+  reorderedUpdateReads[0].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await olderUpdate;
   assert.strictEqual(
     reorderedUpdateHarness.data['bosunSettingsV1:features.copyButtons'],
@@ -557,7 +616,7 @@ async function main() {
   assert.strictEqual(reorderedUpdateStore.get('features.copyButtons'), true);
 
   const reorderedMirrorHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     [sameValueCanonicalKey]: true,
     bosunShowSilenced: true
   });
@@ -574,16 +633,16 @@ async function main() {
   reorderedMirrorHarness.data.bosunShowSilenced = true;
   reorderedMirrorHarness.emit({ bosunShowSilenced: { oldValue: false, newValue: true } });
   assert.strictEqual(reorderedMirrorReads.length, 2);
-  reorderedMirrorReads[1].callback({ [api.VERSION_KEY]: 1 });
+  reorderedMirrorReads[1].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await new Promise((resolve) => setImmediate(resolve));
-  reorderedMirrorReads[0].callback({ [api.VERSION_KEY]: 1 });
+  reorderedMirrorReads[0].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(reorderedMirrorHarness.data[sameValueCanonicalKey], true);
   assert.strictEqual(reorderedMirrorHarness.data.bosunShowSilenced, true);
   assert.strictEqual(reorderedMirrorStore.get('preferences.showSilenced'), true);
 
   const resetInvalidatesMirrorHarness = createStorageHarness({
-    [api.VERSION_KEY]: 1,
+    [api.VERSION_KEY]: api.SCHEMA_VERSION,
     [sameValueCanonicalKey]: false,
     bosunShowSilenced: false
   });
@@ -601,9 +660,9 @@ async function main() {
   });
   const resetAfterMirror = resetInvalidatesMirrorStore.reset();
   assert.strictEqual(resetInvalidatesMirrorReads.length, 2);
-  resetInvalidatesMirrorReads[1].callback({ [api.VERSION_KEY]: 1 });
+  resetInvalidatesMirrorReads[1].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await resetAfterMirror;
-  resetInvalidatesMirrorReads[0].callback({ [api.VERSION_KEY]: 1 });
+  resetInvalidatesMirrorReads[0].callback({ [api.VERSION_KEY]: api.SCHEMA_VERSION });
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(Object.prototype.hasOwnProperty.call(resetInvalidatesMirrorHarness.data, api.VERSION_KEY), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(resetInvalidatesMirrorHarness.data, sameValueCanonicalKey), false);
@@ -680,8 +739,8 @@ async function main() {
   await storeA.update({ 'priorityRules.exactAlertNames': [' shared.alert '], 'features.priorityAlerts': true });
   assert.deepStrictEqual(plain(storeB.get('priorityRules.exactAlertNames')), ['shared.alert']);
   assert.strictEqual(storeB.get('features.priorityAlerts'), true);
-  await storeA.update({ 'preferences.priorityShowAcknowledged': true });
-  assert.strictEqual(storeB.get('preferences.priorityShowAcknowledged'), true);
+  await storeA.update({ 'preferences.priorityRuleAction': true });
+  assert.strictEqual(storeB.get('preferences.priorityRuleAction'), true);
 
   await new Promise((resolve) => shared.storage.set({ bosunSoundAlertsEnabled: false }, resolve));
   await new Promise((resolve) => setImmediate(resolve));
