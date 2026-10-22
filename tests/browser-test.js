@@ -7,6 +7,7 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
+const runAcknowledgedCompactAssertions = require('./acknowledged-browser-regression');
 
 const root = path.resolve(__dirname, '..');
 const CDP_TIMEOUT_MS = 15_000;
@@ -1814,6 +1815,7 @@ async function runPrimeMarkerStartupAssertions(client) {
 }
 
 async function runBrowserAssertions(client) {
+  await runAcknowledgedCompactAssertions({ client, evaluate, instrumentContentSource, root });
   await runPrimeMarkerStartupAssertions(client);
   await runAngularGroupIdentityAssertions(client);
   await runAngularGroupIdentityAssertions(client, true);
@@ -7306,7 +7308,8 @@ async function main() {
     const loaded = client.once('Page.loadEventFired');
     await client.send('Page.navigate', { url: pageUrl });
     await loaded;
-    if (process.argv.includes('--single-alert-age-expand-identity-regression') || process.argv.includes('--single-alert-age-inherited-child-regression') || process.argv.includes('--single-alert-age-visible-id-format-regression')) await runAngularGroupIdentityAssertions(client, false, false, false, true);
+    if (process.argv.includes('--acknowledged-compact-regression')) await runAcknowledgedCompactAssertions({ client, evaluate, instrumentContentSource, root });
+    else if (process.argv.includes('--single-alert-age-expand-identity-regression') || process.argv.includes('--single-alert-age-inherited-child-regression') || process.argv.includes('--single-alert-age-visible-id-format-regression')) await runAngularGroupIdentityAssertions(client, false, false, false, true);
     else if (process.argv.includes('--single-alert-age-empty-section-regression')) await runAngularGroupIdentityAssertions(client, false, false, true);
     else if (process.argv.includes('--single-alert-age-source-regression')) await runAngularGroupIdentityAssertions(client, false, true);
     else if (process.argv.includes('--single-alert-age-subject-regression')) await runAngularGroupIdentityAssertions(client, true);

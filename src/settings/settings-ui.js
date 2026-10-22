@@ -26,8 +26,6 @@
       title: 'Алерты',
       fields: Object.freeze([
         Object.freeze({ path: 'features.silencedFilter', label: 'Скрывать Silenced' }),
-        Object.freeze({ path: 'features.noCommentFilter', label: 'Фильтр «Без комментария»' }),
-        Object.freeze({ path: 'features.acknowledgedCollapse', label: 'Сворачивать Acknowledged' }),
         Object.freeze({ path: 'features.visualNewAlertNotifications', label: 'Визуальные уведомления о новых алертах' })
       ])
     }),

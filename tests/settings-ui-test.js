@@ -327,6 +327,8 @@ async function main() {
       copyButtons: false,
       lastActionEnhancements: true,
       soundNotifications: true,
+      noCommentFilter: true,
+      acknowledgedCollapse: true,
       grafanaIntegration: true,
       priorityAlerts: false
     },
@@ -339,6 +341,8 @@ async function main() {
     'features.copyButtons',
     'features.lastActionEnhancements',
     'features.soundNotifications',
+    'features.noCommentFilter',
+    'features.acknowledgedCollapse',
     'features.grafanaIntegration',
     'features.priorityAlerts',
     'preferences.priorityCritical',
@@ -388,6 +392,8 @@ async function main() {
   const priorityNames = harness.document.querySelector('[data-setting-path="priorityRules.exactAlertNames"]');
   assert.ok(priorityToggle && priorityNames, 'Priority controls must render');
   assert.strictEqual(criticalToggle,null);assert.strictEqual(acknowledgedToggle,null);
+  assert.strictEqual(harness.document.querySelector('[data-setting-path="features.noCommentFilter"]'), null);
+  assert.strictEqual(harness.document.querySelector('[data-setting-path="features.acknowledgedCollapse"]'), null);
   assert.strictEqual(priorityNames.value, 'saved.alert');
   assert.ok(harness.document.querySelector('[data-priority-section-reset]'));
   assert.ok(harness.document.querySelectorAll('.bosun-settings-group-title')

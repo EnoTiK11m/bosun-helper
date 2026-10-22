@@ -9,6 +9,9 @@
   const HIDDEN_CLASS = 'bosun-silence-hidden';
   const USER_COMMENT_FILTER_HIDDEN_CLASS = 'bosun-user-comment-hidden';
   const ACKNOWLEDGED_COLLAPSED_CLASS = 'bosun-acknowledged-collapsed';
+  const ACKNOWLEDGED_CONTROLS_ID = 'bosun-acknowledged-controls';
+  const ACKNOWLEDGED_HEADER_ROW_CLASS = 'bosun-acknowledged-header-row';
+  const acknowledgedControlNodes = new WeakSet();
   const TOP_BAR_ID = 'bosun-top-controls-bar';
   const TOP_BAR_STATUS_ID = 'bosun-top-controls-status';
   const NEW_ALERT_NOTICE_ID = 'bosun-new-alerts-notice';
@@ -438,6 +441,10 @@
   }
 
   function isFeatureEnabled(name) {
+    // Retain stored compatibility values, but pause the comment filter and
+    // expose Ack compact mode directly on the page, without a feature gate.
+    if (name === 'noCommentFilter') return false;
+    if (name === 'acknowledgedCollapse') return true;
     return settingsSnapshot?.features?.[name] !== false;
   }
 
@@ -1124,12 +1131,27 @@
 
   function getAcknowledgedHeading() {
     const root = getAcknowledgedRoot();
+    if (!root) return null;
+    const headingLabel = heading => Array.from(heading.childNodes)
+      .filter(node => node.id !== ACKNOWLEDGED_CONTROLS_ID)
+      .map(node => node.textContent || '').join(' ').trim();
+    // Upstream ackgroup.html renders this heading inside the directive root.
+    // ng-bind owns its contents, so controls must be a sibling in the header row.
+    const headings = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"]')).filter(heading =>
+      !heading.closest('.panel') && (heading.getAttribute('ng-bind') === 'ack' ||
+        /^Acknowledged\b/i.test(headingLabel(heading))));
+    if (headings.length) return headings.length === 1 ? headings[0] : null;
     let node = root?.previousElementSibling || null;
     let guard = 0;
 
     while (node && guard < 8) {
       const text = node.textContent?.replace(/\s+/g, ' ').trim() || '';
-      if (/^Acknowledged\b/i.test(text)) return node;
+      if (node.hasAttribute('ts-ack-group')) return null;
+      if (node.id !== ACKNOWLEDGED_CONTROLS_ID) {
+        const heading = node.matches('h1, h2, h3, [role="heading"]')
+          ? node : node.querySelector('h1, h2, h3, [role="heading"]');
+        if (heading && /^Acknowledged\b/i.test(headingLabel(heading))) return heading;
+      }
       if (/^Needs Acknowledgement\b/i.test(text)) return null;
       node = node.previousElementSibling;
       guard += 1;
@@ -1180,7 +1202,7 @@
     ensureToggleExists();
     if (isFeatureEnabled('silencedFilter')) applyVisibility();
     if (isFeatureEnabled('acknowledgedCollapse')) applyAcknowledgedCollapse();
-    if (isFeatureEnabled('noCommentFilter')) applyUserCommentFilter();
+    applyUserCommentFilter();
     ensureCopyButtons();
     ensureGrafanaQueryButtons();
     ensurePriorityActions();
@@ -1208,6 +1230,9 @@
       refreshCoordinatorApi?.stop?.();
       settingsUi?.close?.({ restoreFocus: false });
       document.getElementById(TOP_BAR_ID)?.remove();
+      clearOwnedElements(`#${ACKNOWLEDGED_CONTROLS_ID}`);
+      clearOwnedClass(ACKNOWLEDGED_HEADER_ROW_CLASS);
+      clearOwnedClass(ACKNOWLEDGED_COLLAPSED_CLASS);
       clearAlertDerivedState();
     }
 
@@ -1249,10 +1274,149 @@
   }
 
   function applyAcknowledgedCollapse() {
-    const root = getAcknowledgedRoot();
+    const roots = document.querySelectorAll('[ts-ack-group="schedule.Groups.Acknowledged"]');
+    const root = roots[0] || null;
+    // A cloned/replaced section can retain our hidden classes. Ambiguous roots
+    // cannot prove identity; restore every copy, including children and stale
+    // nodes outside the current section. Do not toggle valid hidden nodes on
+    // every repaint: that would feed our own mutation observers.
+    for (const node of document.querySelectorAll(`.${ACKNOWLEDGED_COLLAPSED_CLASS}`)) {
+      if (roots.length !== 1 || !root.contains(node)) {
+        setExtensionClass(node, ACKNOWLEDGED_COLLAPSED_CLASS, false);
+      }
+    }
+    if (!isDashboardEnhancementsPage() || !root) {
+      clearOwnedElements(`#${ACKNOWLEDGED_CONTROLS_ID}`);
+      clearOwnedClass(ACKNOWLEDGED_HEADER_ROW_CLASS);
+      clearOwnedClass(ACKNOWLEDGED_COLLAPSED_CLASS);
+      return;
+    }
+    ensureAcknowledgedCollapseControls();
     const heading = getAcknowledgedHeading();
-    setExtensionClass(root, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
-    setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, acknowledgedCollapseEnabled);
+    // Retire whole-section hiding; Angular models and native counts stay intact.
+    setExtensionClass(root, ACKNOWLEDGED_COLLAPSED_CLASS, false);
+    setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, false);
+    const compact = acknowledgedCollapseEnabled && isFeatureEnabled('priorityAlerts');
+    const summary = document.querySelector(`#${ACKNOWLEDGED_CONTROLS_ID} .bosun-ack-summary`);
+    if (!compact) {
+      for (const panel of root.querySelectorAll(`.${ACKNOWLEDGED_COLLAPSED_CLASS}`)) {
+        setExtensionClass(panel, ACKNOWLEDGED_COLLAPSED_CLASS, false);
+      }
+      if (summary) {
+        for (const label of summary.querySelectorAll('.bosun-ack-priority-label, .bosun-ack-hidden-label')) {
+          if (label.textContent) label.textContent = '';
+        }
+        summary.hidden = true;
+        summary.removeAttribute('aria-label');
+        summary.removeAttribute('title');
+      }
+      updateAcknowledgedCollapseControl();
+      return;
+    }
+    const groups = getGroupPanels(root), counts = new Map();
+    for (const section of [getNeedsAckRoot(), root]) for (const child of getChildAlertPanels(section)) {
+      const id = getPanelIdFromHeading(getChildHeading(child));
+      if (id) counts.set(id, (counts.get(id) || 0) + 1);
+    }
+    const decisions = groups.map(panel => readAcknowledgedCompactState(panel, counts));
+    const recordCounts = new Map();
+    for (const decision of decisions) if (decision) {
+      recordCounts.set(decision.record, (recordCounts.get(decision.record) || 0) + 1);
+    }
+    const hidden = new Set();
+    let hiddenAlerts = 0, hiddenGroups = 0, priorityCount = 0, complete = true;
+    groups.forEach((panel, position) => {
+      const decision = decisions[position];
+      if (!decision || recordCounts.get(decision.record) !== 1) { complete = false; return; }
+      const { children, priorities } = decision;
+      priorityCount += priorities.filter((priority, index) => priority &&
+        !(children[index] || panel).closest(`.${HIDDEN_CLASS}`)).length;
+      if (priorities.every(priority => !priority)) {
+        hidden.add(panel); hiddenGroups += 1; hiddenAlerts += priorities.length;
+      }
+      children.forEach((child, index) => {
+        if (!priorities[index]) {
+          hidden.add(child);
+          if (!hidden.has(panel)) hiddenAlerts += 1;
+        }
+      });
+    });
+    for (const panel of root.querySelectorAll(`.${ACKNOWLEDGED_COLLAPSED_CLASS}`)) {
+      if (!hidden.has(panel)) setExtensionClass(panel, ACKNOWLEDGED_COLLAPSED_CLASS, false);
+    }
+    for (const panel of hidden) setExtensionClass(panel, ACKNOWLEDGED_COLLAPSED_CLASS, true);
+    if (summary) {
+      const priorityLabel = summary.querySelector('.bosun-ack-priority-label');
+      const hiddenLabel = summary.querySelector('.bosun-ack-hidden-label');
+      const label = `${complete ? '' : '≥ '}${formatAcknowledgedPriorityCount(priorityCount)}`;
+      if (priorityLabel && priorityLabel.textContent !== label) priorityLabel.textContent = label;
+      const hiddenText = `${hiddenAlerts} скрыто`;
+      if (hiddenLabel && hiddenLabel.textContent !== hiddenText) hiddenLabel.textContent = hiddenText;
+      summary.hidden = false;
+      summary.title = `${complete ? '' : 'Как минимум '}${formatAcknowledgedPriorityCount(priorityCount)}. Приоритетные — с учётом Silenced. ` +
+        `Скрыто обычных алертов: ${hiddenAlerts}, групп: ${hiddenGroups}. ` +
+        (complete ? '' : 'Непроверенные алерты оставлены видимыми. ') + 'Фильтры Silenced и компактного режима могут пересекаться.';
+      summary.setAttribute('aria-label', summary.title);
+    }
+    updateAcknowledgedCollapseControl();
+  }
+
+  function formatAcknowledgedPriorityCount(count) {
+    const tail = count % 100;
+    const singular = count % 10 === 1 && tail !== 11;
+    return `${count} ${singular ? 'приоритетный' : 'приоритетных'}`;
+  }
+
+  function readAcknowledgedCompactState(panel, counts) {
+    // A missing Priority marker is not proof that a panel is ordinary. Hiding
+    // requires complete composition, globally unique snapshot IDs/keys and the
+    // existing Priority name resolver + matcher. All failures leave it visible.
+    if (!alertDataIndexReady || !acknowledgedPriorityIndex || !modelGroupSnapshotIndexes ||
+      !priorityRuleIdentityIndex || !isFeatureEnabled('priorityAlerts')) return null;
+    const root = getAcknowledgedRoot(), heading = getPanelHeading(panel);
+    const payload = latestAlertsPayload, settings = settingsSnapshot;
+    const generation = alertsPayloadApplyVersion, indexGeneration = alertMarkerIndexGeneration;
+    const indexes = modelGroupSnapshotIndexes, children = getGroupChildPanels(panel);
+    const current = () => root?.isConnected && panel.isConnected && root === getAcknowledgedRoot() &&
+      document.querySelectorAll('[ts-ack-group="schedule.Groups.Acknowledged"]').length === 1 &&
+      panel.closest('[ts-ack-group]') === root && getPanelHeading(panel) === heading &&
+      latestAlertsPayload === payload && settingsSnapshot === settings &&
+      generation === alertsPayloadApplyVersion && indexGeneration === alertMarkerIndexGeneration &&
+      indexes === modelGroupSnapshotIndexes;
+    if (!current()) return null;
+    let rows, priorities;
+    if (children.length) {
+      rows = []; priorities = [];
+      for (const child of children) {
+        if (findParentGroupPanelForChild(child) !== panel) return null;
+        const name = resolvePriorityActionName(child, root, 'Acknowledged', counts);
+        const state = resolveChildIndexedState(child, panel, acknowledgedPriorityIndex);
+        const id = getPanelIdFromHeading(getChildHeading(child));
+        if (!name || !state || !id) return null;
+        const priority = priorityApi?.classify?.({ identity: 'resolved', alertName: name }, settings)?.priority;
+        if (typeof priority !== 'boolean' || priority !== state.priority) return null;
+        rows.push({ id }); priorities.push(priority);
+      }
+    } else {
+      let identity;
+      try { identity = groupIdentityApi?.read?.(panel); } catch (_) { return null; }
+      if (!current() || !identity || identity.rejected || identity.section !== 'Acknowledged' ||
+        !Array.isArray(identity.children) || !identity.children.length ||
+        identity.children.some(row => typeof row?.id !== 'string' || typeof row.key !== 'string') ||
+        getGroupChildPanels(panel).length) return null;
+      rows = identity.children;
+    }
+    const record = indexes.Acknowledged?.get(rows.map(row => row.id).sort().join(','));
+    if (!record || record.children.length !== rows.length || new Set(rows.map(row => row.id)).size !== rows.length) return null;
+    if (!children.length) {
+      if (rows.some(row => !record.children.some(expected => expected.id === row.id && expected.key === row.key))) return null;
+      priorities = rows.map(row => {
+        const name = priorityRuleIdentityIndex.childrenBySection.get('Acknowledged')?.get(row.id)?.name;
+        return name ? priorityApi?.classify?.({ identity: 'resolved', alertName: name }, settings)?.priority : null;
+      });
+    }
+    if (priorities.some(value => typeof value !== 'boolean') || !current()) return null;
+    return { record, children, priorities };
   }
 
   function readChildIndexedState(key, identityType, index = null) {
@@ -1351,7 +1515,7 @@
     const needsAckRoot = getNeedsAckRoot();
     if (!needsAckRoot) return;
 
-    if (!userCommentFilterEnabled || !alertDataIndexReady) {
+    if (!isFeatureEnabled('noCommentFilter') || !userCommentFilterEnabled || !alertDataIndexReady) {
       needsAckRoot.querySelectorAll(`.${USER_COMMENT_FILTER_HIDDEN_CLASS}`).forEach((panel) => {
         setExtensionClass(panel, USER_COMMENT_FILTER_HIDDEN_CLASS, false);
       });
@@ -1833,6 +1997,15 @@
 
   function applyFeatureLifecycle(name, enabled, initial) {
     if (name === 'lastActionEnhancements') return;
+    if (name === 'noCommentFilter') {
+      clearOwnedClass(USER_COMMENT_FILTER_HIDDEN_CLASS);
+      clearOwnedElements('.bosun-user-comment-filter-wrap');
+      return;
+    }
+    if (name === 'acknowledgedCollapse') {
+      applyAcknowledgedCollapse();
+      return;
+    }
 
     if (!enabled) {
       if (name === 'singleAlertAge') singleAlertAgeApi?.clear?.();
@@ -1847,14 +2020,6 @@
         clearOwnedClass(HIDDEN_CLASS);
         clearOwnedElements(`.${SILENCED_BADGE_CLASS}, #${TOGGLE_ID}`);
         hiddenCount = 0;
-      }
-      if (name === 'noCommentFilter') {
-        clearOwnedClass(USER_COMMENT_FILTER_HIDDEN_CLASS);
-        clearOwnedElements('.bosun-user-comment-filter-wrap');
-      }
-      if (name === 'acknowledgedCollapse') {
-        clearOwnedClass(ACKNOWLEDGED_COLLAPSED_CLASS);
-        clearOwnedElements('.bosun-acknowledged-collapse-wrap');
       }
       if (name === 'soundNotifications') {
         soundApi?.destroy?.();
@@ -2343,17 +2508,20 @@
 
   function updateAcknowledgedCollapseControl() {
     const button = document.getElementById(ACKNOWLEDGED_COLLAPSE_TOGGLE_ID);
-    setToolbarToggleButtonState(button, acknowledgedCollapseEnabled, {
-      onIcon: '-',
-      offIcon: '+',
-      label: acknowledgedCollapseEnabled ? 'Показать Ack' : 'Скрыть Ack',
-      offUsesNeutral: true
-    });
-    if (button) {
-      button.title = acknowledgedCollapseEnabled
-        ? 'Секция Acknowledged скрыта'
-        : 'Секция Acknowledged показана';
-    }
+    if (!button) return;
+    const enabled = isFeatureEnabled('priorityAlerts');
+    const compact = acknowledgedCollapseEnabled && enabled;
+    const label = compact ? 'Показать все' : 'Скрыть обычные';
+    const labelNode = button.querySelector('.bosun-ack-toggle-label');
+    if (labelNode && labelNode.textContent !== label) labelNode.textContent = label;
+    const icon = button.querySelector('.fa');
+    const iconClass = compact ? 'fa fa-eye' : 'fa fa-eye-slash';
+    if (icon && icon.className !== iconClass) icon.className = iconClass;
+    button.disabled = !enabled;
+    button.setAttribute('aria-pressed', String(compact));
+    button.setAttribute('aria-expanded', String(!compact));
+    button.title = enabled ? 'Приоритетные и непроверенные алерты остаются видимыми'
+      : 'Для компактного режима включите Priority Alerts';
   }
 
   function updateDiagnosticsControl() {
@@ -2475,29 +2643,82 @@
     updateUserCommentFilterControl();
   }
 
-  function ensureAcknowledgedCollapseControls(actions) {
-    if (!isFeatureEnabled('acknowledgedCollapse')) {
-      actions.querySelector('.bosun-acknowledged-collapse-wrap')?.remove();
-      return;
-    }
-    let wrap = actions.querySelector('.bosun-acknowledged-collapse-wrap');
-    if (!wrap) {
-      wrap = document.createElement('div');
-      wrap.className = 'bosun-toolbar-group bosun-acknowledged-collapse-wrap';
+  function getAcknowledgedControlsMount() {
+    const root = getAcknowledgedRoot(), heading = getAcknowledgedHeading();
+    const bound = heading?.matches('[ng-bind], [ng-bind-html], [ng-bind-template]');
+    const parent = bound ? heading.parentElement : heading || root;
+    const row = bound && parent !== root && parent.matches('.clearfix') &&
+      !parent.querySelector('.panel, [ts-ack-group]') ? parent : null;
+    return { root, heading, bound, parent, row };
+  }
 
+  function ensureAcknowledgedCollapseControls() {
+    const root = getAcknowledgedRoot();
+    if (!isDashboardEnhancementsPage() || !root) return;
+    clearOwnedElements('.bosun-acknowledged-collapse-wrap');
+    const mount = getAcknowledgedControlsMount();
+    for (const row of document.querySelectorAll(`.${ACKNOWLEDGED_HEADER_ROW_CLASS}`)) {
+      if (row !== mount.row) setExtensionClass(row, ACKNOWLEDGED_HEADER_ROW_CLASS, false);
+    }
+    if (mount.row) setExtensionClass(mount.row, ACKNOWLEDGED_HEADER_ROW_CLASS, true);
+    let wrap = document.getElementById(ACKNOWLEDGED_CONTROLS_ID);
+    // Old panels and DOM clones have no current listener ownership. Rebuild
+    // only extension controls; native nodes and their bindings stay intact.
+    if (wrap && !acknowledgedControlNodes.has(wrap)) { wrap.remove(); wrap = null; }
+    for (const duplicate of document.querySelectorAll(`#${ACKNOWLEDGED_CONTROLS_ID}`)) {
+      if (duplicate !== wrap) duplicate.remove();
+    }
+    if (!wrap) {
+      wrap = document.createElement('span');
+      wrap.id = ACKNOWLEDGED_CONTROLS_ID;
+      wrap.className = 'bosun-acknowledged-controls';
+      const summary = document.createElement('span');
+      summary.className = 'bosun-ack-summary';
+      summary.id = 'bosun-acknowledged-summary';
+      const priority = document.createElement('span');
+      priority.className = 'bosun-ack-priority';
+      const flag = document.createElement('span');
+      flag.className = 'fa fa-flag';
+      flag.setAttribute('aria-hidden', 'true');
+      const priorityLabel = document.createElement('span');
+      priorityLabel.className = 'bosun-ack-priority-label';
+      const hiddenLabel = document.createElement('span');
+      hiddenLabel.className = 'bosun-ack-hidden-label';
+      priority.append(flag, priorityLabel);
+      summary.append(priority, hiddenLabel);
       const button = document.createElement('button');
       button.type = 'button';
       button.id = ACKNOWLEDGED_COLLAPSE_TOGGLE_ID;
-      button.className = 'bosun-toolbar-btn';
-      button.innerHTML = `
-        <span class="bosun-toolbar-btn-icon">+</span>
-        <span class="bosun-toolbar-btn-label">Скрыть Ack</span>
-      `;
+      button.className = 'btn btn-default btn-xs';
+      const icon = document.createElement('span');
+      icon.className = 'fa fa-eye-slash';
+      icon.setAttribute('aria-hidden', 'true');
+      const labelNode = document.createElement('span');
+      labelNode.className = 'bosun-ack-toggle-label';
+      button.append(icon, labelNode);
+      button.setAttribute('aria-describedby', summary.id);
       button.addEventListener('click', handleAcknowledgedCollapseToggle);
-      wrap.appendChild(button);
-      actions.appendChild(wrap);
+      wrap.append(summary, button);
+      acknowledgedControlNodes.add(wrap);
     }
-
+    if (mount.bound) {
+      // Preserve the original heading → expand → native controls order. Only
+      // our own element moves, after all native siblings in the same row.
+      if (wrap.parentElement !== mount.parent || mount.parent.lastElementChild !== wrap) mount.parent.appendChild(wrap);
+    } else if (wrap.parentElement !== mount.parent) {
+      // Unbound legacy headings can safely host the inline control. If no
+      // heading is recognised, show only the small control at the section start.
+      if (mount.heading) mount.parent.appendChild(wrap);
+      else mount.parent.insertBefore(wrap, mount.parent.firstChild);
+    }
+    if (!root.id) {
+      let suffix = 0;
+      let id;
+      do { id = 'bosun-acknowledged-content-' + suffix++; }
+      while (document.getElementById(id));
+      root.id = id;
+    }
+    wrap.querySelector('button').setAttribute('aria-controls', root.id);
     updateAcknowledgedCollapseControl();
   }
 
@@ -2730,7 +2951,6 @@
     if (!actions) return;
     ensureSoundAlertsControls(actions);
     ensureUserCommentFilterControls(actions);
-    ensureAcknowledgedCollapseControls(actions);
     ensureAutoRefreshControls(actions);
     ensureToolbarStatusIndicator(actions);
     ensureNewAlertNotice();
@@ -3697,6 +3917,7 @@
         ensurePriorityMarker(title, true, show && resolveGroupPriority(panel, index, domIdCounts));
       }
     }
+    applyAcknowledgedCollapse();
   }
 
   function applyNeedsAckMarkersFromData(options = {}) {
@@ -3949,6 +4170,7 @@
     function isExtensionOwnedNode(node) {
       if (!node || node.nodeType !== 1) return false;
       return Boolean(
+        node.id === ACKNOWLEDGED_CONTROLS_ID || node.closest?.(`#${ACKNOWLEDGED_CONTROLS_ID}`) ||
         singleAlertAgeApi?.isSynchronizedMutationNode?.(node) ||
         node.id === TOP_BAR_ID ||
         node.closest?.(`#${TOP_BAR_ID}`) ||
@@ -4020,6 +4242,7 @@
 
     function isUiRelevantNode(node) {
       if (!node || node.nodeType !== 1) return false;
+      if (node.id === ACKNOWLEDGED_CONTROLS_ID || node.closest?.(`#${ACKNOWLEDGED_CONTROLS_ID}`)) return false;
       if (singleAlertAgeApi?.isSynchronizedMutationNode?.(node)) return false;
       if (node.id === TOGGLE_ID || node.closest?.(`#${TOGGLE_ID}`)) return false;
       if (node.id === TOP_BAR_ID || node.closest?.(`#${TOP_BAR_ID}`)) return false;
@@ -4186,6 +4409,16 @@
       } else if (isDashboardEnhancementsPage()) {
         const rootMutations = mutations.filter(mutationContainsDashboardRoot);
         if (rootMutations.length) processMutations(rootMutations);
+        else {
+          // Header-only Angular replacement may sit outside the scoped roots.
+          // Reuse the UI refresh without requesting new alert data.
+          const mount = getAcknowledgedControlsMount();
+          const controls = document.getElementById(ACKNOWLEDGED_CONTROLS_ID);
+          if (mount.root && (controls?.parentElement !== mount.parent ||
+            (mount.bound && mount.parent.lastElementChild !== controls))) {
+            scheduleRefresh({ skipSingleAlertAge: true });
+          }
+        }
       }
     });
 

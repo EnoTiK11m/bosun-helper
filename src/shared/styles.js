@@ -91,6 +91,81 @@
 
       .${hiddenClass}, .${userCommentFilterHiddenClass}, .${acknowledgedCollapsedClass} { display: none !important; }
 
+      .bosun-acknowledged-header-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 3px 8px;
+      }
+      .bosun-acknowledged-header-row::before, .bosun-acknowledged-header-row::after { content: none; }
+      .bosun-acknowledged-header-row > .pull-right { margin-left: auto; }
+      .bosun-acknowledged-controls {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+        box-sizing: border-box;
+        min-width: 0;
+        max-width: 100%;
+        margin-left: 8px;
+        padding-left: 8px;
+        border-left: 1px solid #ddd;
+        vertical-align: middle;
+        font-size: 12px;
+        line-height: 1.5;
+        font-weight: normal;
+        color: inherit;
+      }
+      .bosun-acknowledged-header-row > .bosun-acknowledged-controls { margin-left: 0; }
+      .bosun-acknowledged-controls .bosun-ack-summary {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+        max-width: 100%;
+        font-size: 12px;
+      }
+      .bosun-acknowledged-controls .bosun-ack-summary[hidden] { display: none; }
+      .bosun-ack-priority {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 0 4px;
+        border-radius: 3px;
+        background: rgba(49,93,156,.08);
+        white-space: nowrap;
+      }
+      .bosun-ack-priority > .fa { color: #315d9c; }
+      .bosun-ack-hidden-label { opacity: .7; white-space: nowrap; }
+      .bosun-acknowledged-controls button {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        flex: 0 0 auto;
+        padding: 1px 5px;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        font: inherit;
+        white-space: nowrap;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      .bosun-acknowledged-controls button:not(:disabled):hover {
+        background: rgba(128,128,128,.14);
+        border-color: #adadad;
+      }
+      .bosun-acknowledged-controls button:focus-visible {
+        outline: 2px solid #315d9c;
+        outline-offset: 2px;
+        background: rgba(128,128,128,.14);
+      }
+      .bosun-acknowledged-controls button:disabled { cursor: default; opacity: .65; }
+      .bosun-acknowledged-controls, .bosun-acknowledged-controls * {
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
       .${copyButtonClass}, .${copyAllButtonClass}, .${copyLastActionButtonClass}, .${grafanaQueryButtonClass} {
         margin-left: 8px;
         padding: 1px 6px;
