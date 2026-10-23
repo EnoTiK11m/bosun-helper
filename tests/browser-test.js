@@ -1,19 +1,18 @@
 'use strict';
 
 const assert = require('assert');
-const fs = require('fs');
-const http = require('http');
-const net = require('net');
 const os = require('os');
 const path = require('path');
-const { spawn, spawnSync } = require('child_process');
 const runAcknowledgedCompactAssertions = require('./acknowledged-browser-regression');
-const { selection, checkContext, writeBrowserReport } = require('../scripts/check-context');
+const { selection, writeBrowserReport } = require('../scripts/check-context');
+const { evaluate } = require('./browser/harness/cdp-client');
+const { withBrowserSession, removeTemporaryProfile } = require('./browser/harness/chromium');
+const { createScriptLoader } = require('./browser/harness/script-loader');
 
 selection('test:browser', process.env, process.argv.slice(2));
 
 const root = path.resolve(__dirname, '..');
-const CDP_TIMEOUT_MS = 15_000;
+const { readTestScript, instrumentContentSource } = createScriptLoader(root);
 
 function outputFilter(query, tags) {
   let constant = 'vector(1)';
@@ -26,89 +25,6 @@ function outputFilter(query, tags) {
 
 if (typeof WebSocket !== 'function') {
   throw new Error('Browser tests require Node.js with global WebSocket support (Node.js 22+ recommended).');
-}
-
-function executableFromCommand(command) {
-  const lookup = process.platform === 'win32' ? 'where.exe' : 'which';
-  const result = spawnSync(lookup, [command], { encoding: 'utf8' });
-  if (result.status !== 0) return '';
-  return result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean) || '';
-}
-
-function findBrowserExecutable() {
-  const configured = String(process.env.BOSUN_HELPER_BROWSER || '').trim();
-  if (configured) {
-    const resolved = fs.existsSync(configured) ? configured : executableFromCommand(configured);
-    if (resolved) return resolved;
-    throw new Error(`BOSUN_HELPER_BROWSER does not resolve to an executable: ${configured}`);
-  }
-
-  const candidates = process.platform === 'win32'
-    ? [
-        path.join(process.env.PROGRAMFILES || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(process.env.LOCALAPPDATA || '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        path.join(process.env.PROGRAMFILES || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-        path.join(process.env['PROGRAMFILES(X86)'] || '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')
-      ]
-    : [
-        executableFromCommand('google-chrome'),
-        executableFromCommand('google-chrome-stable'),
-        executableFromCommand('chromium'),
-        executableFromCommand('chromium-browser'),
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium'
-      ];
-  const found = candidates.find((candidate) => candidate && fs.existsSync(candidate));
-  if (found) return found;
-  throw new Error(
-    'Chrome/Chromium/Edge was not found. Install one or set BOSUN_HELPER_BROWSER to its executable.'
-  );
-}
-
-function reservePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address();
-      server.close((error) => error ? reject(error) : resolve(port));
-    });
-  });
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-async function removeTemporaryProfile(profileDirectory, options = {}) {
-  const resolvedProfile = path.resolve(profileDirectory);
-  const resolvedTemp = path.resolve(os.tmpdir());
-  assert.ok(
-    resolvedProfile.startsWith(`${resolvedTemp}${path.sep}`) &&
-      path.basename(resolvedProfile).startsWith('bosun-helper-browser-'),
-    `Refusing to remove unexpected browser profile path: ${resolvedProfile}`
-  );
-  const remove = options.remove || ((target) => fs.promises.rm(target, {
-    recursive: true,
-    force: true
-  }));
-  const wait = options.wait || delay;
-  const maxAttempts = options.maxAttempts || 12;
-  let lastError = null;
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    try {
-      await remove(resolvedProfile);
-      return;
-    } catch (error) {
-      lastError = error;
-      if (!['EACCES', 'EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error?.code)) throw error;
-      if (attempt + 1 < maxAttempts) {
-        await wait(Math.min(1000, 100 * (2 ** attempt)));
-      }
-    }
-  }
-  throw lastError || new Error('Temporary browser profile cleanup failed');
 }
 
 async function testTemporaryProfileCleanupRetry() {
@@ -133,262 +49,9 @@ async function testTemporaryProfileCleanupRetry() {
   assert.deepStrictEqual(attemptedDelays, [100, 200]);
 }
 
-function waitForBrowserExit(browser, timeoutMs) {
-  if (browser.exitCode != null || browser.signalCode != null) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const onExit = () => {
-      clearTimeout(timeoutId);
-      resolve(true);
-    };
-    const timeoutId = setTimeout(() => {
-      browser.removeListener('exit', onExit);
-      resolve(false);
-    }, timeoutMs);
-    browser.once('exit', onExit);
-  });
-}
-
-async function waitForJson(url, browserProcess, stderr) {
-  const deadline = Date.now() + 15_000;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    if (browserProcess.exitCode != null) {
-      throw new Error(`Browser exited with code ${browserProcess.exitCode}: ${stderr.value.trim()}`);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) return await response.json();
-      lastError = new Error(`HTTP ${response.status}`);
-    } catch (error) {
-      lastError = error;
-    }
-    await delay(100);
-  }
-  throw new Error(`Browser debugging endpoint did not become ready: ${lastError?.message || 'timeout'}`);
-}
-
-class CdpClient {
-  constructor(url) {
-    this.socket = new WebSocket(url);
-    this.nextId = 1;
-    this.pending = new Map();
-    this.events = new Map();
-    this.opened = new Promise((resolve, reject) => {
-      this.socket.addEventListener('open', resolve, { once: true });
-      this.socket.addEventListener('error', () => reject(new Error('CDP WebSocket failed to open')), { once: true });
-    });
-    this.socket.addEventListener('message', (event) => {
-      const message = JSON.parse(String(event.data));
-      if (message.id) {
-        const pending = this.pending.get(message.id);
-        if (!pending) return;
-        this.pending.delete(message.id);
-        if (message.error) pending.reject(new Error(message.error.message));
-        else pending.resolve(message.result || {});
-        return;
-      }
-      for (const listener of this.events.get(message.method) || []) listener(message.params || {});
-    });
-    const rejectPending = () => {
-      for (const { reject } of this.pending.values()) reject(new Error('CDP WebSocket closed'));
-      this.pending.clear();
-    };
-    this.socket.addEventListener('close', rejectPending);
-    this.socket.addEventListener('error', rejectPending);
-  }
-
-  async send(method, params = {}) {
-    await this.opened;
-    const id = this.nextId++;
-    const result = new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`CDP command timed out: ${method}`));
-      }, CDP_TIMEOUT_MS);
-      this.pending.set(id, {
-        resolve(value) { clearTimeout(timeoutId); resolve(value); },
-        reject(error) { clearTimeout(timeoutId); reject(error); }
-      });
-    });
-    this.socket.send(JSON.stringify({ id, method, params }));
-    return result;
-  }
-
-  once(method) {
-    return new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.events.set(method, (this.events.get(method) || []).filter((value) => value !== listener));
-        reject(new Error(`CDP event timed out: ${method}`));
-      }, CDP_TIMEOUT_MS);
-      const listener = (params) => {
-        clearTimeout(timeoutId);
-        this.events.set(method, (this.events.get(method) || []).filter((value) => value !== listener));
-        resolve(params);
-      };
-      const listeners = this.events.get(method) || [];
-      listeners.push(listener);
-      this.events.set(method, listeners);
-    });
-  }
-
-  close() {
-    this.socket.close();
-  }
-}
-
-async function evaluate(client, expression) {
-  const result = await client.send('Runtime.evaluate', {
-    expression,
-    awaitPromise: true,
-    returnByValue: true
-  });
-  if (result.exceptionDetails) {
-    throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
-  }
-  return result.result?.value;
-}
-
-function instrumentContentSource(source) {
-  const closing = source.lastIndexOf('})();');
-  assert.ok(closing > 0, 'Unable to instrument content.js for browser assertions');
-  return `${source.slice(0, closing)}
-  let browserTestScheduledDomRefreshes = 0;
-  let browserTestScheduledDataRefreshes = 0;
-  const browserTestOriginalScheduleRefresh = scheduleRefresh;
-  const browserTestOriginalScheduleAlertsDataRefresh = scheduleAlertsDataRefresh;
-  scheduleRefresh = (...args) => {
-    browserTestScheduledDomRefreshes += 1;
-    return browserTestOriginalScheduleRefresh(...args);
-  };
-  scheduleAlertsDataRefresh = (...args) => {
-    browserTestScheduledDataRefreshes += 1;
-    return browserTestOriginalScheduleAlertsDataRefresh(...args);
-  };
-  globalThis.__BosunHelperBrowserTest = {
-    ensureStateIcon,
-    ensureParentStateIcon,
-    injectStyles,
-    ensureToggleExists,
-    destroySettingsUi: () => settingsUi?.destroy?.(),
-    ensureAutoRefreshControls,
-    ensureLastActionCopyButtons,
-    ensureGrafanaQueryButtons,
-    ensurePriorityActions,
-    async startPriorityActionSettings() {
-      await settingsStore.start();
-      installStorageChangeTracking();
-      applySettingsSnapshot(settingsStore.getSnapshot(), { initial: true });
-      return settingsStore;
-    },
-    runDomRefreshPass,
-    getLastActionMessageText,
-    applyAlertsPayload,
-    startupState: () => ({ version: alertsPayloadApplyVersion, ready: alertDataIndexReady,
-      owner: latestAlertsTrackerOwner, role: refreshCoordinatorApi?.getRole?.() }),
-    applySettingsSnapshot,
-    rebuildAlertDataIndex,
-    resolveChildState,
-    resolveGroupState,
-    resolveChildIndexedState,
-    applyNeedsAckMarkersFromData,
-    buildGroupMarkerKeyFromDom,
-    buildGroupMarkerKeyFromData,
-    resolveChildHasUserComment,
-    rebuildGrafanaQueryIndex,
-    refreshRuleGraphDefinitions,
-    ruleGraphResolver,
-    getGrafanaQueryForPanel,
-    flashCopyButtonState,
-    handleRouteChange,
-    installSelectionCopySanitizer,
-    startObserver,
-    setExtensionClass,
-    isFeatureEnabled,
-    setFeature(name, enabled) {
-      const previous = JSON.parse(JSON.stringify(settingsSnapshot));
-      const next = JSON.parse(JSON.stringify(settingsSnapshot));
-      next.features[name] = Boolean(enabled);
-      applySettingsSnapshot(next, {
-        previous,
-        changedPaths: ['features.' + name],
-        initial: false
-      });
-    },
-    setPreference(name, value) {
-      const previous = JSON.parse(JSON.stringify(settingsSnapshot));
-      const next = JSON.parse(JSON.stringify(settingsSnapshot));
-      next.preferences ||= {};
-      next.preferences[name] = value;
-      applySettingsSnapshot(next, {
-        previous,
-        changedPaths: ['preferences.' + name],
-        initial: false
-      });
-    },
-    handleSoundAlertsToggle,
-    applyActionPageTweaks,
-    loadState,
-    runtimeSettings() {
-      return {
-        soundAlertsEnabled,
-        showSilenced,
-        autoRefreshEnabled,
-        autoRefreshIdleSeconds,
-        userCommentFilterEnabled,
-        acknowledgedCollapseEnabled,
-        toolbarStatusSource,
-        toolbarStatusMessage,
-        toolbarStatusTimer
-      };
-    },
-    singleAlertAge: singleAlertAgeApi,
-    refreshIntervals: { visible: DATA_REFRESH_MS, hidden: DATA_REFRESH_HIDDEN_MS },
-    resetLifecycleCounters() {
-      browserTestScheduledDomRefreshes = 0;
-      browserTestScheduledDataRefreshes = 0;
-    },
-    getLifecycleCounters() {
-      return {
-        domRefreshes: browserTestScheduledDomRefreshes,
-        dataRefreshes: browserTestScheduledDataRefreshes
-      };
-    },
-    seedMarkerCache(id, state) {
-      for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
-      if (state === 'note') childHasNoteById.set(id, true);
-      if (state === 'warning') childOldNoNoteById.set(id, true);
-      alertDataIndexReady = true;
-      flushAlertMarkerCacheToSession();
-    },
-    clearMarkerState() {
-      for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
-      alertDataIndexReady = false;
-    },
-    restoreMarkerCache() {
-      const restored = restoreAlertMarkerCacheFromSession();
-      return {
-        restored,
-        note: childHasNoteById.get('cached-alert') === true,
-        warning: childOldNoNoteById.get('cached-alert') === true
-      };
-    },
-    markerState() {
-      return {
-        ready: alertDataIndexReady,
-        note: childHasNoteById.get('cached-alert') === true
-      };
-    },
-    setNewAlertNoticeCounts(counts) {
-      newAlertNoticeCounts = counts;
-      ensureNewAlertNotice();
-    }
-  };
-${source.slice(closing)}`;
-}
-
 async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly = false, ageSourceRegressionOnly = false, emptySectionRegressionOnly = false, expandIdentityRegressionOnly = false, visibleIdFormatRegressionOnly = false) {
-  const pageSource = fs.readFileSync(path.join(root, 'src/bosun/group-identity-page.js'), 'utf8');
-  const readerSource = fs.readFileSync(path.join(root, 'src/bosun/group-identity.js'), 'utf8');
+  const pageSource = readTestScript('src/bosun/group-identity-page.js');
+  const readerSource = readTestScript('src/bosun/group-identity.js');
   const mainScript = await client.send('Page.addScriptToEvaluateOnNewDocument', { source: pageSource });
   const readerScript = await client.send('Page.addScriptToEvaluateOnNewDocument', {
     source: readerSource, worldName: 'bh-group-identity-test'
@@ -434,10 +97,10 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     };
     const sources = ['src/settings/settings.js', 'src/bosun/alerts-data.js', 'src/bosun/needack-severity.js', 'src/bosun/priority-alerts.js'];
     if (subjectRegressionOnly || ageSourceRegressionOnly || emptySectionRegressionOnly || expandIdentityRegressionOnly) sources.push('src/bosun/single-alert-age.js');
-    const content = instrumentContentSource(fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8'));
+    const content = instrumentContentSource(readTestScript('src/bosun/content.js'));
     await run(`(() => {
       globalThis.BosunHelperLocalConfig = { bosunHosts: ['not-current.invalid'] };
-      ${sources.map(file => fs.readFileSync(path.join(root, file), 'utf8')).join('\n')}
+      ${sources.map(file => readTestScript(file)).join('\n')}
       if (${ageSourceRegressionOnly}) {
         globalThis.ageSourceClock = Date.parse('2031-02-03T12:00:00Z');
         const create = BosunHelperSingleAlertAge.createSingleAlertAge;
@@ -1632,8 +1295,8 @@ async function runPrimeMarkerStartupAssertions(client) {
     settings: 'src/settings/settings.js', alerts: 'src/bosun/alerts-data.js',
     severity: 'src/bosun/needack-severity.js', priority: 'src/bosun/priority-alerts.js',
     coordinator: 'src/shared/refresh-coordinator.js'
-  }).map(([key, file]) => [key, fs.readFileSync(path.join(root, file), 'utf8')]));
-  sources.content = instrumentContentSource(fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8'));
+  }).map(([key, file]) => [key, readTestScript(file)]));
+  sources.content = instrumentContentSource(readTestScript('src/bosun/content.js'));
   const results = await evaluate(client, `(${(async function (sources) {
     const results = {};
     for (const scenario of ['orphan', 'single', 'active-peer', 'late-settings', 'expired-settings', 'expired-fetch',
@@ -1827,25 +1490,25 @@ async function runBrowserAssertions(client) {
   await runAngularGroupIdentityAssertions(client, false, false, false, true);
   await runAngularGroupIdentityAssertions(client, false, false, false, true, true);
   const focusedAuditCase = process.env.BOSUN_HELPER_BROWSER_CASE || '';
-  const settingsSource = fs.readFileSync(path.join(root, 'src/settings/settings.js'), 'utf8');
-  const settingsUiSource = fs.readFileSync(path.join(root, 'src/settings/settings-ui.js'), 'utf8');
-  const actionSource = fs.readFileSync(path.join(root, 'src/bosun/action-templates.js'), 'utf8');
-  const needAckBaselineSource = fs.readFileSync(path.join(root, 'src/bosun/needack-baseline.js'), 'utf8');
-  const newAlertTrackerSource = fs.readFileSync(path.join(root, 'src/bosun/new-alert-tracker.js'), 'utf8');
-  const singleAlertAgeSource = fs.readFileSync(path.join(root, 'src/bosun/single-alert-age.js'), 'utf8');
-  const alertsDataSource = fs.readFileSync(path.join(root, 'src/bosun/alerts-data.js'), 'utf8');
-  const needAckSeveritySource = fs.readFileSync(path.join(root, 'src/bosun/needack-severity.js'), 'utf8');
-  const prioritySource = fs.readFileSync(path.join(root, 'src/bosun/priority-alerts.js'), 'utf8');
-  const pageUtilsSource = fs.readFileSync(path.join(root, 'src/bosun/page-utils.js'), 'utf8');
-  const stylesSource = fs.readFileSync(path.join(root, 'src/shared/styles.js'), 'utf8');
-  const handoffSource = fs.readFileSync(path.join(root, 'src/grafana/grafana-handoff.js'), 'utf8');
+  const settingsSource = readTestScript('src/settings/settings.js');
+  const settingsUiSource = readTestScript('src/settings/settings-ui.js');
+  const actionSource = readTestScript('src/bosun/action-templates.js');
+  const needAckBaselineSource = readTestScript('src/bosun/needack-baseline.js');
+  const newAlertTrackerSource = readTestScript('src/bosun/new-alert-tracker.js');
+  const singleAlertAgeSource = readTestScript('src/bosun/single-alert-age.js');
+  const alertsDataSource = readTestScript('src/bosun/alerts-data.js');
+  const needAckSeveritySource = readTestScript('src/bosun/needack-severity.js');
+  const prioritySource = readTestScript('src/bosun/priority-alerts.js');
+  const pageUtilsSource = readTestScript('src/bosun/page-utils.js');
+  const stylesSource = readTestScript('src/shared/styles.js');
+  const handoffSource = readTestScript('src/grafana/grafana-handoff.js');
   const grafanaPageSource = JSON.stringify(
-    fs.readFileSync(path.join(root, 'src/grafana/grafana-page.js'), 'utf8')
+    readTestScript('src/grafana/grafana-page.js')
   );
-  const promqlSource = fs.readFileSync(path.join(root, 'src/grafana/promql.js'), 'utf8');
-  const ruleGraphSource = fs.readFileSync(path.join(root, 'src/grafana/bosun-rule-graph.js'), 'utf8');
+  const promqlSource = readTestScript('src/grafana/promql.js');
+  const ruleGraphSource = readTestScript('src/grafana/bosun-rule-graph.js');
   const contentSource = instrumentContentSource(
-    fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8')
+    readTestScript('src/bosun/content.js')
   );
 
   await client.send('Emulation.setDeviceMetricsOverride', {
@@ -7267,51 +6930,7 @@ alert synthetic.count.values.label {
 
 async function main() {
   await testTemporaryProfileCleanupRetry();
-  const executable = findBrowserExecutable();
-  const context = checkContext('test:browser', { executable, argv: process.argv.slice(2) });
-  const debugPort = await reservePort();
-  const pagePort = await reservePort();
-  const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'bosun-helper-browser-'));
-  const pageServer = http.createServer((_request, response) => {
-    response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    response.end('<!doctype html><html><head><title>Bosun Helper browser test</title></head><body></body></html>');
-  });
-  await new Promise((resolve, reject) => {
-    pageServer.once('error', reject);
-    pageServer.listen(pagePort, '127.0.0.1', resolve);
-  });
-
-  const stderr = { value: '' };
-  const browser = spawn(executable, [
-    '--headless=new',
-    '--disable-gpu',
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--no-sandbox',
-    `--remote-debugging-port=${debugPort}`,
-    `--user-data-dir=${profileDirectory}`,
-    'about:blank'
-  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
-  browser.stderr.on('data', (chunk) => {
-    stderr.value = `${stderr.value}${chunk}`.slice(-8000);
-  });
-
-  let client = null;
-  try {
-    const browserVersion = await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, browser, stderr);
-    const pageUrl = `http://127.0.0.1:${pagePort}/action?type=note`;
-    const targetResponse = await fetch(
-      `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent('about:blank')}`,
-      { method: 'PUT' }
-    );
-    assert.ok(targetResponse.ok, `Unable to create browser target: HTTP ${targetResponse.status}`);
-    const target = await targetResponse.json();
-    client = new CdpClient(target.webSocketDebuggerUrl);
-    await client.send('Page.enable');
-    await client.send('Runtime.enable');
-    const loaded = client.once('Page.loadEventFired');
-    await client.send('Page.navigate', { url: pageUrl });
-    await loaded;
+  await withBrowserSession(async ({ client, executable, browserVersion, context }) => {
     if (process.argv.includes('--acknowledged-compact-regression')) await runAcknowledgedCompactAssertions({ client, evaluate, instrumentContentSource, root });
     else if (process.argv.includes('--single-alert-age-expand-identity-regression') || process.argv.includes('--single-alert-age-inherited-child-regression') || process.argv.includes('--single-alert-age-visible-id-format-regression')) await runAngularGroupIdentityAssertions(client, false, false, false, true);
     else if (process.argv.includes('--single-alert-age-empty-section-regression')) await runAngularGroupIdentityAssertions(client, false, false, true);
@@ -7320,24 +6939,7 @@ async function main() {
     else await runBrowserAssertions(client);
     writeBrowserReport(context, browserVersion.Browser);
     console.log(`Browser test passed (${path.basename(executable)}, ${browserVersion.Browser}, ${context.scope})`);
-  } finally {
-    try {
-      const closeRequest = client?.send('Browser.close').catch(() => undefined);
-      if (closeRequest) await Promise.race([closeRequest, delay(3000)]);
-    } catch (_) {}
-    client?.close();
-    let exited = await waitForBrowserExit(browser, 5000);
-    if (!exited && browser.exitCode == null && browser.signalCode == null) {
-      browser.kill();
-      exited = await waitForBrowserExit(browser, 5000);
-    }
-    await new Promise((resolve) => pageServer.close(resolve));
-    try {
-      await removeTemporaryProfile(profileDirectory);
-    } catch (error) {
-      console.warn(`Temporary browser profile could not be removed: ${error.message}`);
-    }
-  }
+  });
 }
 
 main().catch((error) => {
