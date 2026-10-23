@@ -2,11 +2,16 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { git } = require('./project-tools');
+const { git: runGit } = require('./project-tools');
 const { loadConfigFile } = require('./config-sync');
 const ZERO = /^0+$/;
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const RESERVED = /(?:^|\.)(?:example\.(?:com|org|net)|invalid|test)$/i;
+const HISTORICAL_DOCS = new Set([
+  'docs/GRAFANA-PROMQL.md', 'docs/SINGLE-ALERT-AGE-DIAGNOSTICS.md', 'docs/WIKI-INSTALL.md'
+]);
+// Compare actual object bytes, not local refs/replace substitutions.
+function git(root, args, options) { return runGit(root, ['--no-replace-objects', ...args], options); }
 
 // Exact public canaries used to exercise packaging rejection, never a tests/ bypass.
 // Keep URL construction split so the policy source is not itself a URL fixture.
@@ -81,7 +86,7 @@ function scanText(text, hosts, configFile = false, name = '') {
   }
   return [...reasons];
 }
-function readObjects(root, ids) {
+function readObjects(root, ids, encoding = 'utf8') {
   const unique = [...new Set(ids)]; if (!unique.length) return new Map();
   if (unique.some(id => !OID.test(id))) throw new Error('Invalid object ID');
   const output = git(root, ['cat-file', '--batch'], { encoding: null, input: Buffer.from(unique.join('\n') + '\n'), maxBuffer: 256 * 1024 * 1024 });
@@ -90,7 +95,7 @@ function readObjects(root, ids) {
     const end = output.indexOf(10, offset); if (end < 0) throw new Error('Invalid batch');
     const [oid, type, sizeText] = output.subarray(offset, end).toString('ascii').split(' '), size = Number(sizeText);
     if (oid !== expected || !Number.isSafeInteger(size) || size < 0 || size > 16 * 1024 * 1024 || end + 2 + size > output.length) throw new Error('Object unavailable/oversized');
-    objects.set(oid, { type, text: output.subarray(end + 1, end + 1 + size).toString('utf8') }); offset = end + size + 2;
+    objects.set(oid, { type, text: output.subarray(end + 1, end + 1 + size).toString(encoding) }); offset = end + size + 2;
   }
   return objects;
 }
@@ -101,13 +106,13 @@ function treeEntries(root, revision) {
     return { mode: match[1], oid: match[3], name: match[4] };
   });
 }
-function scanEntries(root, entries, hosts, cache = new Map()) {
+function scanEntries(root, entries, hosts, cache = new Map(), historical = false) {
   const missing = entries.filter(e => !cache.has(e.oid));
   for (const [id, object] of readObjects(root, missing.map(e => e.oid))) cache.set(id, object);
   const counts = new Map();
   for (const entry of entries) {
     const reasons = [];
-    if (forbidden(entry.name)) reasons.push('forbidden-publication-path');
+    if (forbidden(entry.name) && !(historical && HISTORICAL_DOCS.has(entry.name))) reasons.push('forbidden-publication-path');
     if (entry.mode === '120000') reasons.push('symlink-requires-review');
     const object = cache.get(entry.oid); if (object?.type !== 'blob') throw new Error('Not a blob');
     const configKind = /(?:^|\/)config(?:\.local)?\.js$/.test(entry.name) ? 'config'
@@ -126,7 +131,7 @@ function scanIndex(root) {
   });
   return scanEntries(root, entries, localHosts(root));
 }
-function scanRevisions(root, revisions, hosts = localHosts(root)) {
+function scanRevisions(root, revisions, hosts = localHosts(root), historical = new Set()) {
   const counts = new Map(), cache = new Map();
   if (revisions.length > 10000) throw new Error('History scan budget exceeded');
   const metadata = readObjects(root, revisions), expanded = [...new Set(revisions)];
@@ -147,22 +152,78 @@ function scanRevisions(root, revisions, hosts = localHosts(root)) {
       const type = git(root, ['cat-file', '-t', peeled]).trim();
       if (type === 'blob') {
         for (const reason of scanText(readObjects(root, [peeled]).get(peeled).text, hosts)) counts.set(reason, (counts.get(reason) || 0) + 1);
-      } else mergeCounts(counts, scanEntries(root, treeEntries(root, revision), hosts, cache));
+      } else mergeCounts(counts, scanEntries(root, treeEntries(root, revision), hosts, cache, historical.has(peeled)));
     }
   }
   return counts;
 }
+function provePublishedTranslation(root, local, remote) {
+  // The old object ID comes from Git's advertised remote ref, never an allowlist
+  // in the outgoing tree. Prove a bijection of the entire commit/tag graph.
+  const commits = new Set(), cache = new Map(), seen = new Set(), forward = new Map(), reverse = new Map();
+  let pending = [[remote, local]], bytes = 0;
+  const reject = () => new Set();
+  while (pending.length) {
+    const batch = pending; pending = [];
+    const missing = [...new Set(batch.flat().filter(id => !cache.has(id)))];
+    // Latin1 retains every metadata byte, including non-UTF-8 author names.
+    for (const [id, object] of readObjects(root, missing, 'latin1')) {
+      bytes += object.text.length;
+      if (bytes > 32 * 1024 * 1024) throw new Error('Translation proof budget exceeded');
+      cache.set(id, object);
+    }
+    for (const [oldId, newId] of batch) {
+      const key = oldId + ':' + newId;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (seen.size > 10000) throw new Error('Translation proof budget exceeded');
+      if ((forward.has(oldId) && forward.get(oldId) !== newId) ||
+          (reverse.has(newId) && reverse.get(newId) !== oldId)) return reject();
+      forward.set(oldId, newId); reverse.set(newId, oldId);
+      const oldObject = cache.get(oldId), newObject = cache.get(newId);
+      if (!oldObject || oldObject.type !== newObject?.type || !['commit', 'tag'].includes(oldObject.type)) return reject();
+      const oldEnd = oldObject.text.indexOf('\n\n'), newEnd = newObject.text.indexOf('\n\n');
+      if (oldEnd < 0 || newEnd < 0) return reject();
+      const oldHeader = oldObject.text.slice(0, oldEnd), newHeader = newObject.text.slice(0, newEnd);
+      if (/^(?:gpgsig(?:-sha256)?|mergetag) /m.test(oldHeader + '\n' + newHeader)) return reject();
+      if (oldObject.type === 'commit') {
+        const parents = header => [...header.matchAll(/^parent ([a-f0-9]+)$/gm)].map(match => match[1]);
+        const oldParents = parents(oldHeader), newParents = parents(newHeader);
+        const metadata = header => header.replace(/^parent [a-f0-9]+$/gm, 'parent');
+        // This includes the complete tree OID: path, mode and blob bytes match.
+        if (metadata(oldHeader) !== metadata(newHeader) || oldParents.length !== newParents.length) return reject();
+        for (let i = 0; i < oldParents.length; i++) pending.push([oldParents[i], newParents[i]]);
+        commits.add(newId);
+      } else {
+        if (/-----BEGIN (?:PGP|SSH) SIGNATURE-----/.test(oldObject.text + newObject.text)) return reject();
+        const target = header => /^object ([a-f0-9]+)$/m.exec(header)?.[1];
+        const oldTarget = target(oldHeader), newTarget = target(newHeader);
+        if (!oldTarget || !newTarget || oldHeader.replace(/^object [a-f0-9]+$/m, 'object') !==
+            newHeader.replace(/^object [a-f0-9]+$/m, 'object')) return reject();
+        pending.push([oldTarget, newTarget]);
+      }
+    }
+  }
+  return commits;
+}
 function scanPush(root, input) {
-  const revisions = new Set();
+  const revisions = new Set(), eligible = new Map();
   if (Buffer.byteLength(input) > 2 * 1024 * 1024) throw new Error('Too many refs');
   for (const line of input.trim().split('\n').filter(Boolean)) {
     const parts = line.trim().split(/\s+/); if (parts.length !== 4 || !OID.test(parts[1]) || !OID.test(parts[3])) throw new Error('Invalid pre-push input');
     const [, local, , remote] = parts; if (ZERO.test(local)) continue;
     const args = ['rev-list', local]; if (!ZERO.test(remote)) args.push(`^${remote}`);
-    for (const id of git(root, args).trim().split('\n').filter(Boolean)) revisions.add(id);
-    revisions.add(local); // Includes annotated tag message and non-commit tips.
+    const outgoing = git(root, args).trim().split('\n').filter(Boolean);
+    const proven = ZERO.test(remote) ? new Set() : provePublishedTranslation(root, local, remote);
+    const peeled = git(root, ['rev-parse', `${local}^{}`]).trim();
+    for (const id of [...outgoing, local, peeled]) {
+      revisions.add(id);
+      // A successful existing ref cannot authorize the same content on a new
+      // or unproven ref in the same push. Every contributing ref must qualify.
+      eligible.set(id, (eligible.get(id) ?? true) && proven.has(id));
+    }
   }
-  return scanRevisions(root, [...revisions]);
+  return scanRevisions(root, [...revisions], localHosts(root), new Set([...eligible].filter(([, ok]) => ok).map(([id]) => id)));
 }
 function report(counts, mode) {
   if (!counts.size) { console.log(`Publication guard ${mode}: PASS.`); return 0; }

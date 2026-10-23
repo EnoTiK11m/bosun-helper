@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { checkDocs, fingerprint, safe, status, receiptPath } = require('../scripts/project-tools');
-const { scanIndex, scanPush, scanText, forbidden } = require('../scripts/publication-guard');
+const { scanIndex, scanPush, scanRevisions, scanText, forbidden } = require('../scripts/publication-guard');
 const { install } = require('../scripts/install-git-hooks');
 const repository = path.resolve(__dirname, '..');
 const roots = [];
@@ -28,6 +28,12 @@ function stage(root, name, value) {
 function commitObject(root, parent, message = 'Synthetic commit') {
   const tree = command(root, ['write-tree']);
   return command(root, ['commit-tree', tree, ...(parent ? ['-p', parent] : [])], message + '\n');
+}
+function translatedCommit(root, original, parents = new Map(), message = 'Переведённое сообщение', changeHeader = value => value) {
+  const raw = command(root, ['cat-file', 'commit', original]);
+  const header = raw.slice(0, raw.indexOf('\n\n')).replace(/^parent ([a-f0-9]+)$/gm,
+    (_, id) => 'parent ' + (parents.get(id) || id));
+  return command(root, ['hash-object', '-t', 'commit', '-w', '--stdin'], changeHeader(header) + '\n\n' + message + '\n');
 }
 function docFixture(root) {
   write(root, 'manifest.json', '{"version":"2.0.0"}'); write(root, 'package.json', '{"version":"2.0.0"}');
@@ -156,6 +162,76 @@ try {
   for (const name of ['config.js', 'manifest.json']) {
     stage(fixtureRoot, name, JSON.stringify({ url: 'https://public-service.com' }));
     assert.ok(scanIndex(fixtureRoot).has('non-public-example-config'), 'Tracked configurations retain strict URL policy');
+  }
+
+  const history = workspace();
+  const historicalDocs = ['docs/GRAFANA-PROMQL.md', 'docs/SINGLE-ALERT-AGE-DIAGNOSTICS.md', 'docs/WIKI-INSTALL.md'];
+  for (const name of historicalDocs) stage(history, name, 'Previously published documentation');
+  stage(history, 'file.txt', 'safe');
+  const publishedBase = commitObject(history);
+  for (const name of historicalDocs) command(history, ['update-index', '--force-remove', '--', name]);
+  const publishedTip = commitObject(history, publishedBase);
+  const translatedBase = translatedCommit(history, publishedBase);
+  const translatedTip = translatedCommit(history, publishedTip, new Map([[publishedBase, translatedBase]]));
+  assert.equal(scanPush(history, line(translatedTip, publishedTip)).size, 0,
+    'Message-only rewrite of published historical trees must allow exactly the three old docs');
+  assert.ok(scanRevisions(history, [translatedBase]).has('forbidden-publication-path'), 'Standalone history audit remains strict');
+  assert.ok(scanPush(history, line(translatedTip)).has('forbidden-publication-path'), 'New refs have no published baseline');
+  assert.ok(scanPush(history, line(translatedTip, publishedTip) +
+    `refs/heads/new ${translatedTip} refs/heads/new ${zeros}\n`).has('forbidden-publication-path'),
+    'A proven ref must not authorize a different new ref');
+  for (const name of historicalDocs) stage(history, name, 'Previously published documentation');
+  assert.ok(scanIndex(history).has('forbidden-publication-path'), 'Historical exception never applies to index');
+  const reintroduced = commitObject(history, translatedTip);
+  assert.ok(scanPush(history, line(reintroduced, publishedTip)).has('forbidden-publication-path'),
+    'Reusing old blobs in a new commit must not resurrect forbidden documents');
+  stage(history, historicalDocs[0], 'Changed documentation');
+  const changedTree = command(history, ['write-tree']);
+  const changedBase = translatedCommit(history, publishedBase, new Map(), 'Перевод', h => h.replace(/^tree .+$/m, 'tree ' + changedTree));
+  const changedTip = translatedCommit(history, publishedTip, new Map([[publishedBase, changedBase]]));
+  assert.ok(scanPush(history, line(changedTip, publishedTip)).has('forbidden-publication-path'), 'Changed historical bytes block');
+  command(history, ['update-ref', 'refs/replace/' + publishedBase, changedBase]);
+  assert.ok(scanPush(history, line(changedTip, publishedTip)).has('forbidden-publication-path'), 'Local replace refs cannot fake published bytes');
+  command(history, ['update-ref', '-d', 'refs/replace/' + publishedBase]);
+  const otherAuthor = translatedCommit(history, publishedBase, new Map(), 'Перевод', h => h.replace(/^author Synthetic /m, 'author Other '));
+  const otherTip = translatedCommit(history, publishedTip, new Map([[publishedBase, otherAuthor]]));
+  assert.ok(scanPush(history, line(otherTip, publishedTip)).has('forbidden-publication-path'), 'Unproven metadata rewrite must not qualify');
+  const secretMessage = translatedCommit(history, publishedTip, new Map([[publishedBase, translatedBase]]), credential);
+  assert.ok(scanPush(history, line(secretMessage, publishedTip)).has('credential-format'), 'Messages remain fully scanned');
+  const oldTag = command(history, ['mktag'], `object ${publishedBase}\ntype commit\ntag translated\ntagger Synthetic <test@example.invalid> 1700000000 +0000\n\nOld message\n`);
+  const newTag = command(history, ['mktag'], `object ${translatedBase}\ntype commit\ntag translated\ntagger Synthetic <test@example.invalid> 1700000000 +0000\n\nПеревод\n`);
+  assert.equal(scanPush(history, `refs/tags/translated ${newTag} refs/tags/translated ${oldTag}\n`).size, 0, 'Annotated historical tag may keep its original tree');
+  const annotationOnly = command(history, ['mktag'], `object ${publishedBase}\ntype commit\ntag translated\ntagger Synthetic <test@example.invalid> 1700000000 +0000\n\nРусская аннотация\n`);
+  assert.equal(scanPush(history, `refs/tags/translated ${annotationOnly} refs/tags/translated ${oldTag}\n`).size, 0, 'Annotation-only translation proves its unchanged published target');
+  const changedTag = command(history, ['mktag'], `object ${translatedBase}\ntype commit\ntag translated\ntagger Other <test@example.invalid> 1700000000 +0000\n\nПеревод\n`);
+  assert.ok(scanPush(history, `refs/tags/translated ${changedTag} refs/tags/translated ${oldTag}\n`).has('forbidden-publication-path'), 'Changed tagger does not prove a translation');
+  for (const name of historicalDocs) stage(history, name, 'Previously published documentation');
+  stage(history, 'branch.txt', 'left'); const oldLeft = commitObject(history, publishedBase);
+  stage(history, 'branch.txt', 'right'); const oldRight = commitObject(history, publishedBase);
+  for (const name of historicalDocs) command(history, ['update-index', '--force-remove', '--', name]);
+  const mergeTemplate = commitObject(history, oldLeft);
+  const oldMerge = translatedCommit(history, mergeTemplate, new Map(), 'Исходное слияние', h => h.replace('parent ' + oldLeft, 'parent ' + oldLeft + '\nparent ' + oldRight));
+  const newLeft = translatedCommit(history, oldLeft, new Map([[publishedBase, translatedBase]]));
+  const newRight = translatedCommit(history, oldRight, new Map([[publishedBase, translatedBase]]));
+  const newMerge = translatedCommit(history, oldMerge, new Map([[oldLeft, newLeft], [oldRight, newRight]]));
+  assert.equal(scanPush(history, line(newMerge, oldMerge)).size, 0, 'Merge translation preserves both parents and shared ancestry');
+  const swappedMerge = translatedCommit(history, oldMerge, new Map([[oldLeft, newRight], [oldRight, newLeft]]));
+  assert.ok(scanPush(history, line(swappedMerge, oldMerge)).has('forbidden-publication-path'), 'Swapping distinct merge parents invalidates historical proof');
+  const syntheticHost = ['synthetic-service', 'corp'].join('.');
+  for (const [name, content, reason] of [
+    ['docs/NEW.md', 'Previously published documentation', 'forbidden-publication-path'],
+    ['AGENTS.md', 'Previously published documentation', 'forbidden-publication-path'],
+    [historicalDocs[0], privateUrl, 'private-network-url'],
+    [historicalDocs[1], credential, 'credential-format'],
+    [historicalDocs[2], assignment('password', 'test-potential-credential-12345678'), 'secret-assignment'],
+    [historicalDocs[0], syntheticHost, 'configured-internal-host']
+  ]) {
+    const riskyHistory = workspace(); stage(riskyHistory, name, content);
+    const published = commitObject(riskyHistory), translated = translatedCommit(riskyHistory, published);
+    if (reason === 'configured-internal-host') write(riskyHistory, 'config.local.js', 'globalThis.BosunHelperLocalConfig = ' + JSON.stringify({
+      bosunHosts: [syntheticHost], grafanaHost: 'grafana.example.com', grafanaPanelUrl: 'https://grafana.example.com/d/example?editPanel=1'
+    }) + ';');
+    assert.ok(scanPush(riskyHistory, line(translated, published)).has(reason), 'Published bytes do not exempt other paths or content risks');
   }
 
   // Invoke hook files directly; no git add/commit/push in any repository.
