@@ -8,6 +8,9 @@ const os = require('os');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
 const runAcknowledgedCompactAssertions = require('./acknowledged-browser-regression');
+const { selection, checkContext, writeBrowserReport } = require('../scripts/check-context');
+
+selection('test:browser', process.env, process.argv.slice(2));
 
 const root = path.resolve(__dirname, '..');
 const CDP_TIMEOUT_MS = 15_000;
@@ -7265,6 +7268,7 @@ alert synthetic.count.values.label {
 async function main() {
   await testTemporaryProfileCleanupRetry();
   const executable = findBrowserExecutable();
+  const context = checkContext('test:browser', { executable, argv: process.argv.slice(2) });
   const debugPort = await reservePort();
   const pagePort = await reservePort();
   const profileDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'bosun-helper-browser-'));
@@ -7294,7 +7298,7 @@ async function main() {
 
   let client = null;
   try {
-    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, browser, stderr);
+    const browserVersion = await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, browser, stderr);
     const pageUrl = `http://127.0.0.1:${pagePort}/action?type=note`;
     const targetResponse = await fetch(
       `http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent('about:blank')}`,
@@ -7314,7 +7318,8 @@ async function main() {
     else if (process.argv.includes('--single-alert-age-source-regression')) await runAngularGroupIdentityAssertions(client, false, true);
     else if (process.argv.includes('--single-alert-age-subject-regression')) await runAngularGroupIdentityAssertions(client, true);
     else await runBrowserAssertions(client);
-    console.log(`Browser test passed (${path.basename(executable)})`);
+    writeBrowserReport(context, browserVersion.Browser);
+    console.log(`Browser test passed (${path.basename(executable)}, ${browserVersion.Browser}, ${context.scope})`);
   } finally {
     try {
       const closeRequest = client?.send('Browser.close').catch(() => undefined);

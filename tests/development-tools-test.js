@@ -64,7 +64,8 @@ try {
   try {
     status(docs); assert.ok(output.some(line => line.includes('нет достоверной записи'))); output.length = 0;
     const receipt = receiptPath(docs); fs.mkdirSync(path.dirname(receipt), { recursive: true });
-    fs.writeFileSync(receipt, JSON.stringify({ version: 1, checks: [{ command: 'test', exitCode: 0, stable: true,
+    fs.writeFileSync(receipt, JSON.stringify({ version: 2, checks: [{ command: 'test', exitCode: 0, stable: true, verified: true,
+      context: { scope: 'full', selectors: { regressionCase: '' }, browser: null },
       finishedAt: new Date().toISOString(), fingerprint: fingerprint(docs, 'test') }] }));
     status(docs); assert.ok(output.some(line => line.includes('test: PASS') && !line.includes('устарело'))); output.length = 0;
     write(docs, 'src/new.js', 'new change'); status(docs); assert.ok(output.some(line => line.includes('устарело')));
@@ -236,7 +237,7 @@ try {
 
   // Вызываем файлы hooks напрямую; git add/commit/push не выполняются ни в одном репозитории.
   const hookRoot = workspace(); stage(hookRoot, 'file.txt', 'safe');
-  for (const name of ['project-tools.js', 'publication-guard.js', 'config-sync.js']) write(hookRoot, `scripts/${name}`, fs.readFileSync(path.join(repository, 'scripts', name)));
+  for (const name of ['project-tools.js', 'check-context.js', 'publication-guard.js', 'config-sync.js']) write(hookRoot, `scripts/${name}`, fs.readFileSync(path.join(repository, 'scripts', name)));
   const hookDir = path.join(hookRoot, '.git', 'hooks');
   const oldCommit = '#!/bin/sh\nprintf preserved > "$PWD/old-hook-ran"\nexit 7\n';
   write(hookRoot, '.git/hooks/pre-commit', oldCommit); fs.chmodSync(path.join(hookDir, 'pre-commit'), 0o755);

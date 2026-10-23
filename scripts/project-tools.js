@@ -3,7 +3,10 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { spawnSync } = require('node:child_process');
+const { isDeepStrictEqual } = require('node:util');
+const { readSelectors, checkContext, contextIdentity, validContext, validateBrowserReport } = require('./check-context');
 
 const COMMANDS = ['test', 'test:browser', 'check', 'check:docs'];
 function git(root, args, options = {}) {
@@ -86,8 +89,9 @@ function checkDocs(root) {
   return { errors, ...roadmap, version };
 }
 
-function fingerprint(root, command) {
-  const entries = [`environment:${process.version}:${process.platform}:${process.arch}:${process.env.BOSUN_HELPER_BROWSER || ''}`];
+function fingerprint(root, command, context = checkContext(command)) {
+  const entries = [`environment:${process.version}:${process.platform}:${process.arch}:${process.env.BOSUN_HELPER_BROWSER || ''}`,
+    JSON.stringify(contextIdentity(context))];
   function walk(name) {
     const full = path.join(root, name); if (!fs.existsSync(full)) { entries.push(`${name}:missing`); return; }
     const stat = fs.lstatSync(full);
@@ -102,26 +106,54 @@ function fingerprint(root, command) {
   return crypto.createHash('sha256').update(entries.join('\n')).digest('hex');
 }
 function receiptPath(root) { return path.resolve(root, git(root, ['rev-parse', '--git-path', 'bosun-helper/checks.json']).trim()); }
-function runChecks(root, only) {
+function runChecks(root, only, options = {}) {
+  readSelectors();
+  if (only && !COMMANDS.includes(only)) throw new Error('Неизвестная команда проверки.');
   const destination = receiptPath(root); fs.mkdirSync(path.dirname(destination), { recursive: true });
-  let receipt = { version: 1, checks: [] };
+  let receipt = { version: 2, checks: [] };
   if (only) {
-    if (!COMMANDS.includes(only)) throw new Error('Unknown check');
-    try { const old = JSON.parse(fs.readFileSync(destination, 'utf8')); if (old.version === 1 && Array.isArray(old.checks)) receipt = old; } catch (_) {}
+    try { const old = JSON.parse(fs.readFileSync(destination, 'utf8')); if (old.version === 2 && Array.isArray(old.checks)) receipt = old; } catch (_) {}
     receipt.checks = receipt.checks.filter(item => item.command !== only);
   }
   for (const command of only ? [only] : COMMANDS) {
-    const before = fingerprint(root, command), startedAt = new Date().toISOString();
+    const context = checkContext(command, options);
+    const before = fingerprint(root, command, context), startedAt = new Date().toISOString();
     // npm_execpath предоставляется командой `npm run verify`; запускаем Node напрямую, в том числе в Windows.
     if (!process.env.npm_execpath) throw new Error('Run via npm run verify.');
-    const result = spawnSync(process.execPath, [process.env.npm_execpath, 'run', command], { cwd: root, stdio: 'inherit' });
+    const reportDirectory = context.browser ? fs.mkdtempSync(path.join(os.tmpdir(), 'bosun-check-report-')) : null;
+    const env = { ...process.env };
+    delete env.BOSUN_HELPER_CHECK_REPORT;
+    if (context.browser) {
+      env.BOSUN_HELPER_BROWSER = context.browser.executable;
+      env.BOSUN_HELPER_CHECK_REPORT = path.join(reportDirectory, 'result.json');
+    }
+    let result, verified = !context.browser, recordedContext = context;
+    try {
+      console.log(`Проверка ${command}: ${context.scope === 'full' ? 'полный' : 'частичный'} прогон.`);
+      result = spawnSync(process.execPath, [process.env.npm_execpath, 'run', command], { cwd: root, stdio: 'inherit', env });
+      if (context.browser && result.status === 0) {
+        try {
+          recordedContext = validateBrowserReport(context, JSON.parse(fs.readFileSync(env.BOSUN_HELPER_CHECK_REPORT, 'utf8')));
+          verified = true;
+        } catch (_) { console.error('Проверка браузера: метаданные фактического запуска не подтверждены.'); }
+      }
+    } finally {
+      if (reportDirectory) {
+        if (path.dirname(path.resolve(reportDirectory)) !== path.resolve(os.tmpdir()) ||
+            !path.basename(reportDirectory).startsWith('bosun-check-report-')) throw new Error('Invalid report cleanup path');
+        fs.rmSync(reportDirectory, { recursive: true, force: true });
+      }
+    }
+    let stable = false;
+    try { stable = before === fingerprint(root, command, checkContext(command, options)); } catch (_) {}
     receipt.checks.push({ command, startedAt, finishedAt: new Date().toISOString(), exitCode: result.status,
-      fingerprint: before, stable: before === fingerprint(root, command) });
+      context: recordedContext, verified, fingerprint: before, stable });
     const temporary = `${destination}.tmp`; fs.writeFileSync(temporary, JSON.stringify(receipt, null, 2)); fs.renameSync(temporary, destination);
   }
-  return receipt.checks.every(item => item.exitCode === 0 && item.stable) ? 0 : 1;
+  return receipt.checks.every(item => item.exitCode === 0 && item.stable && item.verified) ? 0 : 1;
 }
-function status(root) {
+function status(root, options = {}) {
+  readSelectors();
   const version = readJson(root, 'manifest.json').version, packageVersion = readJson(root, 'package.json').version;
   console.log(`Версия: ${safe(version)}${version === packageVersion ? '' : ' (расхождение с package.json)'}`);
   try {
@@ -135,14 +167,24 @@ function status(root) {
   if (rows.length > 12) console.log('  … вывод ограничен');
   try {
     const receipt = JSON.parse(fs.readFileSync(receiptPath(root), 'utf8'));
-    if (receipt.version !== 1 || !Array.isArray(receipt.checks) || !receipt.checks.length) throw new Error('Invalid receipt');
+    if (receipt.version !== 2 || !Array.isArray(receipt.checks) || !receipt.checks.length) throw new Error('Invalid receipt');
     console.log('Последние проверки (локальная запись npm run verify):');
     for (const command of COMMANDS) {
       const item = receipt.checks.find(c => c.command === command);
       if (!item || !Number.isFinite(Date.parse(item.finishedAt)) || Date.parse(item.finishedAt) > Date.now() + 5000 ||
-          !Number.isInteger(item.exitCode) || item.exitCode < 0 || !/^[a-f0-9]{64}$/.test(item.fingerprint)) { console.log(`  ${command}: нет достоверной записи`); continue; }
-      const current = item.stable === true && item.fingerprint === fingerprint(root, command);
-      console.log(`  ${command}: ${item.exitCode === 0 ? 'PASS' : 'FAIL'}${current ? '' : ' (устарело/файлы изменялись)'} — ${new Date(item.finishedAt).toISOString()}`);
+          !Number.isInteger(item.exitCode) || item.exitCode < 0 || !/^[a-f0-9]{64}$/.test(item.fingerprint) ||
+          item.verified !== true || !validContext(command, item.context)) { console.log(`  ${command}: нет достоверной записи`); continue; }
+      let current = false;
+      try {
+        const now = checkContext(command, options);
+        current = item.stable === true && isDeepStrictEqual(contextIdentity(item.context), contextIdentity(now)) &&
+          item.fingerprint === fingerprint(root, command, now);
+      }
+      catch (_) { console.log(`  ${command}: нет достоверной текущей записи (окружение недоступно)`); continue; }
+      const label = `${item.context.scope === 'partial' ? 'PARTIAL ' : ''}${item.exitCode === 0 ? 'PASS' : 'FAIL'}`;
+      const selectors = Object.values(item.context.selectors).flat().filter(Boolean).join(', ');
+      const details = `${selectors ? `; selectors: ${selectors}` : ''}${item.context.browser ? `; Chromium ${item.context.browser.version}` : ''}`;
+      console.log(`  ${command}: ${label}${current ? '' : ' (устарело/файлы, scope или окружение изменялись)'}${details} — ${new Date(item.finishedAt).toISOString()}`);
     }
   } catch (_) { console.log('Проверки: нет достоверной записи; запустите npm run verify'); }
 }
@@ -150,6 +192,7 @@ if (require.main === module) {
   const root = path.resolve(__dirname, '..');
   try {
     const mode = process.argv[2];
+    if (process.argv.length > (mode === 'verify' ? 4 : 3)) throw new Error('Неизвестный аргумент; selectors задаются явно через поддерживаемые env.');
     if (mode === 'status') status(root);
     else if (mode === 'check:docs') {
       const result = checkDocs(root); result.errors.slice(0, 15).forEach(e => console.error(e));
@@ -157,6 +200,6 @@ if (require.main === module) {
       else console.log(`Documentation checks passed (${result.tasks.length} tasks, version ${result.version}).`);
     } else if (mode === 'verify') process.exitCode = runChecks(root, process.argv[3]);
     else throw new Error('Unknown project-tools mode.');
-  } catch (_) { console.error('Project tools failed; check local files/Git. Raw values withheld.'); process.exitCode = 1; }
+  } catch (error) { console.error(/^(?:Неизвестный|Неизвестная|Допустим)/.test(error.message) ? error.message : 'Project tools failed; check local files/Git. Raw values withheld.'); process.exitCode = 1; }
 }
 module.exports = { git, safe, parseRoadmap, checkDocs, fingerprint, status, runChecks, receiptPath };

@@ -2696,7 +2696,8 @@ async function testGrafanaFocusedEditorDoesNotOverwriteUnknownPartialDelete() {
 }
 
 (async () => {
-  const focusedCase = process.env.BOSUN_HELPER_REGRESSION_CASE || '';
+  if (process.argv.length > 2) throw new Error('Неизвестный selector regression; используйте BOSUN_HELPER_REGRESSION_CASE.');
+  const focusedCase = require('../scripts/check-context').readSelectors().regressionCase;
   if (focusedCase) {
     const focusedCases = {
       A19: async () => {
