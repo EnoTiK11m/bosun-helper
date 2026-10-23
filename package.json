@@ -11,7 +11,7 @@
     "check:publish": "node scripts/publication-guard.js index",
     "check:history": "node scripts/publication-guard.js history",
     "check": "node scripts/check.js",
-    "test": "node tests/check-context-test.js && node tests/development-tools-test.js && node tests/package-internal-test.js && node tests/config-sync-test.js && node tests/settings-test.js && node tests/settings-ui-test.js && node tests/promql-semantics-test.js && node tests/rule-graph-test.js && node tests/rule-graph-extensions-test.js && node tests/legacy-prom-test.js && node tests/single-alert-age-diagnostics-test.js && node tests/smoke-test.js && node tests/integration-test.js && node tests/regression-test.js",
+    "test": "node tests/last-action-test.js && node tests/check-context-test.js && node tests/development-tools-test.js && node tests/package-internal-test.js && node tests/config-sync-test.js && node tests/settings-test.js && node tests/settings-ui-test.js && node tests/promql-semantics-test.js && node tests/rule-graph-test.js && node tests/rule-graph-extensions-test.js && node tests/legacy-prom-test.js && node tests/single-alert-age-diagnostics-test.js && node tests/smoke-test.js && node tests/integration-test.js && node tests/regression-test.js",
     "test:browser": "node tests/browser-test.js",
     "test:promql-engine": "node tests/promql-engine-test.js",
     "sync-config": "node scripts/sync-config.js local",

@@ -146,7 +146,12 @@ function createScriptLoader(root) {
   function readTestScript(file) {
     return fs.readFileSync(path.join(root, file), 'utf8');
   }
-  return { readTestScript, instrumentContentSource };
+  return {
+    readTestScript,
+    instrumentContentSource(source) {
+      return `${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
+    }
+  };
 }
 
 module.exports = { createScriptLoader };

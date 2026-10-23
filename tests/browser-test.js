@@ -80,6 +80,7 @@ async function runBrowserAssertions(client) {
   const needAckSeveritySource = readTestScript('src/bosun/needack-severity.js');
   const prioritySource = readTestScript('src/bosun/priority-alerts.js');
   const pageUtilsSource = readTestScript('src/bosun/page-utils.js');
+  const lastActionSource = readTestScript('src/bosun/last-action.js');
   const stylesSource = readTestScript('src/shared/styles.js');
   const handoffSource = readTestScript('src/grafana/grafana-handoff.js');
   const grafanaPageSource = JSON.stringify(
@@ -116,7 +117,7 @@ async function runBrowserAssertions(client) {
 
   await runSettingsRecoveryScenarios({ client, contentSource });
 
-  await runAccessibilityCopyScenarios({ client, contentSource });
+  await runAccessibilityCopyScenarios({ client, contentSource, lastActionSource });
 
   await runGrafanaEditorHandoffScenarios({ client, handoffSource, grafanaPageSource, legacyFixtures, stateExprFallbackResult, expectedMergeQueries });
 }

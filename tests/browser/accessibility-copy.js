@@ -1,9 +1,10 @@
 'use strict';
 
 const assert = require('assert');
+const runLastActionAssertions = require('./last-action');
 const { evaluate } = require('./harness/cdp-client');
 
-module.exports = async function runAccessibilityCopyScenarios({ client, contentSource }) {
+module.exports = async function runAccessibilityCopyScenarios({ client, contentSource, lastActionSource }) {
   const accessibilityResult = await evaluate(client, `(() => {
     document.body.innerHTML = '<div id="actions"></div><div id="child-title"></div>' +
       '<div id="last-action">Note by operator at <span ts-time="state.LastAction.Time">' +
@@ -227,4 +228,5 @@ module.exports = async function runAccessibilityCopyScenarios({ client, contentS
     { restored: false, note: false, warning: false },
     'Incomplete marker cache schema was restored instead of being rejected atomically'
   );
+  await runLastActionAssertions({ client, lastActionSource });
 };

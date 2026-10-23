@@ -127,6 +127,7 @@ for (const file of [
   'src/bosun/new-alert-tracker.js',
   'src/shared/refresh-coordinator.js',
   'src/bosun/priority-alerts.js',
+  'src/bosun/last-action.js',
   'src/bosun/content.js'
 ]) {
   const code = fs.readFileSync(path.join(root, file), 'utf8');
