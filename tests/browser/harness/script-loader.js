@@ -125,6 +125,8 @@ function instrumentContentSource(source) {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
       alertDataIndexReady = false;
     },
+    scheduleMarkerCache: persistAlertMarkerCacheToSession,
+    markerCacheMaps: getAlertMarkerCacheMaps,
     restoreMarkerCache() {
       const restored = restoreAlertMarkerCacheFromSession();
       return {
@@ -154,7 +156,7 @@ function createScriptLoader(root) {
   return {
     readTestScript,
     instrumentContentSource(source) {
-      return `${readTestScript('src/bosun/toolbar-status.js')}\n${readTestScript('src/bosun/toolbar.js')}\n${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
+      return `${readTestScript('src/bosun/alert-marker-cache.js')}\n${readTestScript('src/bosun/toolbar-status.js')}\n${readTestScript('src/bosun/toolbar.js')}\n${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
     }
   };
 }

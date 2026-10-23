@@ -130,6 +130,7 @@ for (const file of [
   'src/bosun/last-action.js',
   'src/bosun/copy.js',
   'src/bosun/toolbar-status.js',
+  'src/bosun/alert-marker-cache.js',
   'src/bosun/toolbar.js',
   'src/bosun/content.js'
 ]) {
