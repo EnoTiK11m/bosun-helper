@@ -53,6 +53,8 @@
         "src/bosun/new-alert-tracker.js",
         "src/shared/refresh-coordinator.js",
         "src/bosun/priority-alerts.js",
+        "src/bosun/toolbar-status.js",
+        "src/bosun/toolbar.js",
         "src/bosun/copy.js",
         "src/bosun/last-action.js",
         "src/bosun/content.js"

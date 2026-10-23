@@ -544,25 +544,99 @@
       });
   }
 
-  function flashButtonState(button, text, ok = true) {
-    if (!button) return;
-    if (button.dataset.flashTimer) {
-      clearTimeout(Number(button.dataset.flashTimer));
+  const toolbarStatusApi = globalThis.BosunHelperToolbarStatus?.createToolbarStatus?.({
+    STATUS_MESSAGE_TTL_MS,
+    TOP_BAR_STATUS_ID,
+    clearTimeout,
+    document,
+    setTimeout,
+    state: {
+      get toolbarStatusLevel() { return toolbarStatusLevel; },
+      set toolbarStatusLevel(value) { toolbarStatusLevel = value; },
+      get toolbarStatusMessage() { return toolbarStatusMessage; },
+      set toolbarStatusMessage(value) { toolbarStatusMessage = value; },
+      get toolbarStatusSource() { return toolbarStatusSource; },
+      set toolbarStatusSource(value) { toolbarStatusSource = value; },
+      get toolbarStatusTimer() { return toolbarStatusTimer; },
+      set toolbarStatusTimer(value) { toolbarStatusTimer = value; },
+      get toolbarStatusTitle() { return toolbarStatusTitle; },
+      set toolbarStatusTitle(value) { toolbarStatusTitle = value; }
     }
-    const originalTitle = button.dataset.originalTitle || button.title || '';
-    button.dataset.originalTitle = originalTitle;
-    button.title = text;
-    button.dataset.copied = ok ? 'true' : 'false';
-    setToolbarStatus('action-feedback', text, ok ? 'info' : 'error', {
-      ttlMs: ok ? 1500 : 5000
-    });
-    const timerId = setTimeout(() => {
-      button.title = originalTitle;
-      delete button.dataset.copied;
-      delete button.dataset.originalTitle;
-      delete button.dataset.flashTimer;
-    }, ok ? 1200 : 2500);
-    button.dataset.flashTimer = String(timerId);
+  });
+
+  const toolbarApi = globalThis.BosunHelperToolbar?.createToolbar?.({
+    ACKNOWLEDGED_COLLAPSE_TOGGLE_ID,
+    ACKNOWLEDGED_CONTROLS_ID,
+    ACKNOWLEDGED_HEADER_ROW_CLASS,
+    AUTO_REFRESH_COUNTDOWN_ID,
+    AUTO_REFRESH_INPUT_ID,
+    AUTO_REFRESH_MAX_IDLE_SECONDS,
+    AUTO_REFRESH_MIN_IDLE_SECONDS,
+    AUTO_REFRESH_TOGGLE_ID,
+    DIAGNOSTICS_MODAL_ID,
+    DIAGNOSTICS_OPEN_BUTTON_ID,
+    DIAGNOSTICS_TOGGLE_ID,
+    DIAGNOSTICS_TOOLBAR_UI_ENABLED,
+    Date,
+    MutationObserver,
+    NEW_ALERT_NOTICE_ID,
+    SOUND_ALERTS_TOGGLE_ID,
+    TOGGLE_COUNTER_ID,
+    TOGGLE_ID,
+    TOP_BAR_ID,
+    USER_COMMENT_FILTER_TOGGLE_ID,
+    acknowledgedControlNodes,
+    activityApi,
+    applyAcknowledgedCollapse,
+    applyUserCommentFilter,
+    applyVisibility,
+    clearOwnedElements,
+    diagnosticsApi,
+    document,
+    ensureToolbarStatusIndicator,
+    getAcknowledgedHeading,
+    getAcknowledgedRoot,
+    isDashboardEnhancementsPage,
+    isDashboardHome,
+    isFeatureEnabled,
+    markUserActivity,
+    normalizeAutoRefreshIdleSeconds,
+    reportDiagnostics,
+    requestAnimationFrame,
+    saveAcknowledgedCollapseState,
+    saveAutoRefreshState,
+    saveDiagnosticsState,
+    saveSoundAlertsState,
+    saveState,
+    saveUserCommentFilterState,
+    setDiagnosticsModalOpen,
+    setExtensionClass,
+    settingsUi,
+    state: {
+      get acknowledgedCollapseEnabled() { return acknowledgedCollapseEnabled; },
+      set acknowledgedCollapseEnabled(value) { acknowledgedCollapseEnabled = value; },
+      get autoRefreshEnabled() { return autoRefreshEnabled; },
+      set autoRefreshEnabled(value) { autoRefreshEnabled = value; },
+      get autoRefreshIdleSeconds() { return autoRefreshIdleSeconds; },
+      set autoRefreshIdleSeconds(value) { autoRefreshIdleSeconds = value; },
+      get diagnosticsEnabled() { return diagnosticsEnabled; },
+      set diagnosticsEnabled(value) { diagnosticsEnabled = value; },
+      get hiddenCount() { return hiddenCount; },
+      get lastUserActivityTs() { return lastUserActivityTs; },
+      get newAlertNoticeCounts() { return newAlertNoticeCounts; },
+      get showSilenced() { return showSilenced; },
+      set showSilenced(value) { showSilenced = value; },
+      get soundAlertsEnabled() { return soundAlertsEnabled; },
+      set soundAlertsEnabled(value) { soundAlertsEnabled = value; },
+      get topBarMountObserver() { return topBarMountObserver; },
+      set topBarMountObserver(value) { topBarMountObserver = value; },
+      get userCommentFilterEnabled() { return userCommentFilterEnabled; },
+      set userCommentFilterEnabled(value) { userCommentFilterEnabled = value; }
+    }
+  });
+
+  function flashButtonState(button, text, ok = true) {
+    return toolbarStatusApi?.flashButtonState?.(...arguments);
   }
 
   function extractPromrasQuery(expr) {
@@ -1150,106 +1224,27 @@
   }
 
   function clearToolbarStatusTimer() {
-    if (!toolbarStatusTimer) return;
-    clearTimeout(toolbarStatusTimer);
-    toolbarStatusTimer = null;
+    return toolbarStatusApi?.clearToolbarStatusTimer?.(...arguments);
   }
 
   function updateToolbarStatus() {
-    const status = document.getElementById(TOP_BAR_STATUS_ID);
-    if (!status) return;
-
-    const isVisible = Boolean(toolbarStatusMessage);
-    const accessibleText = toolbarStatusTitle && toolbarStatusTitle !== toolbarStatusMessage
-      ? `${toolbarStatusMessage}. Подробности: ${toolbarStatusTitle}`
-      : toolbarStatusMessage;
-    status.textContent = isVisible ? toolbarStatusMessage : '';
-    status.title = isVisible ? (toolbarStatusTitle || toolbarStatusMessage) : '';
-    status.hidden = !isVisible;
-    if (isVisible) {
-      status.setAttribute('aria-label', accessibleText);
-      status.tabIndex = toolbarStatusTitle !== toolbarStatusMessage ? 0 : -1;
-    } else {
-      status.removeAttribute('aria-label');
-      status.removeAttribute('tabindex');
-    }
-    status.classList.toggle('is-info', toolbarStatusLevel === 'info');
-    status.classList.toggle('is-warn', toolbarStatusLevel === 'warn');
-    status.classList.toggle('is-error', toolbarStatusLevel === 'error');
+    return toolbarStatusApi?.updateToolbarStatus?.(...arguments);
   }
 
   function clearToolbarStatus(source) {
-    if (source && toolbarStatusSource && toolbarStatusSource !== source) return;
-
-    toolbarStatusSource = '';
-    toolbarStatusLevel = '';
-    toolbarStatusMessage = '';
-    toolbarStatusTitle = '';
-    clearToolbarStatusTimer();
-    updateToolbarStatus();
+    return toolbarStatusApi?.clearToolbarStatus?.(...arguments);
   }
 
   function setToolbarStatus(source, message, level = 'info', options = {}) {
-    const {
-      sticky = false,
-      ttlMs = STATUS_MESSAGE_TTL_MS,
-      title = ''
-    } = options;
-
-    toolbarStatusSource = String(source || '');
-    toolbarStatusLevel = level;
-    toolbarStatusMessage = String(message || '');
-    toolbarStatusTitle = String(title || toolbarStatusMessage);
-    clearToolbarStatusTimer();
-    updateToolbarStatus();
-
-    if (sticky || !toolbarStatusMessage) return;
-
-    toolbarStatusTimer = setTimeout(() => {
-      clearToolbarStatus(source);
-    }, Math.max(1000, Number(ttlMs) || STATUS_MESSAGE_TTL_MS));
+    return toolbarStatusApi?.setToolbarStatus?.(...arguments);
   }
 
   function updateNewAlertNotice() {
-    if (!isFeatureEnabled('visualNewAlertNotifications')) return;
-    const notice = document.getElementById(NEW_ALERT_NOTICE_ID);
-    if (!notice) return;
-    const warning = Math.max(0, Number(newAlertNoticeCounts.warning) || 0);
-    const critical = Math.max(0, Number(newAlertNoticeCounts.critical) || 0);
-    const unknown = Math.max(0, Number(newAlertNoticeCounts.unknown) || 0);
-    const total = warning + critical + unknown;
-    const visibleCounts = [];
-    if (warning > 0) visibleCounts.push(`Warn: ${warning}`);
-    if (critical > 0) visibleCounts.push(`Crit: ${critical}`);
-    if (unknown > 0) visibleCounts.push(`Unk: ${unknown}`);
-    const nextText = total ? `Новые алерты: ${visibleCounts.join(', ')}` : '';
-    if (notice.textContent !== nextText) notice.textContent = nextText;
-    notice.hidden = total === 0;
-    const severityClass = critical > 0
-      ? 'is-critical'
-      : (warning > 0 ? 'is-warning' : (unknown > 0 ? 'is-unknown' : ''));
-    for (const className of ['is-critical', 'is-warning', 'is-unknown']) {
-      notice.classList.toggle(className, className === severityClass);
-    }
+    return toolbarApi?.updateNewAlertNotice?.(...arguments);
   }
 
   function ensureNewAlertNotice() {
-    if (!isFeatureEnabled('visualNewAlertNotifications')) return null;
-    const bar = ensureTopBarExists();
-    if (!bar) return null;
-    let notice = bar.querySelector(`#${NEW_ALERT_NOTICE_ID}`);
-    if (!notice) {
-      notice = document.createElement('div');
-      notice.id = NEW_ALERT_NOTICE_ID;
-      notice.className = 'bosun-new-alerts-notice';
-      notice.setAttribute('role', 'status');
-      notice.setAttribute('aria-live', 'polite');
-      notice.setAttribute('aria-atomic', 'true');
-      notice.hidden = true;
-      bar.appendChild(notice);
-    }
-    updateNewAlertNotice();
-    return notice;
+    return toolbarApi?.ensureNewAlertNotice?.(...arguments);
   }
 
   function getChromeLocalStorage() {
@@ -1867,37 +1862,11 @@
   }
 
   function updateToggleText() {
-    const btn = document.getElementById(TOGGLE_ID);
-    const counter = document.getElementById(TOGGLE_COUNTER_ID);
-    if (!btn) return;
-
-    const labelNode = btn.querySelector('.bosun-silence-label');
-    if (!labelNode) return;
-
-    labelNode.textContent = showSilenced
-      ? 'Скрыть silenced alerts'
-      : 'Показать silenced alerts';
-
-    btn.classList.toggle('is-on', showSilenced);
-    btn.classList.toggle('is-neutral-off', !showSilenced);
-    btn.setAttribute('aria-pressed', showSilenced ? 'true' : 'false');
-
-    if (counter) {
-      counter.textContent = String(hiddenCount);
-      counter.title = `Всего silenced alerts: ${hiddenCount}`;
-    }
+    return toolbarApi?.updateToggleText?.(...arguments);
   }
 
   function handleToggleClick(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (typeof e.stopImmediatePropagation === 'function') {
-      e.stopImmediatePropagation();
-    }
-
-    showSilenced = !showSilenced;
-    saveState();
-    applyVisibility();
+    return toolbarApi?.handleToggleClick?.(...arguments);
   }
 
   function markUserActivity() {
@@ -1910,90 +1879,23 @@
   }
 
   function setToolbarToggleButtonState(button, enabled, options = {}) {
-    if (!button) return;
-
-    const {
-      onIcon = '✓',
-      offIcon = '✕',
-      label = '',
-      offUsesNeutral = false
-    } = options;
-
-    button.classList.remove('is-on', 'is-off', 'is-neutral-off');
-    button.classList.add(enabled ? 'is-on' : (offUsesNeutral ? 'is-neutral-off' : 'is-off'));
-
-    const iconEl = button.querySelector('.bosun-toolbar-btn-icon');
-    const labelEl = button.querySelector('.bosun-toolbar-btn-label');
-
-    if (iconEl) iconEl.textContent = enabled ? onIcon : offIcon;
-    if (labelEl && label) labelEl.textContent = label;
-
-    button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    return toolbarApi?.setToolbarToggleButtonState?.(...arguments);
   }
 
   function getAutoRefreshButtonLabel() {
-    return 'Автообновление';
+    return toolbarApi?.getAutoRefreshButtonLabel?.(...arguments);
   }
 
   function getAutoRefreshRemainingSeconds() {
-    if (activityApi?.getAutoRefreshRemainingSeconds) {
-      return activityApi.getAutoRefreshRemainingSeconds();
-    }
-    const elapsedSeconds = (Date.now() - lastUserActivityTs) / 1000;
-    return Math.max(0, Math.ceil(autoRefreshIdleSeconds - elapsedSeconds));
+    return toolbarApi?.getAutoRefreshRemainingSeconds?.(...arguments);
   }
 
   function updateAutoRefreshCountdown() {
-    const countdown = document.getElementById(AUTO_REFRESH_COUNTDOWN_ID);
-    if (!countdown) return;
-
-    if (activityApi?.updateAutoRefreshCountdown) {
-      activityApi.updateAutoRefreshCountdown(countdown);
-      return;
-    }
-
-    if (!autoRefreshEnabled) {
-      countdown.textContent = 'выкл';
-      countdown.title = 'Автообновление выключено';
-      countdown.removeAttribute('aria-pressed');
-      countdown.setAttribute('aria-label', 'Автообновление выключено');
-      return;
-    }
-
-    if (!isDashboardHome()) {
-      countdown.textContent = '—';
-      countdown.title = 'Автообновление страницы только на главной /';
-      countdown.removeAttribute('aria-pressed');
-      countdown.setAttribute('aria-label', 'Автообновление включено и работает только на главной странице');
-      return;
-    }
-
-    const remaining = getAutoRefreshRemainingSeconds();
-    countdown.title = `До автообновления: ${remaining} секунд`;
-    countdown.textContent = `${remaining}s`;
-    countdown.removeAttribute('aria-pressed');
-    countdown.setAttribute(
-      'aria-label',
-      `Автообновление включено, осталось ${remaining} секунд`
-    );
+    return toolbarApi?.updateAutoRefreshCountdown?.(...arguments);
   }
 
   function updateAutoRefreshControls() {
-    const toggle = document.getElementById(AUTO_REFRESH_TOGGLE_ID);
-    const input = document.getElementById(AUTO_REFRESH_INPUT_ID);
-    if (!toggle || !input) return;
-
-    setToolbarToggleButtonState(toggle, autoRefreshEnabled, {
-      onIcon: '↻',
-      offIcon: '⏸',
-      label: getAutoRefreshButtonLabel(),
-      offUsesNeutral: true
-    });
-
-    if (document.activeElement !== input) {
-      input.value = String(autoRefreshIdleSeconds);
-    }
-    updateAutoRefreshCountdown();
+    return toolbarApi?.updateAutoRefreshControls?.(...arguments);
   }
 
   function clearAutoRefreshReEnableTimer() {
@@ -2005,409 +1907,97 @@
   }
 
   function handleAutoRefreshToggleChange(e) {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    const nextEnabled = !autoRefreshEnabled;
-    if (activityApi?.handleAutoRefreshToggleChange) {
-      activityApi.handleAutoRefreshToggleChange(nextEnabled);
-      return;
-    }
-    autoRefreshEnabled = nextEnabled;
-    markUserActivity();
-    saveAutoRefreshState();
-    updateAutoRefreshControls();
+    return toolbarApi?.handleAutoRefreshToggleChange?.(...arguments);
   }
 
   function handleAutoRefreshIdleChange(e) {
-    autoRefreshIdleSeconds = normalizeAutoRefreshIdleSeconds(e.target.value);
-    markUserActivity();
-    saveAutoRefreshState();
-    updateAutoRefreshControls();
+    return toolbarApi?.handleAutoRefreshIdleChange?.(...arguments);
   }
 
   function handleAutoRefreshIdleInput(e) {
-    const numericValue = Number(e.target.value);
-    if (!Number.isFinite(numericValue) || numericValue <= 0) return;
-
-    autoRefreshIdleSeconds = Math.round(numericValue);
-    markUserActivity();
+    return toolbarApi?.handleAutoRefreshIdleInput?.(...arguments);
   }
 
   function handleAutoRefreshIdleKeydown(e) {
-    if (e.key !== 'Enter') return;
-
-    e.preventDefault();
-    e.currentTarget.blur();
+    return toolbarApi?.handleAutoRefreshIdleKeydown?.(...arguments);
   }
 
   function handleAutoRefreshCountdownClick() {
-    if (activityApi?.handleCountdownClick) {
-      activityApi.handleCountdownClick();
-      return;
-    }
-    autoRefreshEnabled = !autoRefreshEnabled;
-    markUserActivity();
-    saveAutoRefreshState();
-    updateAutoRefreshControls();
+    return toolbarApi?.handleAutoRefreshCountdownClick?.(...arguments);
   }
 
   function updateSoundAlertsControl() {
-    const button = document.getElementById(SOUND_ALERTS_TOGGLE_ID);
-    setToolbarToggleButtonState(button, soundAlertsEnabled, {
-      onIcon: '🔊',
-      offIcon: '🔇',
-      label: 'Звук',
-      offUsesNeutral: false
-    });
+    return toolbarApi?.updateSoundAlertsControl?.(...arguments);
   }
 
 
 
 
   function updateUserCommentFilterControl() {
-    const button = document.getElementById(USER_COMMENT_FILTER_TOGGLE_ID);
-    setToolbarToggleButtonState(button, userCommentFilterEnabled, {
-      onIcon: '!',
-      offIcon: '!',
-      label: 'Без комментария',
-      offUsesNeutral: true
-    });
-    if (button) {
-      button.title = userCommentFilterEnabled
-        ? 'Показаны только алерты без пользовательских комментариев'
-        : 'Показаны все алерты Needs Acknowledgement';
-    }
+    return toolbarApi?.updateUserCommentFilterControl?.(...arguments);
   }
 
   function updateAcknowledgedCollapseControl() {
-    const button = document.getElementById(ACKNOWLEDGED_COLLAPSE_TOGGLE_ID);
-    if (!button) return;
-    const enabled = isFeatureEnabled('priorityAlerts');
-    const compact = acknowledgedCollapseEnabled && enabled;
-    const label = compact ? 'Показать все' : 'Скрыть обычные';
-    const labelNode = button.querySelector('.bosun-ack-toggle-label');
-    if (labelNode && labelNode.textContent !== label) labelNode.textContent = label;
-    const icon = button.querySelector('.fa');
-    const iconClass = compact ? 'fa fa-eye' : 'fa fa-eye-slash';
-    if (icon && icon.className !== iconClass) icon.className = iconClass;
-    button.disabled = !enabled;
-    button.setAttribute('aria-pressed', String(compact));
-    button.setAttribute('aria-expanded', String(!compact));
-    button.title = enabled ? 'Приоритетные и непроверенные алерты остаются видимыми'
-      : 'Для компактного режима включите Priority Alerts';
+    return toolbarApi?.updateAcknowledgedCollapseControl?.(...arguments);
   }
 
   function updateDiagnosticsControl() {
-    const cb = document.getElementById(DIAGNOSTICS_TOGGLE_ID);
-    if (cb) cb.checked = diagnosticsEnabled;
-    const openBtn = document.getElementById(DIAGNOSTICS_OPEN_BUTTON_ID);
-    if (openBtn) {
-      const isOpen = diagnosticsApi?.isModalOpen?.() === true;
-      openBtn.textContent = isOpen ? 'Закрыть лог' : 'Открыть лог';
-    }
+    return toolbarApi?.updateDiagnosticsControl?.(...arguments);
   }
 
   function handleSoundAlertsToggle(e) {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    soundAlertsEnabled = !soundAlertsEnabled;
-    markUserActivity();
-    saveSoundAlertsState();
-    updateSoundAlertsControl();
+    return toolbarApi?.handleSoundAlertsToggle?.(...arguments);
   }
 
 
   function handleUserCommentFilterToggle(e) {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    userCommentFilterEnabled = !userCommentFilterEnabled;
-    markUserActivity();
-    saveUserCommentFilterState();
-    applyUserCommentFilter();
-    updateUserCommentFilterControl();
+    return toolbarApi?.handleUserCommentFilterToggle?.(...arguments);
   }
 
   function handleAcknowledgedCollapseToggle(e) {
-    if (e) {
-      e.preventDefault();
-      e.stopPropagation();
-    }
-    acknowledgedCollapseEnabled = !acknowledgedCollapseEnabled;
-    markUserActivity();
-    saveAcknowledgedCollapseState();
-    applyAcknowledgedCollapse();
-    updateAcknowledgedCollapseControl();
+    return toolbarApi?.handleAcknowledgedCollapseToggle?.(...arguments);
   }
 
   function handleDiagnosticsToggle(e) {
-    diagnosticsEnabled = Boolean(e.target.checked);
-    saveDiagnosticsState();
-    updateDiagnosticsControl();
-    reportDiagnostics('diag-toggled', diagnosticsEnabled ? 'on' : 'off');
+    return toolbarApi?.handleDiagnosticsToggle?.(...arguments);
   }
 
   function handleDiagnosticsOpenClick(e) {
-    e.preventDefault();
-    e.stopPropagation();
-    const isOpen = diagnosticsApi?.isModalOpen?.() === true;
-    setDiagnosticsModalOpen(!isOpen);
-    updateDiagnosticsControl();
+    return toolbarApi?.handleDiagnosticsOpenClick?.(...arguments);
   }
 
   function ensureDiagnosticsModal() {
-    return diagnosticsApi?.ensureModal?.(updateDiagnosticsControl) || null;
+    return toolbarApi?.ensureDiagnosticsModal?.(...arguments);
   }
 
   function ensureSoundAlertsControls(actions) {
-    if (!isFeatureEnabled('soundNotifications')) {
-      actions.querySelector('.bosun-sound-alerts-wrap')?.remove();
-      return;
-    }
-    let wrap = actions.querySelector('.bosun-sound-alerts-wrap');
-    if (!wrap) {
-      wrap = document.createElement('div');
-      wrap.className = 'bosun-toolbar-group bosun-sound-alerts-wrap';
-
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = SOUND_ALERTS_TOGGLE_ID;
-      button.className = 'bosun-toolbar-btn';
-      button.innerHTML = `
-        <span class="bosun-toolbar-btn-icon">🔊</span>
-        <span class="bosun-toolbar-btn-label">Звук</span>
-      `;
-      button.addEventListener('click', handleSoundAlertsToggle);
-      wrap.appendChild(button);
-      actions.appendChild(wrap);
-    }
-
-    updateSoundAlertsControl();
+    return toolbarApi?.ensureSoundAlertsControls?.(...arguments);
   }
 
 
 
   function ensureUserCommentFilterControls(actions) {
-    if (!isFeatureEnabled('noCommentFilter')) {
-      actions.querySelector('.bosun-user-comment-filter-wrap')?.remove();
-      return;
-    }
-    let wrap = actions.querySelector('.bosun-user-comment-filter-wrap');
-    if (!wrap) {
-      wrap = document.createElement('div');
-      wrap.className = 'bosun-toolbar-group bosun-user-comment-filter-wrap';
-
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = USER_COMMENT_FILTER_TOGGLE_ID;
-      button.className = 'bosun-toolbar-btn';
-      button.innerHTML = `
-        <span class="bosun-toolbar-btn-icon">!</span>
-        <span class="bosun-toolbar-btn-label">Без комментария</span>
-      `;
-      button.addEventListener('click', handleUserCommentFilterToggle);
-      wrap.appendChild(button);
-      actions.appendChild(wrap);
-    }
-
-    updateUserCommentFilterControl();
+    return toolbarApi?.ensureUserCommentFilterControls?.(...arguments);
   }
 
   function getAcknowledgedControlsMount() {
-    const root = getAcknowledgedRoot(), heading = getAcknowledgedHeading();
-    const bound = heading?.matches('[ng-bind], [ng-bind-html], [ng-bind-template]');
-    const parent = bound ? heading.parentElement : heading || root;
-    const row = bound && parent !== root && parent.matches('.clearfix') &&
-      !parent.querySelector('.panel, [ts-ack-group]') ? parent : null;
-    return { root, heading, bound, parent, row };
+    return toolbarApi?.getAcknowledgedControlsMount?.(...arguments);
   }
 
   function ensureAcknowledgedCollapseControls() {
-    const root = getAcknowledgedRoot();
-    if (!isDashboardEnhancementsPage() || !root) return;
-    clearOwnedElements('.bosun-acknowledged-collapse-wrap');
-    const mount = getAcknowledgedControlsMount();
-    for (const row of document.querySelectorAll(`.${ACKNOWLEDGED_HEADER_ROW_CLASS}`)) {
-      if (row !== mount.row) setExtensionClass(row, ACKNOWLEDGED_HEADER_ROW_CLASS, false);
-    }
-    if (mount.row) setExtensionClass(mount.row, ACKNOWLEDGED_HEADER_ROW_CLASS, true);
-    let wrap = document.getElementById(ACKNOWLEDGED_CONTROLS_ID);
-    // Старые панели и копии DOM не принадлежат текущим обработчикам. Пересоздаём
-    // только элементы расширения; штатные узлы и их привязки сохраняются.
-    if (wrap && !acknowledgedControlNodes.has(wrap)) { wrap.remove(); wrap = null; }
-    for (const duplicate of document.querySelectorAll(`#${ACKNOWLEDGED_CONTROLS_ID}`)) {
-      if (duplicate !== wrap) duplicate.remove();
-    }
-    if (!wrap) {
-      wrap = document.createElement('span');
-      wrap.id = ACKNOWLEDGED_CONTROLS_ID;
-      wrap.className = 'bosun-acknowledged-controls';
-      const summary = document.createElement('span');
-      summary.className = 'bosun-ack-summary';
-      summary.id = 'bosun-acknowledged-summary';
-      const priority = document.createElement('span');
-      priority.className = 'bosun-ack-priority';
-      const flag = document.createElement('span');
-      flag.className = 'fa fa-flag';
-      flag.setAttribute('aria-hidden', 'true');
-      const priorityLabel = document.createElement('span');
-      priorityLabel.className = 'bosun-ack-priority-label';
-      const hiddenLabel = document.createElement('span');
-      hiddenLabel.className = 'bosun-ack-hidden-label';
-      priority.append(flag, priorityLabel);
-      summary.append(priority, hiddenLabel);
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = ACKNOWLEDGED_COLLAPSE_TOGGLE_ID;
-      button.className = 'btn btn-default btn-xs';
-      const icon = document.createElement('span');
-      icon.className = 'fa fa-eye-slash';
-      icon.setAttribute('aria-hidden', 'true');
-      const labelNode = document.createElement('span');
-      labelNode.className = 'bosun-ack-toggle-label';
-      button.append(icon, labelNode);
-      button.setAttribute('aria-describedby', summary.id);
-      button.addEventListener('click', handleAcknowledgedCollapseToggle);
-      wrap.append(summary, button);
-      acknowledgedControlNodes.add(wrap);
-    }
-    if (mount.bound) {
-      // Сохраняем исходный порядок: заголовок → раскрытие → штатные элементы управления. Перемещаем
-      // только свой элемент, после всех штатных соседей в той же строке.
-      if (wrap.parentElement !== mount.parent || mount.parent.lastElementChild !== wrap) mount.parent.appendChild(wrap);
-    } else if (wrap.parentElement !== mount.parent) {
-      // В старых заголовках без привязок безопасно размещать встроенный элемент управления. Если
-      // заголовок не распознан, показываем только небольшой элемент в начале секции.
-      if (mount.heading) mount.parent.appendChild(wrap);
-      else mount.parent.insertBefore(wrap, mount.parent.firstChild);
-    }
-    if (!root.id) {
-      let suffix = 0;
-      let id;
-      do { id = 'bosun-acknowledged-content-' + suffix++; }
-      while (document.getElementById(id));
-      root.id = id;
-    }
-    wrap.querySelector('button').setAttribute('aria-controls', root.id);
-    updateAcknowledgedCollapseControl();
+    return toolbarApi?.ensureAcknowledgedCollapseControls?.(...arguments);
   }
 
   function ensureDiagnosticsControls(actions) {
-    if (!DIAGNOSTICS_TOOLBAR_UI_ENABLED) {
-      const deadGroup = actions.querySelector('.bosun-diagnostics-group');
-      if (deadGroup) deadGroup.remove();
-      const deadModal = document.getElementById(DIAGNOSTICS_MODAL_ID);
-      if (deadModal) deadModal.remove();
-      return;
-    }
-
-    let group = actions.querySelector('.bosun-diagnostics-group');
-    if (!group) {
-      group = document.createElement('div');
-      group.className = 'bosun-diagnostics-group';
-      actions.appendChild(group);
-    }
-
-    let wrap = group.querySelector('.bosun-diagnostics-wrap');
-    if (!wrap) {
-      wrap = document.createElement('label');
-      wrap.className = 'bosun-auto-refresh-label bosun-diagnostics-wrap';
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.id = DIAGNOSTICS_TOGGLE_ID;
-      cb.addEventListener('change', handleDiagnosticsToggle);
-      wrap.appendChild(cb);
-      wrap.appendChild(document.createTextNode('Диагностика'));
-      group.appendChild(wrap);
-    }
-    let openBtn = group.querySelector(`#${DIAGNOSTICS_OPEN_BUTTON_ID}`);
-    if (!openBtn) {
-      openBtn = document.createElement('button');
-      openBtn.type = 'button';
-      openBtn.id = DIAGNOSTICS_OPEN_BUTTON_ID;
-      openBtn.className = 'bosun-toolbar-btn bosun-toolbar-btn-secondary';
-      openBtn.textContent = 'Открыть лог';
-      openBtn.title = 'Открыть окно журнала диагностики';
-      openBtn.addEventListener('click', handleDiagnosticsOpenClick);
-      group.appendChild(openBtn);
-    }
-    ensureDiagnosticsModal();
-    updateDiagnosticsControl();
+    return toolbarApi?.ensureDiagnosticsControls?.(...arguments);
   }
 
   function ensureAutoRefreshControls(actions) {
-    if (!isFeatureEnabled('autoRefresh')) {
-      actions.querySelector('.bosun-auto-refresh-group')?.remove();
-      return;
-    }
-    let group = actions.querySelector('.bosun-auto-refresh-group');
-    if (!group) {
-      group = document.createElement('div');
-      group.className = 'bosun-toolbar-group bosun-auto-refresh-group';
-
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.id = AUTO_REFRESH_TOGGLE_ID;
-      toggle.className = 'bosun-toolbar-btn';
-      toggle.innerHTML = `
-        <span class="bosun-toolbar-btn-icon">↻</span>
-        <span class="bosun-toolbar-btn-label">${getAutoRefreshButtonLabel()}</span>
-      `;
-      toggle.addEventListener('click', handleAutoRefreshToggleChange);
-
-      const input = document.createElement('input');
-      input.id = AUTO_REFRESH_INPUT_ID;
-      input.className = 'bosun-toolbar-input';
-      input.type = 'number';
-      input.min = String(AUTO_REFRESH_MIN_IDLE_SECONDS);
-      input.max = String(AUTO_REFRESH_MAX_IDLE_SECONDS);
-      input.step = '1';
-      input.inputMode = 'numeric';
-      input.setAttribute('aria-label', 'Интервал автообновления в секундах');
-      input.addEventListener('input', handleAutoRefreshIdleInput);
-      input.addEventListener('change', handleAutoRefreshIdleChange);
-      input.addEventListener('keydown', handleAutoRefreshIdleKeydown);
-
-      const inputHint = document.createElement('span');
-      inputHint.id = `${AUTO_REFRESH_INPUT_ID}-hint`;
-      inputHint.className = 'bosun-sr-only';
-      inputHint.textContent = `Допустимый диапазон: от ${AUTO_REFRESH_MIN_IDLE_SECONDS} до ${AUTO_REFRESH_MAX_IDLE_SECONDS} секунд`;
-      input.setAttribute('aria-describedby', inputHint.id);
-
-      const countdown = document.createElement('output');
-      countdown.id = AUTO_REFRESH_COUNTDOWN_ID;
-      countdown.className = 'bosun-toolbar-countdown';
-      countdown.setAttribute('role', 'timer');
-      countdown.setAttribute('aria-label', 'Состояние автообновления');
-
-      group.appendChild(toggle);
-      group.appendChild(input);
-      group.appendChild(inputHint);
-      group.appendChild(countdown);
-      actions.appendChild(group);
-    }
-
-    updateAutoRefreshControls();
+    return toolbarApi?.ensureAutoRefreshControls?.(...arguments);
   }
 
   function ensureToolbarStatusIndicator(actions) {
-    let status = actions.querySelector(`#${TOP_BAR_STATUS_ID}`);
-    if (!status) {
-      status = document.createElement('span');
-      status.id = TOP_BAR_STATUS_ID;
-      status.className = 'bosun-toolbar-status';
-      status.setAttribute('role', 'status');
-      status.setAttribute('aria-live', 'polite');
-      status.hidden = true;
-      actions.appendChild(status);
-    }
-
-    updateToolbarStatus();
+    return toolbarStatusApi?.ensureToolbarStatusIndicator?.(...arguments);
   }
 
   function startAutoRefreshLoop() {
@@ -2429,144 +2019,31 @@
   }
 
   function findMainContentAnchor() {
-    return (
-      document.querySelector('body > .container[style*="width: 95%"]') ||
-      document.querySelector('body > .container') ||
-      document.body?.querySelector('.container') ||
-      null
-    );
+    return toolbarApi?.findMainContentAnchor?.(...arguments);
   }
 
   function disconnectTopBarMountObserver() {
-    if (topBarMountObserver) {
-      topBarMountObserver.disconnect();
-      topBarMountObserver = null;
-    }
+    return toolbarApi?.disconnectTopBarMountObserver?.(...arguments);
   }
 
   function scheduleTopBarMount() {
-    if (!isDashboardHome()) {
-      disconnectTopBarMountObserver();
-      return;
-    }
-
-    const tryMount = () => {
-      ensureToggleExists();
-      return !!document.getElementById(TOP_BAR_ID);
-    };
-
-    if (tryMount()) return;
-
-    if (topBarMountObserver) return;
-
-    topBarMountObserver = new MutationObserver(() => {
-      if (tryMount()) {
-        disconnectTopBarMountObserver();
-      }
-    });
-    topBarMountObserver.observe(document.documentElement, { childList: true, subtree: true });
-    requestAnimationFrame(tryMount);
+    return toolbarApi?.scheduleTopBarMount?.(...arguments);
   }
 
   function ensureTopBarExists() {
-    let bar = document.getElementById(TOP_BAR_ID);
-    if (!isDashboardHome()) {
-      if (bar) bar.remove();
-      return null;
-    }
-    if (bar) return bar;
-
-    const navbar = document.querySelector('.navbar.navbar-default.navbar-static-top');
-    const contentContainer = findMainContentAnchor();
-    if (!contentContainer && !navbar) return null;
-
-    bar = document.createElement('div');
-    bar.id = TOP_BAR_ID;
-    bar.className = 'bosun-toolbar-fallback';
-    bar.innerHTML = `
-      <div class="bosun-top-controls-inner">
-        <div class="bosun-top-controls-actions"></div>
-      </div>
-    `;
-
-    if (navbar && navbar.parentNode) {
-      if (navbar.nextElementSibling) {
-        navbar.parentNode.insertBefore(bar, navbar.nextElementSibling);
-      } else {
-        navbar.parentNode.appendChild(bar);
-      }
-    } else if (contentContainer && contentContainer.parentNode) {
-      contentContainer.parentNode.insertBefore(bar, contentContainer);
-    }
-
-    return bar;
+    return toolbarApi?.ensureTopBarExists?.(...arguments);
   }
 
   function getTopBarActionsContainer() {
-    const bar = ensureTopBarExists();
-    return bar?.querySelector('.bosun-top-controls-actions') || null;
+    return toolbarApi?.getTopBarActionsContainer?.(...arguments);
   }
 
   function ensureToolbarUtilityGroup(actions) {
-    let group = actions.querySelector('.bosun-toolbar-utility-group');
-    if (!group) {
-      group = document.createElement('div');
-      group.className = 'bosun-toolbar-utility-group';
-      actions.appendChild(group);
-    }
-    return group;
+    return toolbarApi?.ensureToolbarUtilityGroup?.(...arguments);
   }
 
   function ensureToggleExists() {
-    if (!isDashboardHome()) {
-      document.getElementById(TOP_BAR_ID)?.remove();
-      return;
-    }
-    const actions = getTopBarActionsContainer();
-    if (!actions) return;
-    ensureSoundAlertsControls(actions);
-    ensureUserCommentFilterControls(actions);
-    ensureAutoRefreshControls(actions);
-    ensureToolbarStatusIndicator(actions);
-    ensureNewAlertNotice();
-    ensureDiagnosticsControls(actions);
-    const utilityGroup = ensureToolbarUtilityGroup(actions);
-
-    let btn = document.getElementById(TOGGLE_ID);
-    let counter = document.getElementById(TOGGLE_COUNTER_ID);
-
-    if (!isFeatureEnabled('silencedFilter')) {
-      btn?.remove();
-      settingsUi?.mount?.(utilityGroup);
-      return;
-    }
-
-    if (!btn) {
-      btn = document.createElement('button');
-      btn.id = TOGGLE_ID;
-      btn.type = 'button';
-      btn.className = 'bosun-toolbar-btn';
-
-      const label = document.createElement('span');
-      label.className = 'bosun-silence-label bosun-toolbar-btn-label';
-      btn.appendChild(label);
-      btn.addEventListener('click', handleToggleClick, true);
-    }
-
-    if (!counter) {
-      counter = document.createElement('span');
-      counter.id = TOGGLE_COUNTER_ID;
-      counter.className = 'bosun-toolbar-badge';
-    }
-
-    if (counter.parentElement !== btn) {
-      btn.appendChild(counter);
-    }
-    if (btn.parentElement !== utilityGroup) {
-      utilityGroup.appendChild(btn);
-    }
-    settingsUi?.mount?.(utilityGroup);
-    updateToggleText();
+    return toolbarApi?.ensureToggleExists?.(...arguments);
   }
 
   function getNeedsAckRoot() {

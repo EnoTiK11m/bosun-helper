@@ -25,6 +25,11 @@ function instrumentContentSource(source) {
     ensureParentStateIcon,
     injectStyles,
     ensureToggleExists,
+    setToolbarStatus,
+    clearToolbarStatus,
+    updateToolbarStatus,
+    scheduleTopBarMount,
+    disconnectTopBarMountObserver,
     destroySettingsUi: () => settingsUi?.destroy?.(),
     ensureAutoRefreshControls,
     ensureLastActionCopyButtons,
@@ -149,7 +154,7 @@ function createScriptLoader(root) {
   return {
     readTestScript,
     instrumentContentSource(source) {
-      return `${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
+      return `${readTestScript('src/bosun/toolbar-status.js')}\n${readTestScript('src/bosun/toolbar.js')}\n${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
     }
   };
 }

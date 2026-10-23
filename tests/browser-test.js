@@ -22,6 +22,7 @@ const runSettingsNotificationScenarios = require('./browser/settings-notificatio
 const runSettingsRecoveryScenarios = require('./browser/settings-recovery');
 const runAccessibilityCopyScenarios = require('./browser/accessibility-copy');
 const runCopyAssertions = require('./browser/copy');
+const runToolbarAssertions = require('./browser/toolbar');
 const runGrafanaEditorHandoffScenarios = require('./browser/grafana-editor-handoff');
 
 selection('test:browser', process.env, process.argv.slice(2));
@@ -120,6 +121,7 @@ async function runBrowserAssertions(client) {
 
   await runAccessibilityCopyScenarios({ client, contentSource, lastActionSource });
   await runCopyAssertions({ client, copySource: readTestScript('src/bosun/copy.js') });
+  await runToolbarAssertions({ client, contentSource });
 
   await runGrafanaEditorHandoffScenarios({ client, handoffSource, grafanaPageSource, legacyFixtures, stateExprFallbackResult, expectedMergeQueries });
 }

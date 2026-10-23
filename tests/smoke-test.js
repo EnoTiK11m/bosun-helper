@@ -129,6 +129,8 @@ for (const file of [
   'src/bosun/priority-alerts.js',
   'src/bosun/last-action.js',
   'src/bosun/copy.js',
+  'src/bosun/toolbar-status.js',
+  'src/bosun/toolbar.js',
   'src/bosun/content.js'
 ]) {
   const code = fs.readFileSync(path.join(root, file), 'utf8');
