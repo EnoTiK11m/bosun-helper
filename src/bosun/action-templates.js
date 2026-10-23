@@ -298,8 +298,8 @@
     }
 
     function insertTemplate(value) {
-      // Bosun can replace the textarea without replacing its parent. Resolve it at
-      // click time so buttons never retain a detached Angular-controlled element.
+      // Bosun может заменить textarea, сохранив её родителя. Ищем поле
+      // при нажатии, чтобы кнопки не удерживали отсоединённый элемент под управлением Angular.
       const textarea = findMessageTextarea();
       if (!textarea || !textarea.parentElement) return false;
       const current = textarea.value || '';

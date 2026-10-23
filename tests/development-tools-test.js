@@ -124,7 +124,7 @@ try {
     stage(fixtureRoot, fixtureName, content);
     assert.ok(scanIndex(fixtureRoot).size, 'Real or changed risks in test files must still block');
   }
-  // New regression source and the detector must themselves remain publishable.
+  // Код новой регрессии и сам детектор должны оставаться пригодными для публикации.
   for (const name of ['scripts/publication-guard.js', 'tests/development-tools-test.js']) {
     assert.deepEqual(scanText(fs.readFileSync(path.join(repository, name), 'utf8'), emptyHosts, false, name), []);
   }
@@ -234,7 +234,7 @@ try {
     assert.ok(scanPush(riskyHistory, line(translated, published)).has(reason), 'Published bytes do not exempt other paths or content risks');
   }
 
-  // Invoke hook files directly; no git add/commit/push in any repository.
+  // Вызываем файлы hooks напрямую; git add/commit/push не выполняются ни в одном репозитории.
   const hookRoot = workspace(); stage(hookRoot, 'file.txt', 'safe');
   for (const name of ['project-tools.js', 'publication-guard.js', 'config-sync.js']) write(hookRoot, `scripts/${name}`, fs.readFileSync(path.join(repository, 'scripts', name)));
   const hookDir = path.join(hookRoot, '.git', 'hooks');

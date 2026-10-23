@@ -467,8 +467,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     assert.strictEqual((await run('fixtureState()'))[0].childNote, true);
     const mutateMain = script => evaluate(client, `document.getElementById('bh-angular-identity-test').contentWindow.eval(${JSON.stringify(script)})`);
     if (subjectRegressionOnly || ageSourceRegressionOnly || emptySectionRegressionOnly || expandIdentityRegressionOnly) {
-      // The real guarded MAIN/ISOLATED reader proves panel membership independently
-      // of the diagnostic snapshot-to-snapshot ID comparison.
+      // Настоящий защищённый читатель MAIN/ISOLATED подтверждает принадлежность панели независимо
+      // от диагностического сравнения ID между снимками.
       await mutateMain(`fixtureBodies.forEach(entry => {
         entry.body.remove();
         entry.panel.querySelector('[ng-bind="group.Subject"]').textContent = fixtureGroups[entry.section][0].Subject;
@@ -487,7 +487,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
         });
       };`);
       if (expandIdentityRegressionOnly) {
-        // Real MAIN/ISOLATED proof; parent-model identity alone is insufficient.
+        // Настоящее доказательство MAIN/ISOLATED; одной идентичности родительской модели недостаточно.
         const results = [];
         for (const section of ['NeedAck', 'Acknowledged']) {
           for (const conflict of ['none', 'visible-id', 'visible-child-model-key', 'parent-id', 'parent-key']) {
@@ -603,7 +603,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
           assert.strictEqual(await run(`document.querySelector('[ts-ack-group="schedule.Groups.${section}"] .pull-right.ng-binding').textContent`),'6m-ago');
         };
         if(visibleIdFormatRegressionOnly || process.argv.includes('--single-alert-age-visible-id-format-regression')) {
-          // Public upstream template (no corporate DOM/data):
+          // Публичный штатный шаблон без корпоративного DOM и данных:
           // bosun-monitor/bosun, cmd/bosun/web/static/partials/alertstate.html:
           // <span ng-show="state.Id">#{{state.Id}}:</span>
           const matrix=[
@@ -721,7 +721,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
         let negativeCases=0;
         for(const section of ['NeedAck','Acknowledged']) {
           const opposite=section==='NeedAck'?'Acknowledged':'NeedAck';
-          // A new generation and repeated toggles must always use the current Ago.
+          // Новое поколение и повторные переключения всегда используют текущее Ago.
           await prepareExpanded(section);
           const positive=await run(`(() => {
             const hooks=__BosunHelperBrowserTest,panel=document.querySelector('[ts-ack-group="schedule.Groups.${section}"] .panel-group > .panel');
@@ -876,7 +876,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
               return {writes:expandedRaceWrites.slice(),text:expandedOldCount.textContent};
             })()`);
             if(mutation==='snapshot') {
-              // A nested MAIN request is rejected while the outer read is in flight.
+              // Вложенный запрос MAIN отклоняется, пока выполняется внешнее чтение.
               assert.ok(race.writes.every(value=>/^\d+ alerts$/.test(value)),'A stale generation must never write age');
               assert.strictEqual(await run(`(() => {__BosunHelperBrowserTest.singleAlertAge.refresh();return expandedOldCount.textContent;})()`),'2m-ago');
             }
@@ -886,8 +886,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
             negativeCases++;
           }
         }
-        // A missing OWN child binding is a demonstrated synthetic limitation,
-        // not proof that this is the LIVE cause. The opt-in red test stays separate.
+        // Отсутствие СОБСТВЕННОЙ дочерней привязки — подтверждённое ограничение синтетического сценария,
+        // а не доказанная причина в LIVE. Явно включаемый падающий тест остаётся отдельным.
         await prepareExpanded('Acknowledged');
         await mutateMain(`(() => {
           const entry=fixtureBodies.find(row=>row.section==='Acknowledged');
@@ -1296,7 +1296,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
           assert.strictEqual(negative.readerReason,reasons[scenario]);
         }
       }
-      // Mutation hooks run in MAIN during the genuine synchronous read, not before refresh.
+      // Обработчики мутаций выполняются в MAIN во время настоящего синхронного чтения, не до обновления.
       for (const mutation of ['panel', 'heading', 'count', 'root', 'section', 'snapshot']) {
         await mutateMain('resetAgeFixture();');
         await run(`(() => {
@@ -1389,8 +1389,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     const refresh = () => run('__BosunHelperBrowserTest.runDomRefreshPass({ preserveExistingOnNone: true });');
     const ackPriority = async () => (await run('fixtureState()'))[1].priority;
     const applyBase = () => run('__BosunHelperBrowserTest.applyAlertsPayload(JSON.parse(JSON.stringify(fixturePayload)), { source: "follower" });');
-    // Adjacent collapsed groups sharing one exact rule must resolve individually,
-    // with all four agreeing name/key sources and valid Bosun tag names.
+    // Соседние свёрнутые группы с одним точным правилом должны сопоставляться раздельно,
+    // при согласовании всех четырёх источников имени/ключа и допустимых именах тегов Bosun.
     await mutateMain(`
       siblingRoot=document.querySelector('[ts-ack-group="schedule.Groups.NeedAck"]');
       savedSiblingContainer=siblingRoot.firstElementChild;savedSiblingGroups=fixtureGroups.NeedAck;
@@ -1416,8 +1416,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       }
       savedSiblingContainer.replaceWith(siblingContainer);
     `);
-    // Pass only synthetic API data across the test boundary; production bridge
-    // continues to expose identities, never page-supplied Priority state.
+    // Через границу теста передаются только синтетические данные API; рабочий мост
+    // по-прежнему выдаёт идентичности, а не полученное от страницы состояние Priority.
     const siblingApiGroups = await mutateMain('JSON.parse(JSON.stringify(fixtureGroups.NeedAck))');
     await run(`globalThis.siblingPayload=JSON.parse(JSON.stringify(fixturePayload));
       siblingPayload.Groups.NeedAck=${JSON.stringify(siblingApiGroups)};
@@ -1443,7 +1443,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       }
       await run('__BosunHelperBrowserTest.applyAlertsPayload(JSON.parse(JSON.stringify(siblingPayload)),{source:"follower"});');
       await assertSiblings('Repeated snapshot for same-name siblings');
-      // Neither Subject equality nor DOM/API ordering proves membership.
+      // Ни равенство Subject, ни порядок DOM/API не доказывают принадлежность.
       await mutateMain(`siblingPanels.forEach(panel=>panel.querySelector('[ng-bind="group.Subject"]').textContent='same native subject');
         siblingPanels.slice().reverse().forEach(panel=>siblingContainer.appendChild(panel));`);
       await refresh();
@@ -1453,7 +1453,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       await mutateMain('siblingPanels.forEach(panel=>siblingContainer.appendChild(panel));');await refresh();
       await assertSiblings('Restored DOM order has no effect on Priority');
     }
-    // Rejection of ambiguous identities is local to the affected groups.
+    // Отказ при неоднозначной идентичности затрагивает только соответствующие группы.
     for(const duplicate of ['id','key']){
       await mutateMain(duplicate==='id'
         ? 'fixtureGroups.NeedAck[1].Children[0].State.Id=9701;'
@@ -1488,8 +1488,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     await assertSiblings('Acknowledged presentation restored');
     await mutateMain('siblingContainer.replaceWith(savedSiblingContainer);fixtureGroups.NeedAck=savedSiblingGroups;');
     await applyBase();
-    // Full membership is order-independent; a valid multi-child collapsed group
-    // still uses current API classifications, never the previous marker.
+    // Полный состав не зависит от порядка; корректная свёрнутая группа с несколькими детьми
+    // по-прежнему использует текущую классификацию API, а не предыдущий маркер.
     await mutateMain(`fixtureGroups.Acknowledged[0].Children.push({State:{Id:9604},AlertKey:'synthetic.second{}'});
       fixtureGroups.Acknowledged[0].Children.reverse();`);
     await run(`(() => {const next=JSON.parse(JSON.stringify(fixturePayload));
@@ -1498,7 +1498,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     assert.strictEqual(await ackPriority(), true, 'Complete reordered multi-child model matches one API group');
     await mutateMain('fixtureGroups.Acknowledged[0].Children.reverse();fixtureGroups.Acknowledged[0].Children.pop();');
     await applyBase();
-    // Each synchronous read must remove its temporary response listener.
+    // Каждое синхронное чтение должно удалять свой временный обработчик ответа.
     assert.strictEqual(await run(`(() => {
       const add=window.addEventListener,remove=window.removeEventListener;let balance=0;
       window.addEventListener=function(type,...args){if(type==='bosun-helper-group-identity-result-v1')balance++;return add.call(this,type,...args);};
@@ -1506,7 +1506,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       try {for(let i=0;i<5;i++)BosunHelperGroupIdentity.read(document.querySelector('[ng-repeat="group in groups"]'));return balance;}
       finally {window.addEventListener=add;window.removeEventListener=remove;}
     })()`), 0);
-    // Unsupported/malformed scope data never manufactures an identity.
+    // Неподдерживаемые или некорректные данные scope не создают идентичность.
     await mutateMain('savedAngular = angular; angular = null;'); await refresh();
     assert.strictEqual(await ackPriority(), false);
     await mutateMain('angular = savedAngular; savedChildren = fixtureGroups.Acknowledged[0].Children.slice(); fixtureGroups.Acknowledged[0].Children.push(savedChildren[0]);');
@@ -1522,7 +1522,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     await refresh(); assert.strictEqual(await ackPriority(), false);
     await mutateMain('duplicatePanel.remove();');
     await refresh(); assert.strictEqual(await ackPriority(), true);
-    // Full set, API duplicates, AlertKey conflicts, and section boundaries.
+    // Полный состав, дубликаты API, конфликты AlertKey и границы секций.
     for (const change of [
       'next.Groups.Acknowledged.push(JSON.parse(JSON.stringify(next.Groups.Acknowledged[0])));',
       'next.Groups.Acknowledged[0].Children.push({...next.Groups.Acknowledged[0].Children[0], State:{Id:9699}, AlertKey:"synthetic.extra{}"});',
@@ -1540,8 +1540,8 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     await refresh(); assert.strictEqual(await ackPriority(), false);
     await mutateMain('fixtureGroups.Acknowledged[0].Children = savedChildren;');
     await refresh(); assert.strictEqual(await ackPriority(), true);
-    // A forged reply contains an entirely valid OTHER group in the same current
-    // API section. Membership checks alone would wrongly decorate this row.
+    // Поддельный ответ содержит полностью корректную ДРУГУЮ группу из той же текущей
+    // секции API. Одни проверки состава ошибочно добавили бы маркеры этой строке.
     await mutateMain(`
       fixtureGroups.Acknowledged[0].Children[0].AlertKey = 'synthetic.normal{}';
       fixtureGroups.Acknowledged.push({Children:[{State:{Id:9603},AlertKey:'synthetic.angular{instance=other}'}]});
@@ -1569,7 +1569,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       window.dispatchEvent(savedReply); fixtureGroups.Acknowledged.length=1;
       fixtureGroups.Acknowledged[0].Children[0].AlertKey='synthetic.angular{instance=Acknowledged}';`);
     await applyBase(); assert.strictEqual(await ackPriority(), true);
-    // Reader never keeps a DOM identity. A replacement needs its own live scope.
+    // Читатель не сохраняет идентичность DOM. Заменённому узлу нужен собственный актуальный scope.
     await mutateMain(`const entry=fixtureBodies[1]; oldPanel=entry.panel; entry.panel=oldPanel.cloneNode(true);oldPanel.replaceWith(entry.panel);`);
     await refresh(); assert.strictEqual(await ackPriority(), false);
     await mutateMain('fixtureScopes.set(fixtureBodies[1].panel, {group:fixtureGroups.Acknowledged[0]});');
@@ -1580,7 +1580,7 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
       replacement.classList.remove('bosun-priority-row');heading.replaceWith(replacement);} };`);
     await refresh(); assert.strictEqual(await ackPriority(), false, 'Heading replacement during page read invalidates the operation');
     await refresh(); assert.strictEqual(await ackPriority(), true);
-    // A settings/snapshot update reentrant from page code cannot apply an old index.
+    // Обновление настроек или снимка при повторном входе из кода страницы не должно применять старый индекс.
     await run(`window.addEventListener('bh-test-snapshot', () => {
       const next=JSON.parse(JSON.stringify(fixturePayload));next.Groups.Acknowledged[0].Children[0].Alert='synthetic.normal';
       __BosunHelperBrowserTest.applyAlertsPayload(next,{source:'follower'});
@@ -1595,11 +1595,11 @@ async function runAngularGroupIdentityAssertions(client, subjectRegressionOnly =
     await mutateMain(`beforeScopeRead=node=>{if(node===fixtureBodies[1].panel){beforeScopeRead=null;window.dispatchEvent(new Event('bh-test-settings'));}};`);
     await refresh(); assert.strictEqual(await ackPriority(), false, 'Exact rule removal must not be overwritten by the previous operation');
     assert.ok((await run('fixtureState()')).every(row=>!row.priority&&!row.accent));
-    // No native identity attributes, identity storage, bridge logs or durable client listeners.
+    // Без штатных атрибутов идентичности, её хранения, журналов моста и постоянных обработчиков клиента.
     assert.strictEqual(await run(`Array.from(document.querySelectorAll('[ng-repeat="group in groups"], [ng-repeat="group in groups"] > .panel-heading'))
       .some(node=>Array.from(node.attributes).some(attribute=>/960[123]/.test(attribute.value)))`), false);
     assert.strictEqual(await run('BosunHelperGroupIdentity.read(document.createElement("div"))'), null);
-    // Missing MAIN / late injection cannot authenticate same-page responses.
+    // Отсутствие MAIN или позднее внедрение не позволяют аутентифицировать ответы той же страницы.
     await client.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: mainScript.identifier });
     mainRemoved = true;
     await evaluate(client, `(async()=>{
@@ -1670,8 +1670,8 @@ async function runPrimeMarkerStartupAssertions(client) {
       Object.defineProperty(win, 'chrome', { configurable: true, value: {
         runtime: { lastError: null }, storage: { local: storage, onChanged: { addListener() {}, removeListener() {} } }
       } });
-      // An empty synthetic channel models a dead peer; the active-peer case keeps
-      // renewing its real lease. No real tabs or operational payloads participate.
+      // Пустой синтетический канал моделирует неработающую вкладку; активная вкладка
+      // продолжает продлевать настоящую аренду. Реальные вкладки и рабочие данные не участвуют.
       win.BroadcastChannel = class {
         addEventListener() {} removeEventListener() {} close() {}
         postMessage(message) { if (message.type === 'snapshot') effects.published++; }
@@ -3566,7 +3566,7 @@ async function runBrowserAssertions(client) {
     assert.ok(!ageTextMutationResult.serializedReport.includes(forbidden), 'Diagnostic report leaked operational text');
   }
 
-  // Investigation scenarios assert existing fail-closed behavior, not an unproven fix.
+  // Исследовательские сценарии проверяют существующий безопасный отказ, а не недоказанное исправление.
   const ageSnapshotSkewResult = await evaluate(client, `(async () => {
     const frame = document.createElement('iframe'); frame.src = '/';
     await new Promise(resolve => { frame.onload = resolve; document.body.appendChild(frame); });
@@ -4759,7 +4759,7 @@ async function runBrowserAssertions(client) {
   assert.deepStrictEqual(markerRepaintLifecycle.groupMismatch, {
     rows: [decoratedRepaintRow, decoratedRepaintRow], ...nativeCountState
   }, 'Group-key mismatch must keep native age while Note and Priority aggregate proven visible children');
-  // The latest snapshot deliberately changed Ago; native child text stays old.
+  // В последнем снимке Ago намеренно изменён; штатный дочерний текст остаётся старым.
   assert.strictEqual(markerRepaintLifecycle.nativeChildAge, '17m-ago');
   const liveAgeState = { ...nativeCountState, text: '16m-ago', expected: '16m-ago',
     managedAge: 'true', originalCount: '1 alerts', decision: 'use-live-match' };
@@ -4872,9 +4872,9 @@ async function runBrowserAssertions(client) {
     frame.remove(); return { cases, exactRemoved, critical, ackOff, ackOn, snapshotRemoved };
   })()`);
   for (const testCase of collapsedPriorityIdentity.cases) {
-    // An unmatched/ambiguous Subject-only collapsed heading has no native
-    // group ID or child identity. This is an explicit blocker, not a cached
-    // Priority fallback: different alerts can have indistinguishable headings.
+    // Несопоставленный или неоднозначный свёрнутый заголовок только с Subject не имеет штатного
+    // ID группы или дочерней идентичности. Это явный блокер, а не использование кеша
+    // Priority: разные алерты могут иметь неотличимые заголовки.
     const provableWhenCollapsed = !testCase.skew && !testCase.duplicateSubject;
     assert.strictEqual(testCase.initiallyCollapsed, provableWhenCollapsed);
     assert.strictEqual(testCase.remainingChildNodes, 0);

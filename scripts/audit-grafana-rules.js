@@ -1,6 +1,6 @@
 'use strict';
 
-// Explicit, local-only audit. Never print rule names, query text, tags or source.
+// Явно запускаемый локальный аудит. Имена правил, тексты запросов, теги и исходные данные не выводятся.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -59,7 +59,7 @@ if (require.main === module) {
     if (process.argv.length !== 3) throw new Error();
     process.stdout.write(`${JSON.stringify(audit(process.argv[2]), null, 2)}\n`);
   } catch (_) {
-    // Exceptions from private input must not reach logs.
+    // Исключения при обработке закрытых данных не должны попадать в журнал.
     process.stderr.write('Local rule audit failed: provide one readable, bounded RuleConf with unique alert blocks.\n');
     process.exitCode = 1;
   }

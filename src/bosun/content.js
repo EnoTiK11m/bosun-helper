@@ -205,7 +205,7 @@
   let ruleGraphLifecycleGeneration = 0;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
-  // child maps
+  // карты дочерних элементов
   const childOldNoNoteById = new Map();
   const childOldNoNoteByKey = new Map();
   const childHasNoteById = new Map();
@@ -217,7 +217,7 @@
   const ambiguousChildIds = new Set();
   const ambiguousChildKeys = new Set();
 
-  // group maps
+  // карты групп
   const groupHasOldNoNoteByKey = new Map();
   const groupHasAnyNoteByKey = new Map();
   const groupHasPriorityByKey = new Map();
@@ -371,7 +371,7 @@
     sanitizeExpandedReaderReason: groupIdentityApi?.expandedReaderReasonCode,
     buildModelSnapshotIndexes: groupIdentityApi?.buildSnapshotIndexes
   }) || null;
-  // DevTools must select this extension's isolated execution context. No page bridge.
+  // В DevTools нужно выбрать изолированный контекст этого расширения. Моста в контекст страницы нет.
   if (singleAlertAgeApi?.diagnostics) {
     const diagnosticApi = singleAlertAgeApi.diagnostics;
     globalThis.BosunHelperSingleAlertAgeDiagnostics = Object.freeze({
@@ -441,8 +441,8 @@
   }
 
   function isFeatureEnabled(name) {
-    // Retain stored compatibility values, but pause the comment filter and
-    // expose Ack compact mode directly on the page, without a feature gate.
+    // Сохраняем совместимость записанных значений, но приостанавливаем фильтр комментариев
+    // и показываем компактный режим Ack прямо на странице без дополнительного флага включения.
     if (name === 'noCommentFilter') return false;
     if (name === 'acknowledgedCollapse') return true;
     return settingsSnapshot?.features?.[name] !== false;
@@ -579,7 +579,7 @@
       await navigator.clipboard.writeText(text);
       return true;
     } catch (err) {
-      // Fallback для окружений без navigator.clipboard
+      // Запасной вариант для окружений без navigator.clipboard
       try {
         const ta = document.createElement('textarea');
         ta.value = text;
@@ -1135,8 +1135,8 @@
     const headingLabel = heading => Array.from(heading.childNodes)
       .filter(node => node.id !== ACKNOWLEDGED_CONTROLS_ID)
       .map(node => node.textContent || '').join(' ').trim();
-    // Upstream ackgroup.html renders this heading inside the directive root.
-    // ng-bind owns its contents, so controls must be a sibling in the header row.
+    // Штатный ackgroup.html выводит этот заголовок внутри корня директивы.
+    // Содержимым управляет ng-bind, поэтому элементы управления должны быть соседями в строке заголовка.
     const headings = Array.from(root.querySelectorAll('h1, h2, h3, [role="heading"]')).filter(heading =>
       !heading.closest('.panel') && (heading.getAttribute('ng-bind') === 'ack' ||
         /^Acknowledged\b/i.test(headingLabel(heading))));
@@ -1276,10 +1276,10 @@
   function applyAcknowledgedCollapse() {
     const roots = document.querySelectorAll('[ts-ack-group="schedule.Groups.Acknowledged"]');
     const root = roots[0] || null;
-    // A cloned/replaced section can retain our hidden classes. Ambiguous roots
-    // cannot prove identity; restore every copy, including children and stale
-    // nodes outside the current section. Do not toggle valid hidden nodes on
-    // every repaint: that would feed our own mutation observers.
+    // Копия или замена секции может сохранить наши скрывающие классы. Неоднозначные корни
+    // не подтверждают принадлежность; восстанавливаем все копии, включая дочерние элементы и устаревшие
+    // узлы вне текущей секции. Не переключаем корректно скрытые узлы
+    // при каждой перерисовке: это повторно запускало бы наши наблюдатели за DOM.
     for (const node of document.querySelectorAll(`.${ACKNOWLEDGED_COLLAPSED_CLASS}`)) {
       if (roots.length !== 1 || !root.contains(node)) {
         setExtensionClass(node, ACKNOWLEDGED_COLLAPSED_CLASS, false);
@@ -1293,7 +1293,7 @@
     }
     ensureAcknowledgedCollapseControls();
     const heading = getAcknowledgedHeading();
-    // Retire whole-section hiding; Angular models and native counts stay intact.
+    // Отказываемся от скрытия секции целиком; модели Angular и штатные счётчики сохраняются.
     setExtensionClass(root, ACKNOWLEDGED_COLLAPSED_CLASS, false);
     setExtensionClass(heading, ACKNOWLEDGED_COLLAPSED_CLASS, false);
     const compact = acknowledgedCollapseEnabled && isFeatureEnabled('priorityAlerts');
@@ -1368,9 +1368,9 @@
   }
 
   function readAcknowledgedCompactState(panel, counts) {
-    // A missing Priority marker is not proof that a panel is ordinary. Hiding
-    // requires complete composition, globally unique snapshot IDs/keys and the
-    // existing Priority name resolver + matcher. All failures leave it visible.
+    // Отсутствие маркера Priority не доказывает обычный статус панели. Для скрытия
+    // нужны полный состав, глобально уникальные ID и ключи снимка и существующие
+    // разрешение имени и сопоставление Priority. При любом отказе панель остаётся видимой.
     if (!alertDataIndexReady || !acknowledgedPriorityIndex || !modelGroupSnapshotIndexes ||
       !priorityRuleIdentityIndex || !isFeatureEnabled('priorityAlerts')) return null;
     const root = getAcknowledgedRoot(), heading = getPanelHeading(panel);
@@ -1545,7 +1545,7 @@
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
 
-      // Быстрый локальный repaint по текущим index maps,
+      // Быстрая локальная перерисовка по текущим картам индексов,
       // но без удаления значков, если DOM ещё не устаканился.
       if (isDashboardEnhancementsPage() && !alertDataIndexReady) {
         restoreAlertMarkerCacheFromSession();
@@ -2662,8 +2662,8 @@
     }
     if (mount.row) setExtensionClass(mount.row, ACKNOWLEDGED_HEADER_ROW_CLASS, true);
     let wrap = document.getElementById(ACKNOWLEDGED_CONTROLS_ID);
-    // Old panels and DOM clones have no current listener ownership. Rebuild
-    // only extension controls; native nodes and their bindings stay intact.
+    // Старые панели и копии DOM не принадлежат текущим обработчикам. Пересоздаём
+    // только элементы расширения; штатные узлы и их привязки сохраняются.
     if (wrap && !acknowledgedControlNodes.has(wrap)) { wrap.remove(); wrap = null; }
     for (const duplicate of document.querySelectorAll(`#${ACKNOWLEDGED_CONTROLS_ID}`)) {
       if (duplicate !== wrap) duplicate.remove();
@@ -2702,12 +2702,12 @@
       acknowledgedControlNodes.add(wrap);
     }
     if (mount.bound) {
-      // Preserve the original heading → expand → native controls order. Only
-      // our own element moves, after all native siblings in the same row.
+      // Сохраняем исходный порядок: заголовок → раскрытие → штатные элементы управления. Перемещаем
+      // только свой элемент, после всех штатных соседей в той же строке.
       if (wrap.parentElement !== mount.parent || mount.parent.lastElementChild !== wrap) mount.parent.appendChild(wrap);
     } else if (wrap.parentElement !== mount.parent) {
-      // Unbound legacy headings can safely host the inline control. If no
-      // heading is recognised, show only the small control at the section start.
+      // В старых заголовках без привязок безопасно размещать встроенный элемент управления. Если
+      // заголовок не распознан, показываем только небольшой элемент в начале секции.
       if (mount.heading) mount.parent.appendChild(wrap);
       else mount.parent.insertBefore(wrap, mount.parent.firstChild);
     }
@@ -3298,7 +3298,7 @@
         const query = transformed
           ? (transformed.ok ? transformed.query : '')
           : applyAlertTagsToPromQuery(rawQuery, rawTags, alertKey);
-        // Only bounded reason codes and counts enter diagnostics, never instance data.
+        // В диагностику попадают только ограниченные коды причин и счётчики, без данных экземпляров.
         if (transformed && !transformed.ok && /^[a-z_]{1,64}$/.test(transformed.reason || '')) {
           rejectedTransforms.set(transformed.reason, (rejectedTransforms.get(transformed.reason) || 0) + 1);
         }
@@ -3665,8 +3665,8 @@
     for (const panel of panels) {
       const heading = getChildHeading(panel);
       const id = getPanelIdFromHeading(heading);
-      // This is presentation aggregation of actual contained children, not a
-      // replacement API-group identity or a Subject fallback. No cached DOM flags.
+      // Здесь объединяется отображение фактически вложенных дочерних элементов; это не
+      // замена идентичности API-группы и не поиск по Subject. Кешированные флаги DOM не используются.
       if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 ||
         seenIds.has(id) || counts.get(id) !== 1 || findParentGroupPanelForChild(panel) !== groupPanel) return null;
       seenIds.add(id);
@@ -3699,8 +3699,8 @@
     diagnostic?.modelReader?.(panel, 'reader-called');
     try { identity = groupIdentityApi.read(panel); } catch (_) { readerThrew = true; diagnostic?.modelReader?.(panel, 'reader-threw'); }
     if (!current()) { diagnostic?.modelReader?.(panel, 'stale-after-read'); return { status: 'stale' }; }
-    // Do not introduce async bridge work or deferred writes. Reject unexpected
-    // thenables and consume their rejection without scheduling an age repaint.
+    // Не добавляем асинхронную работу моста и отложенную запись. Отклоняем неожиданные
+    // thenable-объекты и обрабатываем их отказ без планирования перерисовки возраста.
     if (identity && typeof identity.then === 'function') {
       Promise.resolve(identity).catch(() => {});
       diagnostic?.modelReader?.(panel, 'unexpected-promise');
@@ -3758,8 +3758,8 @@
     const snapshotIndexes = modelGroupSnapshotIndexes;
     if (!root?.contains(panel) || !heading || (index && index !== acknowledgedPriorityIndex)) return false;
     const identity = groupIdentityApi.read(panel);
-    if (!identity) return null; // Reader unavailable: no new identity fallback.
-    // Revalidate after crossing into page code, even though the bridge is synchronous.
+    if (!identity) return null; // Читатель недоступен: новые способы определения идентичности не добавляем.
+    // Повторяем проверку после вызова кода страницы, даже при синхронном мосте.
     if (identity.rejected || identity.section !== section || latestAlertsPayload !== payload || settingsSnapshot !== settings ||
       alertsPayloadApplyVersion !== snapshotGeneration || alertMarkerIndexGeneration !== indexGeneration ||
       modelGroupSnapshotIndexes !== snapshotIndexes || !panel.isConnected || !root.isConnected ||
@@ -3801,7 +3801,7 @@
     const id = getPanelIdFromHeading(heading);
     if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 || counts.get(id) !== 1) return '';
     const record = priorityRuleIdentityIndex?.childrenBySection.get(section)?.get(id);
-    // A strong ID miss/conflict never falls back to Subject or another section.
+    // Отсутствие или конфликт сильного ID не разрешает поиск по Subject либо в другой секции.
     return record && record.subjects.includes(getPanelSubjectFromHeading(heading)) ? record.name : '';
   }
 
@@ -3849,7 +3849,7 @@
     }
     for (const [section, root] of [['NeedAck', getNeedsAckRoot()], ['Acknowledged', getAcknowledgedRoot()]]) {
       if (!root) continue;
-      // Remove obsolete parent actions without touching Priority presentation.
+      // Удаляем устаревшие действия родителя, сохраняя отображение Priority.
       for (const group of getGroupPanels(root)) {
         getPanelHeading(group)?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`).forEach((button) => button.remove());
       }
@@ -4011,8 +4011,8 @@
       return;
     }
     pendingPrimePresentation = null;
-    // Fresh initial presentation is not a coordinator-owned snapshot. In
-    // particular, do not process notification baseline, sound, tracker or publish.
+    // Первичное свежее отображение не является снимком, полученным координатором. В частности,
+    // не обрабатываем базу уведомлений, звук и трекер и не публикуем снимок.
     latestAlertsPayload = payload;
     latestAlertsTrackerOwner = false;
     alertsPayloadApplyVersion += 1;
@@ -4121,7 +4121,7 @@
     try {
       applyAlertsPayload(await consumeAlertsPayload());
     } catch (_) {
-      // fetchAlertsPayload already reported a user-visible error.
+      // fetchAlertsPayload уже сообщил пользователю об ошибке.
     } finally {
       dataRefreshInFlight = false;
       if (dataRefreshQueued) {
@@ -4410,8 +4410,8 @@
         const rootMutations = mutations.filter(mutationContainsDashboardRoot);
         if (rootMutations.length) processMutations(rootMutations);
         else {
-          // Header-only Angular replacement may sit outside the scoped roots.
-          // Reuse the UI refresh without requesting new alert data.
+          // Замена одного заголовка Angular может оказаться вне наблюдаемых корней.
+          // Повторно обновляем интерфейс, не запрашивая новые данные алертов.
           const mount = getAcknowledgedControlsMount();
           const controls = document.getElementById(ACKNOWLEDGED_CONTROLS_ID);
           if (mount.root && (controls?.parentElement !== mount.parent ||

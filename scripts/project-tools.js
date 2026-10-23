@@ -112,7 +112,7 @@ function runChecks(root, only) {
   }
   for (const command of only ? [only] : COMMANDS) {
     const before = fingerprint(root, command), startedAt = new Date().toISOString();
-    // npm_execpath is provided by `npm run verify`; use Node directly, including on Windows.
+    // npm_execpath предоставляется командой `npm run verify`; запускаем Node напрямую, в том числе в Windows.
     if (!process.env.npm_execpath) throw new Error('Run via npm run verify.');
     const result = spawnSync(process.execPath, [process.env.npm_execpath, 'run', command], { cwd: root, stdio: 'inherit' });
     receipt.checks.push({ command, startedAt, finishedAt: new Date().toISOString(), exitCode: result.status,

@@ -4,8 +4,8 @@ const assert = require('assert');
 const fs = require('fs');
 const vm = require('vm');
 
-// Twelve anonymized structures: nine prom and three promrate. Metric names,
-// matcher values and alert identities deliberately differ from the local source.
+// Двенадцать обезличенных структур: девять prom и три promrate. Имена метрик,
+// значения условий отбора и идентичности алертов намеренно отличаются от локального источника.
 const fixtures = [
   { name: 'synthetic.legacy.01', metric: 'demo.backup.state', group: 'service', filter: '', step: '1m', start: '8d' },
   { name: 'synthetic.legacy.02', metric: 'demo.worker.state', group: 'job', filter: '', step: '5m', start: '4h' },

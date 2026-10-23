@@ -182,8 +182,8 @@ test('interpolation rejects escaping and injected syntax without partial publica
     '`safe`'
   ]) reject(expression, `  $chosen = ${value}`);
   reject(promras(String.raw`queue_size{worker=~"\$chosen"}`), '  $chosen = safe');
-  // A newline outside quotes ends a RuleConf assignment. A subsequent unrelated
-  // assignment is valid source, rather than a newline inside the chosen value.
+  // Перевод строки вне кавычек завершает присваивание RuleConf. Следующее независимое
+  // присваивание является допустимым кодом, а не переводом строки внутри выбранного значения.
   const unrelated = resolve(expression, '  $chosen = safe\n  $unrelated = other');
   assert.strictEqual(unrelated.ok, true, unrelated.reason);
   assert.strictEqual(unrelated.query, 'queue_size{worker=~"safe"}', 'Unrelated assignments must not become part of an interpolated value');

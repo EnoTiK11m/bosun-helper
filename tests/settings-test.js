@@ -121,7 +121,7 @@ async function main() {
   assert.strictEqual('bosunSettingsV1:preferences.priorityCritical' in upgradeHarness.data,false);
   assert.strictEqual('bosunSettingsV1:preferences.priorityShowAcknowledged' in upgradeHarness.data,false);
   upgradeA.destroy();upgradeB.destroy();reloadedUpgrade.destroy();
-  // A delayed storage event must not let migration overwrite a newer explicit value.
+  // Задержанное событие storage не должно позволять миграции перезаписать более новое явное значение.
   const upgradeRace=createStorageHarness({[api.VERSION_KEY]:1});const originalGet=upgradeRace.storage.get;let reads=0;
   upgradeRace.storage.get=(keys,callback)=>{
     if(++reads===2){upgradeRace.data[api.STORAGE_PREFIX+'features.priorityAlerts']=true;

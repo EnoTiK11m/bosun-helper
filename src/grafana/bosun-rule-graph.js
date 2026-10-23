@@ -770,10 +770,10 @@
       if (fraction.length > 9) return null;
       const scale = 10n ** BigInt(fraction.length);
       const numerator = (BigInt(whole || '0') * scale + BigInt(fraction || '0')) * units[part[2]];
-      if (numerator % scale !== 0n) return null; // Never round sub-nanosecond input.
+      if (numerator % scale !== 0n) return null; // Никогда не округляем входные значения меньше наносекунды.
       total += numerator / scale;
-      // Upstream ParseDuration accumulates float64 before int64 conversion.
-      // Reject a rounded overflow even if the exact rational fits int64.
+      // Штатный ParseDuration накапливает float64 перед преобразованием в int64.
+      // Отклоняем переполнение после округления, даже если точное рациональное значение помещается в int64.
       nativeNanos += (Number(whole || '0') + Number(fraction || '0') / Number(scale)) * Number(units[part[2]]);
       if (total > 9223372036854775807n || nativeNanos >= 2 ** 63) return null;
       cursor += part[0].length;
@@ -810,14 +810,14 @@
       labels.some((label) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(label) || label === '__name__') ||
       new Set(labels).size !== labels.length
     ) return reject('grouping');
-    // Bosun parses these QueryRange arguments; they are validated, never copied
-    // into rate() or silently transferred to the Grafana time picker.
+    // Bosun разбирает эти аргументы QueryRange; они проверяются, но не копируются
+    // в rate() и не переносятся неявно в выбор временного диапазона Grafana.
     const stepNanos = parseLegacyDuration(step);
     const startNanos = parseLegacyDuration(start);
     const endNanos = end === '' ? 0n : parseLegacyDuration(end);
     if (stepNanos === null || stepNanos <= 0n || startNanos === null || endNanos === null ||
         startNanos <= endNanos) return reject('duration');
-    // Bosun inserts rateDuration as raw PromQL, not as a parsed Bosun duration.
+    // Bosun вставляет rateDuration как исходный PromQL, а не как разобранную длительность Bosun.
     if (isRate && (!/^(?:\d+(?:ms|[smhdwy]))+$/.test(rate) ||
         !promqlApi?.analyzePromQuery?.(`rate(legacy_duration_probe[${rate}])`)?.ok)) {
       return reject('duration');
@@ -841,7 +841,7 @@
         const match = part.trim().match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(=~|!~|!=|=)\s*"([^"\x00-\x1f\x7f]*)"$/);
         if (!match || matcherLabels.has(match[1]) || match[1] === '__name__') return reject('matchers');
         const [, label, operator, value] = match;
-        // A deliberately small RE2 grammar, not a JavaScript RegExp compatibility guess.
+        // Намеренно узкая грамматика RE2; совместимость с JavaScript RegExp не предполагается.
         if (operator.includes('~') && !/^\^?(?:[A-Za-z0-9_-]|\.(?:\*|\+)?)+(?:\|(?:[A-Za-z0-9_-]|\.(?:\*|\+)?)+)*\$?$/.test(value)) {
           return reject('matchers');
         }
@@ -849,7 +849,7 @@
         matchers.push(`${label}${operator}"${value}"`);
       }
     }
-    // Like Bosun's template, a nonempty original filter keeps braces, even if blank.
+    // Как в шаблоне Bosun, непустой исходный фильтр сохраняет скобки, даже если содержит только пробелы.
     const dotted = metric.includes('.');
     const selection = dotted
       ? `{__name__="${metric}"${matchers.length ? ', ' + matchers.join(', ') : ''}}`
@@ -888,8 +888,8 @@
       context.batchWork.expressionTokens += MAX_EXPRESSION_TOKENS;
       return graphError(error instanceof ParseFailure ? error.reason : 'computed_graph');
     }
-    // A legacy call is permitted only as the complete selected expression, never
-    // through a variable dependency, wrapper, arithmetic or backend prefix.
+    // Старый вызов допустим только как полное выбранное выражение, а не
+    // через зависимость переменной, обёртку, арифметику или префикс backend.
     const legacy = tokens.find((token) => token.type === 'identifier' && ['prom', 'promrate'].includes(token.value.toLowerCase()));
     if (legacy) {
       const name = legacy.value.toLowerCase();
@@ -1020,9 +1020,9 @@
         ) return graphError('computed_graph');
         const branch = args[0];
         const tag = args[1].value.match(/^([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_.-]+)$/);
-        // The older arithmetic signature deliberately understands less PromQL.
-        // For merge, prove the finite output schema structurally without changing
-        // the rules for Bosun arithmetic or touching any branch selector.
+        // Старая арифметическая сигнатура намеренно поддерживает меньшую часть PromQL.
+        // Для merge структурно доказываем конечную схему результата, не меняя
+        // правил арифметики Bosun и не затрагивая селекторы ветвей.
         const analysis = promqlApi?.analyzePromQuery?.(branch.prom);
         const labels = analysis?.ok && analysis.type === 'vector' ? analysis.labels : null;
         const addedTag = literalStrings[1] && tag && tag[0].length === args[1].value.length &&
@@ -1049,9 +1049,9 @@
             context.stack.length === 1 && callOffset === 0 && current().type === 'eof' &&
             branches.every((branch) => branch.signature === left.signature && branch.key === left.key) &&
             new Set(branches.map((branch) => branch.value)).size === branches.length) {
-          // The same new label with pairwise distinct values proves all branch
-          // label sets disjoint: ordinary OR cannot suppress another branch.
-          // A newline protects closing syntax from a trailing PromQL comment.
+          // Одинаковая новая метка с попарно различными значениями доказывает непересечение
+          // наборов меток ветвей: обычный OR не может подавить другую ветвь.
+          // Перевод строки защищает закрывающий синтаксис от завершающего комментария PromQL.
           const wrap = (branch) => `label_replace((${branch.prom}${branch.prom.includes('#') ? '\n' : ''}), "${branch.key}", "${branch.value}", "", ".*")`;
           const query = branches.map(wrap).join(' or ');
           if (promqlApi?.applyAlertTagsToPromQuery?.(query, '', '') !== query) {

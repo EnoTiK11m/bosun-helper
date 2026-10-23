@@ -1,6 +1,6 @@
 'use strict';
 
-// Optional smoke check of an already extracted internal ZIP, using an empty Chrome profile.
+// Необязательная базовая проверка уже распакованного внутреннего ZIP в пустом профиле Chrome.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -73,7 +73,7 @@ async function verify() {
     console.log(`Packaged extension Chrome load passed (${files.size} runtime/distribution files reachable)`);
   } finally {
     if (socket?.readyState === WebSocket.OPEN) {
-      try { await command('Browser.close'); } catch (_) { /* Browser may close before replying. */ }
+      try { await command('Browser.close'); } catch (_) { /* Браузер может закрыться до ответа. */ }
     }
     socket?.close();
     for (const request of pending.values()) clearTimeout(request.timer);
@@ -92,7 +92,7 @@ async function verify() {
 }
 
 verify().catch(() => {
-  // Do not echo Chrome errors or internal extension file contents/addresses.
+  // Не выводим ошибки Chrome, содержимое внутренних файлов расширения и адреса.
   console.error('Packaged extension Chrome load failed. Check Chrome support and the extracted runtime package.');
   process.exitCode = 1;
 });

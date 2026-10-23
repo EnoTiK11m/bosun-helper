@@ -1,7 +1,7 @@
 (() => {
   'use strict';
 
-  // Temporary live-Bosun diagnostics. Set to false to disable all logs below.
+  // Временная диагностика живого Bosun. Значение false отключает все сообщения ниже.
   const SINGLE_ALERT_AGE_DEBUG = false;
   const SINGLE_ALERT_AGE_DEBUG_MAX_PROBLEMS = 20;
   const MISSING_CANDIDATE_GRACE_SNAPSHOTS = 2;
@@ -40,7 +40,7 @@
     let latestSnapshotSource = 'other';
     let latestSnapshotGroups = 0;
 
-    // Opt-in, bounded, memory-only recorder. No operational strings enter it.
+    // Ограниченный регистратор только в памяти, включаемый явно. Рабочие строки в него не попадают.
     let trace = null;
     let traceObserver = null;
     let traceTimer = null;
@@ -72,7 +72,7 @@
       }
       return entry;
     }
-    // Comparison only: normalized candidates never participate in resolution.
+    // Только сравнение: нормализованные кандидаты не участвуют в сопоставлении.
     function traceCandidates(indexes, type, panel) {
       const subject = getGroupSubject(panel) || '';
       const rawSubject = String(getRawGroupSubject(panel) || '').trim();
@@ -96,7 +96,7 @@
       };
     }
     function traceStableChildren(previous, type, previousPayload, payload, next) {
-      // IDs and group objects exist only during this read-only call, never in trace state.
+      // ID и объекты групп существуют только во время этого чтения, не сохраняясь в состоянии трассировки.
       const stableId = child => {
         const value = child?.State?.Id;
         if (typeof value !== 'number' && !(typeof value === 'string' && /^[1-9]\d*$/.test(value))) return null;
@@ -164,7 +164,7 @@
           const current = currentRows.length === 1 ? currentRows[0] : null;
           const other = next.get(type === 'NeedAck' ? 'Acknowledged' : 'NeedAck');
           const comparable = Boolean(previous.record && current);
-          // Ordinary unchanged generations already have panel-decision events.
+          // Для обычных неизменённых поколений уже записаны события решений по панелям.
           if (!previous.record || (current && previous.record.count === current.count &&
               previous.record.groupKey === current.groupKey && previous.record.agoTimestamp === current.agoTimestamp)) continue;
           traceEvent({ event: 'snapshot-index-comparison', panel: entry.number, source: latestSnapshotSource,
@@ -224,7 +224,7 @@
         else if (typeof child.key !== 'string' || !child.key) reason = 'invalid-model';
         else if (!models) reason = 'index-unavailable';
         else {
-          // Counts only: this diagnostic scan never supplies a rendering record.
+          // Только счётчики: этот диагностический обход не предоставляет запись для отображения.
           let idCount = 0, keyCount = 0, sameSection = false, sameKey = false, childCount = 0;
           for (const section of ['NeedAck','Acknowledged']) for (const group of currentPayload?.Groups?.[section] || []) {
             const children = normalizeChildren(group?.Children);
@@ -314,7 +314,7 @@
           if (!entry) continue;
           present.add(entry.number);
           const previous = trace.panels[entry.number];
-          // A read-only sample never claims that refresh has run.
+          // Проба только для чтения не утверждает, что обновление выполнялось.
           if (!previous || previous.section !== type || previous.generation !== snapshotId || previous.state !== (node ? textState(node.textContent) : 'missing')) {
             const inspection = inspectResolution(type, panel);
             traceDecision(type, panel, node, inspection, { presentationReason:
@@ -532,8 +532,8 @@
       modelIndexReason = 'index-builder-unavailable';
       if (typeof buildModelSnapshotIndexes !== 'function') return null;
       for (const section of ['NeedAck', 'Acknowledged']) {
-        // Bosun omits empty sections; null also denotes an empty section.
-        // Normalize only for this index. Never mutate the source snapshot.
+        // Bosun пропускает пустые секции; null также обозначает пустую секцию.
+        // Нормализуем только для этого индекса. Исходный снимок не изменяем.
         const groups = payload?.Groups?.[section] ?? [];
         if (!Array.isArray(groups)) {
           modelIndexReason = 'snapshot-section-invalid';
@@ -767,8 +767,8 @@
             let resolved = null;
             try {
               resolved = (expandedSubjectCandidate ? readExpandedModelIdentity : readModelIdentity)(type, panel, node, payload);
-            } catch (_) { /* Unavailable: fail closed; existing collapsed grace only. */ }
-            // The current bridge is synchronous, but page code may reenter update/clear.
+            } catch (_) { /* Недоступно: безопасный отказ; только существующий допуск для свёрнутой панели. */ }
+            // Текущий мост синхронный, но код страницы может повторно вызвать update/clear.
             if (snapshotId !== generation || groupsByType !== indexes || currentPayload !== payload || resolved?.status === 'stale') {
               traceModelFallback(type, panel, { status: 'stale' }, models, diagnosticIndexReason, generation);
               return;
@@ -787,8 +787,8 @@
                 subjectOnlyDifference = source.length === 1 && Boolean(domKey) && domKey !== model.key &&
                   buildGroupKeyFromData({ ...source[0], Subject: getGroupSubject(panel) }) === domKey;
                 if (!subjectOnlyDifference) resolved.compositeMismatch = true;
-                // This path repairs the missing old Subject, not a collision with
-                // another current group. Preserve the existing ambiguity refusal.
+                // Этот путь исправляет отсутствие старого Subject, а не конфликт
+                // с другой текущей группой. Сохраняем существующий отказ при неоднозначности.
                 if (indexes.get(type).bySubject.has(getGroupSubject(panel))) {
                   subjectOnlyDifference = false; resolved.expandedSubjectConflict = true;
                 }

@@ -43,7 +43,7 @@
       } else if (char === '\\') {
         escaped = true;
       } else if (char === quote) {
-        // The first unescaped closing quote must consume the entire value.
+        // Первая неэкранированная закрывающая кавычка должна завершать всё значение.
         return index === text.length - 1
           ? text.slice(1, index).replace(/\\(.)/g, '$1')
           : null;
@@ -341,8 +341,8 @@
     return '';
   }
 
-  // Parse only bounded, explicitly understood PromQL. Label metadata describes
-  // possible output labels: null = metric schema unknown, with known exclusions.
+  // Разбираем только ограниченный, явно поддержанный PromQL. Метаданные меток описывают
+  // возможные метки результата: null означает неизвестную схему метрики с известными исключениями.
   const MAX_PROM_TOKENS = 4096;
   const MAX_PROM_DEPTH = 96;
   const analysisCache = new Map();
@@ -450,7 +450,7 @@
         if (!Number.isFinite(Number(number[0]))) promError('invalid_syntax');
         add('number', number[0]); index += number[0].length; continue;
       }
-      // A standalone colon belongs to a subquery. Metric names may contain it.
+      // Отдельное двоеточие относится к подзапросу. Имена метрик также могут его содержать.
       const identifier = rest.match(/^[A-Za-z_][A-Za-z0-9_:]*|^:[A-Za-z_][A-Za-z0-9_:]*/);
       if (identifier) {
         const lower = identifier[0].toLowerCase();
@@ -641,7 +641,7 @@
         return copyPromValue(args[0]);
       } else if (name === 'absent' || name === 'absent_over_time') {
         signature([name === 'absent' ? 'vector' : 'matrix']);
-        // absent derives labels only from a direct selector's equality matchers.
+        // absent выводит метки только из условий равенства непосредственного селектора.
         return promValue('vector', args[0].selector ? args[0].equalLabels : []);
       } else promError('unsupported_function');
       const input = args.find((arg) => arg.type === 'vector' || arg.type === 'matrix');
@@ -666,8 +666,8 @@
           if (!['=', '!=', '=~', '!~'].includes(operator)) promError('invalid_syntax');
           cursor += 1;
           if (peek().kind !== 'string') promError('invalid_syntax');
-          // Permit metricless selectors only with one exact nonempty name.
-          // Named selectors already set __name__, so every extra matcher fails.
+          // Селекторы без имени метрики допустимы только с одним точным непустым именем.
+          // Именованные селекторы уже задают __name__, поэтому любое дополнительное условие отклоняется.
           if (name === '__name__') {
             if (named || matchedLabels.has(name) || operator !== '=' || !peek().value) {
               promError('invalid_syntax');
@@ -833,15 +833,15 @@
         if (token.kind !== 'string') continue;
         const body = query.slice(token.start + 1, token.end - 1);
         if (!/\$[A-Za-z_]/.test(body)) continue;
-        // A matcher value is the only authorized substitution position. The
-        // complete expanded query still goes through the structural validator.
+        // Значение условия отбора — единственная разрешённая позиция подстановки. Полностью
+        // развёрнутый запрос по-прежнему проходит структурную проверку.
         if (token.quote === '`' || tokens[index - 2]?.kind !== 'identifier' ||
             (tokens[index - 2]?.raw || tokens[index - 2]?.value) === '__name__' ||
             !['=', '!=', '=~', '!~'].includes(tokens[index - 1]?.value) || body.includes('\\')) return '';
         const expanded = body.replace(/\$([A-Za-z_][A-Za-z0-9_]*)/g, (_match, name) => {
           const value = resolveVariable(name);
-          // Raw Bosun pair values: no quoting, escapes, code, or recursive text
-          // substitution. Dots and pipes retain their existing regex semantics.
+          // Исходные значения пар Bosun: без кавычек, экранирования, кода и рекурсивной текстовой
+          // подстановки. Точки и вертикальные черты сохраняют существующую семантику регулярных выражений.
           if (typeof value !== 'string' || value.length > 4096 || !/^[A-Za-z0-9_.|:-]+$/.test(value)) {
             throw new Error('unresolved_variable');
           }
@@ -889,7 +889,7 @@
         (analysis.labels !== null && !analysis.labels.includes(name)))) return rejected('output_label_unavailable');
     let constant = 'vector(1)';
     for (const tag of parsed.tags) {
-      // Prometheus uses Go replacement expansion: $$ is a literal dollar.
+      // Prometheus использует раскрытие подстановок Go: $$ обозначает буквальный знак доллара.
       const replacement = escapePromLabelValue(tag.value.replace(/\$/g, '$$$$'));
       constant = `label_replace(${constant}, "${tag.name}", "${replacement}", "", ".*")`;
     }

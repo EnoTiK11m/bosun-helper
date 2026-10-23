@@ -6,9 +6,9 @@
     const DEFAULT_REQUEST_TIMEOUT_MS = 4500;
     const DEFAULT_RETRY_DELAY_MS = 350;
     const DEFAULT_RETRY_ATTEMPTS = 3;
-    // Large Bosun installations can legitimately return more than 10 MiB here.
-    // Keep a generous safety bound so a malformed endpoint cannot grow memory
-    // without limit, while allowing normal alert snapshots through.
+    // Крупные установки Bosun могут штатно возвращать здесь более 10 MiB.
+    // Оставляем достаточный запас, ограничивая рост памяти при некорректном ответе
+    // сервера и пропуская обычные снимки алертов.
     const MAX_ALERTS_RESPONSE_CHARS = 64 * 1024 * 1024;
 
     function isOlderThanThreshold(agoValue) {
@@ -281,9 +281,9 @@
           readResolvedChildState(childKey, 'key') ? { childId: null, childKey } : null;
       }
 
-      // Group Note markers must aggregate only child states that survived the
-      // final ambiguity checks above. Raw action data must not bypass child
-      // identity resolution merely because the group row is collapsed.
+      // Групповые маркеры Note объединяют только дочерние состояния, прошедшие
+      // итоговые проверки неоднозначности выше. Исходные данные действий не должны обходить
+      // сопоставление дочерних элементов только потому, что строка группы свёрнута.
       nextIndex.groupHasAnyNoteByKey.clear();
       nextIndex.groupHasAnyNoteBySubject.clear();
       for (const group of groups) {
@@ -324,7 +324,7 @@
         }
       }
 
-      // Duplicate group keys cannot identify a single collapsed row.
+      // Повторяющиеся ключи групп не позволяют однозначно определить свёрнутую строку.
       for (const [key, count] of priorityGroupKeyCounts) {
         if (count > 1) nextIndex.groupHasPriorityByKey.delete(key);
       }

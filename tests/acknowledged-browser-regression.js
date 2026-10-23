@@ -359,8 +359,8 @@ module.exports = async function runAcknowledgedCompactAssertions({ client, evalu
     assert.deepStrictEqual(actual.groups, [false]);
     assert.strictEqual((await run('toggle()')).pressed, 'false', 'Cloned root controls receive a live handler');
     await run('toggle()');
-    // A header-only remount must also work for the legacy sibling layout,
-    // without an API refresh or losing the original native controls.
+    // Повторное создание одного заголовка должно работать и при старой раскладке соседних узлов,
+    // без обновления API и потери исходных штатных элементов управления.
     await mutate(`(() => {
       const root = document.querySelector('[ts-ack-group="schedule.Groups.Acknowledged"]');
       const header = root.querySelector('.clearfix'); root.insertAdjacentElement('beforebegin', header);

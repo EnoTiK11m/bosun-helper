@@ -18,7 +18,7 @@ const writeConfig = value => {
   for (const name of ['config.js', 'config.local.js']) fs.writeFileSync(path.join(root, name), buildConfigSource(value));
 };
 
-// Read central and local ZIP structures independently of the writer.
+// Читаем центральные и локальные структуры ZIP независимо от записывающего кода.
 function unpack(zip) {
   const end = zip.length - 22;
   assert.strictEqual(zip.readUInt32LE(end), 0x06054b50);

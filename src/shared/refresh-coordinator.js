@@ -410,8 +410,8 @@
             post({ type: 'leader-yielded', tabId });
             becomeFollower('visible-peer');
           } else if (role === 'follower' && isVisible() && message.visible === false) {
-            // A leader that has just become hidden announces itself. Reply so
-            // it can immediately yield instead of keeping the 30s cadence.
+            // Лидер, только что перешедший в скрытое состояние, сообщает о себе. Отвечаем, чтобы
+            // он сразу уступил лидерство вместо сохранения интервала в 30 секунд.
             post({ type: 'hello', tabId, visible: true });
           }
           return;
@@ -590,8 +590,8 @@
           ? changes[tokenKey].newValue
           : '';
         if (!currentChannelToken || nextToken === currentChannelToken) return;
-        // Token creation is intentionally race-tolerant: if another tab wins
-        // the last write, restart against that shared value.
+        // Создание токена намеренно допускает гонки: если другая вкладка выполнила
+        // последнюю запись, перезапускаемся с этим общим значением.
         setTimeout(() => {
           if (stopped) return;
           stop();
@@ -634,7 +634,7 @@
       start,
       stop,
       requestRefresh,
-      // Only the latest fetched snapshot of this leadership/lifecycle is authoritative.
+      // Достоверен только последний полученный снимок текущего периода лидерства и жизненного цикла.
       ownsSnapshot: (payload) => !stopped && role === 'leader' &&
         lastSnapshotGeneration === lifecycleGeneration &&
         Boolean(lastSnapshot) && lastSnapshot.payload === payload && lastSnapshot.term === term &&

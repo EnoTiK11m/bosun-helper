@@ -13,8 +13,8 @@
   ]);
   const expandedReaderReasonCode = value => expandedReaderReasons.has(value) ? value : 'unknown';
 
-  // Verify guard installation BEFORE page scripts can install fake blockers.
-  // If injection order/MAIN support fails, permanently disable this document.
+  // Проверяем установку защиты ДО того, как скрипты страницы смогут установить поддельные блокировщики.
+  // При неверном порядке внедрения или отсутствии поддержки MAIN навсегда отключаем читатель в этом документе.
   let guarded = false;
   if (document.readyState === 'loading') {
     const probe = new CustomEvent('bosun-helper-group-identity-result-v1', { detail: 'guard-probe' });
@@ -25,8 +25,8 @@
     finally { window.removeEventListener('bosun-helper-group-identity-result-v1', observe, true); }
   }
 
-  // A synchronous, request-scoped read. No identity cache, DOM attributes, storage,
-  // timers or lasting listeners. The early MAIN guard authenticates event identity.
+  // Синхронное чтение в пределах запроса. Без кеша идентичности, атрибутов DOM, storage,
+  // таймеров и постоянных обработчиков. Ранняя MAIN-защита подтверждает подлинность объекта события.
   function readRequest(panel, request) {
     if (!guarded || !panel?.isConnected) return null;
     const bytes = crypto.getRandomValues(new Uint8Array(16));

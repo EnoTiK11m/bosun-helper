@@ -1,8 +1,8 @@
 (() => {
   'use strict';
 
-  // Declarative MAIN script at document_start: both guards precede page listeners.
-  // A late injection cannot establish this ordering and must remain unavailable.
+  // Декларативный MAIN-скрипт на document_start: обе защиты устанавливаются раньше обработчиков страницы.
+  // Позднее внедрение не гарантирует этот порядок; в таком случае читатель недоступен.
   if (document.readyState !== 'loading') return;
   const REQUEST = 'bosun-helper-group-identity-read-v1';
   const RESPONSE = 'bosun-helper-group-identity-result-v1';
@@ -25,8 +25,8 @@
   const idOf = value => (typeof value === 'number' || typeof value === 'string') &&
     /^[1-9]\d{0,15}$/.test(String(value)) && Number.isSafeInteger(Number(value)) ? String(value) : null;
 
-  // Origin/request nonces alone cannot authenticate same-page replies. Only the
-  // exact event created by this closure may reach the isolated response listener.
+  // Одних origin и случайных значений запроса недостаточно для аутентификации ответов той же страницы. Только
+  // событие, созданное этим замыканием, может достигнуть изолированного обработчика ответа.
   add.call(window, RESPONSE, event => {
     if (event !== authorizedResponse) stop.call(event);
   }, true);
@@ -42,7 +42,7 @@
       queryAll.call(document.documentElement, `[ts-ack-group="${binding}"]`).length !== 1) return null;
     const angular = own(window, 'angular');
     if (typeof own(angular, 'element') !== 'function') return null;
-    // Fixed library calls only: no binding parsing/$eval/$apply or model writes.
+    // Только фиксированные вызовы библиотеки: без разбора привязок, $eval/$apply и записи в модели.
     const scope = angular.element(panel).scope();
     const sectionScope = angular.element(root).isolateScope();
     const group = own(scope, 'group'), groups = own(sectionScope, 'groups');
@@ -67,7 +67,7 @@
         (key != null && stateKey != null && key !== stateKey)) return null;
       ids.add(id); result.push({ id, key: effectiveKey });
     }
-    // No reuse of an ID by a different model group in this same section.
+    // ID не должен использоваться другой модельной группой в той же секции.
     let examined = 0;
     for (const candidate of groups) {
       if (candidate === group) continue;
@@ -84,7 +84,7 @@
     return { section, children: result };
   }
 
-  // Age-only operation. The legacy parent reader above retains its contract.
+  // Операция только для возраста. Старый читатель родителя выше сохраняет свой контракт.
   function readExpandedSingleton(panel, reject) {
     const identity = read(panel);
     if (!identity) return reject('parent-reader-rejected');
@@ -111,8 +111,8 @@
     if (!isArray(children) || children.length !== 1) return reject('parent-child-count');
     if (!childScope) return reject('child-scope-unavailable');
     if (!child) {
-      // Diagnostic classification only: never use inherited/accessor bindings
-      // for identity. Inspect descriptors without invoking a model getter.
+      // Только диагностическая классификация: унаследованные привязки и аксессоры не используются
+      // для определения идентичности. Читаем дескрипторы, не вызывая getter модели.
       if (own(descriptor(childScope, 'child'), 'get')) return reject('child-binding-accessor');
       let prototype = prototypeOf(childScope);
       for (let depth = 0; prototype && depth < 8; depth++, prototype = prototypeOf(prototype)) {
@@ -135,8 +135,8 @@
         : (sameId && aliasKey == null ? 'state-alias-same-id-no-key' : 'state-alias-reference-mismatch'));
     }
 
-    // Calls into Angular can reenter page code. Re-read scope membership first,
-    // then validate all captured DOM/model references and identity values.
+    // Вызовы Angular могут повторно войти в код страницы. Сначала повторно читаем принадлежность scope,
+    // затем проверяем все сохранённые ссылки DOM/модели и значения идентичности.
     const finalIdentity = read(panel);
     const finalScope = angular.element(panel).scope(), finalChildScope = angular.element(childPanel).scope();
     const finalGroups = own(angular.element(root).isolateScope(), 'groups');
@@ -166,8 +166,8 @@
 
   function serve(request, reader) {
     add.call(window, request, event => {
-      stop.call(event); // Only this service event; never a native click/toggle.
-      if (reading) return; // No reentrant request can manufacture a nested reply.
+      stop.call(event); // Только это служебное событие; штатные click/toggle не затрагиваем.
+      if (reading) return; // Повторный вход с запросом не может создать вложенный ответ.
       const nonce = detailOf.call(event);
       if (typeof nonce !== 'string' || !/^[a-f0-9]{32}$/.test(nonce)) return;
       reading = true;
@@ -175,7 +175,7 @@
         let identity = null, reason = null;
         const ageOnly = reader === readExpandedSingleton;
         try { identity = ageOnly ? reader(targetOf.call(event), code => { reason = code; return null; }) : reader(targetOf.call(event)); }
-        catch (_) { if (ageOnly) reason = 'reader-exception'; /* No exception text crosses the bridge. */ }
+        catch (_) { if (ageOnly) reason = 'reader-exception'; /* Текст исключений не передаётся через мост. */ }
         authorizedResponse = new EventConstructor(RESPONSE, {
           detail: stringify({ version: 1, nonce, identity, ...(ageOnly && identity === null ? { reason: reason || 'unknown' } : {}) })
         });

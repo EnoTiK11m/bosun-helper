@@ -150,7 +150,7 @@
   function captureTargetIdentity() {
     try {
       const url = new URL(window.location.href);
-      // Freeze the panel and organization, not mutable time range or UI parameters.
+      // Фиксируем панель и организацию, сохраняя изменяемость временного диапазона и параметров интерфейса.
       return Object.freeze({ origin: url.origin, pathname: url.pathname,
         editPanel: url.searchParams.get('editPanel'), orgId: url.searchParams.get('orgId') });
     } catch (_) { return null; }
@@ -256,8 +256,8 @@
   function ensureBridge() {
     const existing = document.getElementById(BRIDGE_MARKER_ID);
     if (existing) {
-      // A marker that predates this isolated-world instance is not ours. Do not
-      // adopt its page-visible token; replace it with a fresh bridge instance.
+      // Маркер, существовавший до этого экземпляра изолированного контекста, нам не принадлежит. Не
+      // используем его видимый странице токен; создаём новый экземпляр моста.
       if (bridgeToken) return true;
       existing.remove();
     }
@@ -333,9 +333,9 @@
       if (!matchesTarget(target)) return 'target_changed';
       const pageReportedSuccess = await applyViaBridge(query, run, operationId, deadlineAt, target);
       if (!matchesTarget(target) || pageReportedSuccess === 'target_changed') return 'target_changed';
-      // Same-page scripts can observe and forge postMessage traffic, including
-      // the channel token. Treat the page-world result as advisory and verify
-      // the rendered editor value independently before deleting storage.
+      // Скрипты той же страницы могут наблюдать и подделывать сообщения postMessage, включая
+      // токен канала. Ответ контекста страницы считаем предварительным и независимо проверяем
+      // отображаемое значение редактора перед удалением данных из storage.
       if (
         pageReportedSuccess === true &&
         await waitForVisibleQuery(query, Math.min(deadlineAt, Date.now() + 2000), target) &&

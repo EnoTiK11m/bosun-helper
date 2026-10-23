@@ -14,7 +14,7 @@ function install(root) {
     throw new Error('Shared/external hooks directory; installation refused. Configure a repository-local hooks directory first.');
   }
   fs.mkdirSync(hookDir, { recursive: true });
-  // Preflight both hooks before writing either one. Preserve exact old bytes/mode.
+  // Проверяем оба хука до записи любого из них. Сохраняем исходные байты и права доступа.
   const plans = ['pre-commit', 'commit-msg', 'pre-push'].map(name => {
     const file = path.join(hookDir, name), old = fs.existsSync(file) ? fs.readFileSync(file) : null;
     if (fs.existsSync(file) && fs.lstatSync(file).isSymbolicLink()) throw new Error('Symlink hook requires manual integration.');

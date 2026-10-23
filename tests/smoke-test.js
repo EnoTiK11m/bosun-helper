@@ -1094,8 +1094,8 @@ function createBaselineHarness(options = {}) {
   for (const id of ['3', '4', '5', '6', '7']) assert.strictEqual(index.childrenBySection.get('NeedAck').get(id), null);
   assert.strictEqual(buildIndex({ Groups: { NeedAck: {} } }).childrenBySection.get('NeedAck').size, 0);
   const ruleName = priorityContext.BosunHelperPriorityAlerts.getRuleAlertName;
-  // TagSet.String writes values verbatim; AlertKey.Group keeps ParseTags' map
-  // even when OpenTSDB character validation reports an internal ASCII space.
+  // TagSet.String записывает значения дословно; AlertKey.Group сохраняет карту ParseTags,
+  // даже когда проверка символов OpenTSDB сообщает о внутреннем ASCII-пробеле.
   for (const cluster of ['two words', 'two  words', 'three separate words']) {
     const key=`example.alert{cluster=${cluster},host=node-one}`;
     assert.strictEqual(ruleName({Alert:'example.alert',AlertKey:key,
@@ -1120,8 +1120,8 @@ function createBaselineHarness(options = {}) {
     const key=`example.alert{cluster=two${control}words}`;
     assert.strictEqual(ruleName({Alert:'example.alert',AlertKey:key,State:{Alert:'example.alert',AlertKey:key}}),'');
   }
-  // Bosun's OpenTSDB name processor permits digits, '.', '/', '-' in tag
-  // names (opentsdb/name.go); these are not PromQL label identifiers.
+  // Обработчик имён OpenTSDB в Bosun разрешает цифры, '.', '/', '-' в именах
+  // тегов (opentsdb/name.go); это не идентификаторы меток PromQL.
   for (const tag of ['disk-name', 'cloud.zone', 'rack/slot', '1rack']) {
     const key = `example.alert{${tag}=synthetic,host=node-one}`;
     assert.strictEqual(ruleName({ Alert: 'example.alert', AlertKey: key,

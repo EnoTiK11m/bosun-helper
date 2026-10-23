@@ -87,7 +87,7 @@ function collectRuntime(root) {
     ensure(JSON.stringify(config) === JSON.stringify(loadConfigFile(path.join(root, 'config.local.js'))),
       'Runtime config differs from config.local.js; synchronize it before packaging.');
   }
-  // Rebuild only the declarative runtime assignment: comments/local extra data are never copied.
+  // Пересобираем только декларативное присваивание конфигурации: комментарии и дополнительные локальные данные не копируются.
   const configSource = buildConfigSource(config);
   verifyGeneratedContents(configSource, manifestSource.toString('utf8'), config);
   for (const [file, world] of [['src/bosun/group-identity-page.js', 'MAIN'], ['src/bosun/group-identity.js', 'ISOLATED']]) {
@@ -113,7 +113,7 @@ function collectRuntime(root) {
       scanSecrets(source);
       ensure(!/BH (?:IdentityDiag|IndicatorDiag|PriorityDiag)|priorityRegressionDiagnosticsV1/.test(source),
         'Temporary investigation diagnostics found in runtime.');
-      // Literal runtime paths include sound options as well as getURL arguments.
+      // Пути к ресурсам в коде включают варианты звуков и аргументы getURL.
       for (const match of source.matchAll(/["']((?:src|assets)\/[^"'\s]+)["']/g)) {
         ensure(paths.has(match[1]), 'Dynamic runtime resource is missing from manifest.');
       }
@@ -140,7 +140,7 @@ function crc32(data) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-// Standard ZIP/deflate, UTF-8 names, fixed timestamp, no dependencies or shell commands.
+// Стандартный ZIP/deflate, имена UTF-8, фиксированное время; без зависимостей и команд оболочки.
 function createZip(files) {
   const local = [], central = [];
   let offset = 0;
@@ -188,7 +188,7 @@ if (require.main === module) {
     const result = packageInternal();
     console.log(`Internal package: dist/${path.basename(result.filename)} (${result.bytes} bytes, ${result.files} files)`);
   } catch (error) {
-    // Filesystem/JSON/config errors may contain operational data: never echo them.
+    // Ошибки файловой системы, JSON и конфигурации могут содержать рабочие данные: не выводим их.
     const reason = error instanceof PackageError || error instanceof ConfigSyncError
       ? error.message : 'Verify runtime config, manifest, resource paths and absence of credentials.';
     console.error(`Internal packaging failed: ${reason}`);

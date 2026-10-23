@@ -11,7 +11,7 @@ const api = context.BosunHelperPromQL;
 const tests = [];
 function test(name, run) { tests.push({ name, run }); }
 
-// Sanitized counterpart of the production-shaped global count/subquery case.
+// Обезличенный аналог рабочего случая с глобальным count и подзапросом.
 const globalCountQuery = [
   'sum by (name, zone) (',
   '  sum by (account, name, zone) (session_bound)',
@@ -24,8 +24,8 @@ const globalCountQuery = [
 ].join('\n');
 const selectedTags = { name: 'channel-alpha', zone: 'zone-one' };
 
-// This parser only evaluates the generated constant RHS, never arbitrary PromQL.
-// It independently checks that replacements make literal alert values, including $.
+// Этот парсер вычисляет только сгенерированную константу RHS, а не произвольный PromQL.
+// Независимо проверяем, что подстановки дают буквальные значения алертов, включая $.
 function readConstantVector(source) {
   let offset = 0;
   function trivia() { while (/\s/.test(source[offset] || '')) offset += 1; }
@@ -84,7 +84,7 @@ function outputFilter(query, original, tags) {
   assert.ok(position >= 0, 'Original query must remain byte-for-byte intact');
   assert.strictEqual(query.slice(0, position).trim(), '(', 'Original query must be the complete left operand');
   const tail = query.slice(position + original.length);
-  // A newline before the closing parenthesis also protects a trailing # comment.
+  // Перевод строки перед закрывающей скобкой также защищает от завершающего комментария #.
   assert.ok(/^\s*\n\s*\)/.test(tail), 'Wrapper must terminate a possible trailing comment');
   const match = tail.match(/^\s*\)\s+and\s+on\s*\(([^)]*)\)\s*([\s\S]+)$/);
   assert.ok(match, 'Filter must intersect the completed result using explicit matching labels');

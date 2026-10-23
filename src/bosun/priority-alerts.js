@@ -1,8 +1,8 @@
 (() => {
   'use strict';
 
-  // Identity and severity must already be resolved by the caller. This module
-  // deliberately does not match snapshot records to DOM nodes.
+  // Вызывающий код уже должен определить идентичность и важность. Этот модуль
+  // намеренно не сопоставляет записи снимка с узлами DOM.
   function classify(resolvedChild, settings) {
     const noPriority = { priority: false, reasons: [] };
     if (settings?.features?.priorityAlerts !== true) return noPriority;
@@ -32,11 +32,11 @@
     if (envelope[2]) for (const pair of envelope[2].split(',')) {
       const tag = pair.match(/^([^=]+)=(.*)$/);
       if (!tag) return reject('malformed', 'invalid-tag-pair');
-      // Bosun opentsdb/name.go permits these ASCII characters in tag names,
-      // including initial digits. This is not the PromQL label-name grammar.
+      // Bosun opentsdb/name.go допускает эти ASCII-символы в именах тегов,
+      // включая цифры в начале. Это не грамматика имён меток PromQL.
       if (!/^[A-Za-z0-9_./-]+$/.test(tag[1])) return reject('unsupported', 'unsupported-tag-name-syntax');
-      // AlertKey.Group accepts internal spaces despite OpenTSDB validation errors.
-      // Preserve them exactly; do not trim values or admit other whitespace.
+      // AlertKey.Group принимает внутренние пробелы, несмотря на ошибки валидации OpenTSDB.
+      // Сохраняем их точно; не обрезаем значения и не разрешаем другие пробельные символы.
       if (!/^[^\s{},="'\\]+(?: +[^\s{},="'\\]+)*$/.test(tag[2])) return reject('unsupported', 'unsupported-tag-value-syntax');
       if (seen.has(tag[1])) return reject('malformed', 'duplicate-tag-name');
       seen.add(tag[1]); tags.push([tag[1], tag[2]]);
@@ -46,7 +46,7 @@
       identity: JSON.stringify([name, envelope[2] !== undefined, tags]) };
   }
 
-  // Rule editing uses structured names, never human-readable Subject text.
+  // При редактировании правил используются структурированные имена, а не читаемый текст Subject.
   function getRuleAlertName(child) {
     const names = [child?.Alert, child?.State?.Alert]
       .filter((value) => typeof value === 'string' && value.trim())

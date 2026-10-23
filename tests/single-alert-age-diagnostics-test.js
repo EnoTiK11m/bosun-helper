@@ -109,7 +109,7 @@ assert.strictEqual(report.events.at(-1).event, 'snapshot-fetch-failed');
 assert.strictEqual(report.events.at(-1).source, 'other');
 api.diagnostics.clear();
 assert.strictEqual(timers.size, 0);
-// Subject normalization is diagnostic only, including collisions and raw DOM text.
+// Нормализация Subject используется только в диагностике, включая коллизии и исходный текст DOM.
 let syntheticTime = fixedNow;
 const collapsed = { raw: 'synthetic whitespace', node: { textContent: '1 alerts', dataset: {}, childNodes: [] } };
 const whitespaceApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({
@@ -143,7 +143,7 @@ assert.strictEqual(collision.candidateCountInCurrentSection, 0);
 assert.strictEqual(collision.identityReason, 'missing-candidate', 'Normalization must not become a matching fallback');
 whitespaceApi.diagnostics.clear();
 assert.strictEqual(timers.size, 0);
-// Transient child-ID comparison must never provide a rendering fallback.
+// Временное сравнение дочерних ID не должно предоставлять запасной путь отображения.
 const oldSubject = 'synthetic lifecycle original';
 const stablePanel = { node: { textContent: '1 alerts', dataset: {}, childNodes: [] } };
 const stableApi = context.BosunHelperSingleAlertAge.createSingleAlertAge({

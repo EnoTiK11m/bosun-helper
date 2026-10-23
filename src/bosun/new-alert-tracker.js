@@ -213,7 +213,7 @@
       const generation = lifecycleGeneration;
       await (readyPromise || Promise.resolve());
       if (!started || generation !== lifecycleGeneration) return;
-      // Restore can outlive ownership or the snapshot that authorized this call.
+      // Восстановление может завершиться после потери владения или смены снимка, разрешившего этот вызов.
       if (!canReconcile()) return;
       const { currentIds, idToSeverity } = collectCurrentIdsAndSeverity(payload);
       const notedIds = collectIdsWithNote(payload);

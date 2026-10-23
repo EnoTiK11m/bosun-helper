@@ -10,11 +10,11 @@ const RESERVED = /(?:^|\.)(?:example\.(?:com|org|net)|invalid|test)$/i;
 const HISTORICAL_DOCS = new Set([
   'docs/GRAFANA-PROMQL.md', 'docs/SINGLE-ALERT-AGE-DIAGNOSTICS.md', 'docs/WIKI-INSTALL.md'
 ]);
-// Compare actual object bytes, not local refs/replace substitutions.
+// Сравниваем фактические байты объектов без локальных подмен через refs/replace.
 function git(root, args, options) { return runGit(root, ['--no-replace-objects', ...args], options); }
 
-// Exact public canaries used to exercise packaging rejection, never a tests/ bypass.
-// Keep URL construction split so the policy source is not itself a URL fixture.
+// Точные публичные контрольные значения проверяют отказ упаковки, не создавая общего исключения для tests/.
+// Собираем URL из частей, чтобы код проверки сам не стал тестовым URL.
 const PACKAGE_FIXTURE = 'tests/package-internal-test.js';
 const FIXTURE_URLS = new Set([
   ['https:', '', 'synthetic-grafana.internal', 'd/synthetic/dashboard?orgId=1&editPanel=2&from=now-6h&to=now&timezone=browser&refresh=5s'].join('/'),
@@ -38,7 +38,7 @@ function localHosts(root) {
   const hosts = new Set();
   for (const name of ['config.js', 'config.local.js']) {
     const file = path.join(root, name); if (!fs.existsSync(file)) continue;
-    const config = loadConfigFile(file); // Existing declarative parser, never eval configuration.
+    const config = loadConfigFile(file); // Используем существующий декларативный парсер, не исполняя конфигурацию через eval.
     for (const host of [...config.bosunHosts, config.grafanaHost]) {
       const hostname = new URL(`https://${host}`).hostname.toLowerCase();
       if (!RESERVED.test(hostname)) hosts.add(hostname);
@@ -48,7 +48,7 @@ function localHosts(root) {
 }
 function scanText(text, hosts, configFile = false, name = '') {
   const reasons = new Set();
-  // Detect ordinary JSON/JS escaped spellings too; never return matched values.
+  // Учитываем обычные escape-последовательности JSON/JS; найденные значения не возвращаем.
   const decoded = text.replace(/\\u([a-f0-9]{4})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     .replace(/\\x([a-f0-9]{2})/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))).replace(/\\\//g, '/');
   const lower = decoded.toLowerCase();
@@ -57,20 +57,20 @@ function scanText(text, hosts, configFile = false, name = '') {
   if (/\b(?:gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{20,}|AKIA[A-Z0-9]{16}|sk-(?:proj-)?[a-zA-Z0-9_-]{24,})\b/.test(decoded)) reasons.add('credential-format');
   if (/\bBearer\s+[a-zA-Z0-9._~+/-]{20,}/i.test(decoded)) reasons.add('bearer-token');
   if (/\beyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\b/.test(decoded)) reasons.add('jwt');
-  // Consume the complete quoted/unquoted key: channelToken is not a token field.
+  // Читаем целиком ключ в кавычках или без них: channelToken не является полем token.
   const assignments = /(?<![\w$"'-])(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([a-z_$][\w$-]*))\s*[:=]\s*["']([^"'\r\n]{8,})["']/gi;
   for (const match of decoded.matchAll(assignments)) {
     const key = match[1] || match[2] || match[3], value = match[4];
     if (!/^(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|token)$/i.test(key)) continue;
     if (!configFile && fixtureAssignment(name, key, value)) continue;
-    // Only explicit template syntax is globally recognizable. A test/demo/etc.
-    // prefix is not proof of a fixture; exact public canaries are scoped above.
+    // Общее исключение допустимо только для явного синтаксиса шаблонов. Префикс test/demo и т. п.
+    // не доказывает тестовое происхождение; точные публичные контрольные значения ограничены выше.
     if (!/^(?:<[^>]+>|\$\{[^}]+\})$/.test(value)) reasons.add('secret-assignment');
   }
   for (const match of decoded.matchAll(/\bhttps?:\/\/[^\s"'`<>\\)]+/gi)) {
     try {
       const url = new URL(match[0]), hostname = url.hostname.toLowerCase();
-      // Global host/key/token checks above still apply even to these exact literals.
+      // Общие проверки hosts, ключей и токенов выше действуют и для этих точных литералов.
       if (!configFile && name === PACKAGE_FIXTURE && FIXTURE_URLS.has(match[0])) continue;
       if (url.username || url.password) reasons.add('url-credentials');
       if (/(?:^|\.)(?:internal|local|lan|corp)$/.test(hostname) ||
@@ -80,7 +80,7 @@ function scanText(text, hosts, configFile = false, name = '') {
       if ([...url.searchParams.keys()].some(key => /^(?:token|access_token|api_key|apikey|password|secret)$/i.test(key))) reasons.add('url-secret-parameter');
     } catch (_) { if (configFile) reasons.add('invalid-config-url'); }
   }
-  // Bare configured hosts in config.js are not necessarily URLs.
+  // Имена hosts из config.js не обязательно записаны как URL.
   if (configFile === 'config') for (const match of decoded.matchAll(/["']([a-z0-9-]+(?:\.[a-z0-9-]+)+)(?::\d+)?["']/gi)) {
     if (!RESERVED.test(match[1])) reasons.add('non-public-example-config');
   }
@@ -135,7 +135,7 @@ function scanRevisions(root, revisions, hosts = localHosts(root), historical = n
   const counts = new Map(), cache = new Map();
   if (revisions.length > 10000) throw new Error('History scan budget exceeded');
   const metadata = readObjects(root, revisions), expanded = [...new Set(revisions)];
-  // Annotated tags can point to other tags; every message in the chain is content.
+  // Аннотированные теги могут ссылаться на другие теги; каждое сообщение в цепочке проверяется как содержимое.
   for (let i = 0; i < expanded.length; i++) {
     const object = metadata.get(expanded[i]);
     if (object.type !== 'tag') continue;
@@ -147,7 +147,7 @@ function scanRevisions(root, revisions, hosts = localHosts(root), historical = n
     const object = metadata.get(revision);
     for (const reason of scanText(object.text, hosts)) counts.set(reason, (counts.get(reason) || 0) + 1);
     if (object.type === 'commit' || object.type === 'tree' || object.type === 'tag') {
-      // Peel tags to a tree when possible; tags to blobs are checked below.
+      // По возможности раскрываем тег до дерева; ссылки тегов на blob проверяются ниже.
       const peeled = git(root, ['rev-parse', `${revision}^{}`]).trim();
       const type = git(root, ['cat-file', '-t', peeled]).trim();
       if (type === 'blob') {
@@ -158,15 +158,15 @@ function scanRevisions(root, revisions, hosts = localHosts(root), historical = n
   return counts;
 }
 function provePublishedTranslation(root, local, remote) {
-  // The old object ID comes from Git's advertised remote ref, never an allowlist
-  // in the outgoing tree. Prove a bijection of the entire commit/tag graph.
+  // Старый ID объекта берётся из удалённой ref, объявленной Git, а не из списка разрешений
+  // в отправляемом дереве. Доказываем взаимно однозначное соответствие всего графа коммитов и тегов.
   const commits = new Set(), cache = new Map(), seen = new Set(), forward = new Map(), reverse = new Map();
   let pending = [[remote, local]], bytes = 0;
   const reject = () => new Set();
   while (pending.length) {
     const batch = pending; pending = [];
     const missing = [...new Set(batch.flat().filter(id => !cache.has(id)))];
-    // Latin1 retains every metadata byte, including non-UTF-8 author names.
+    // Latin1 сохраняет каждый байт метаданных, включая имена авторов вне UTF-8.
     for (const [id, object] of readObjects(root, missing, 'latin1')) {
       bytes += object.text.length;
       if (bytes > 32 * 1024 * 1024) throw new Error('Translation proof budget exceeded');
@@ -190,7 +190,7 @@ function provePublishedTranslation(root, local, remote) {
         const parents = header => [...header.matchAll(/^parent ([a-f0-9]+)$/gm)].map(match => match[1]);
         const oldParents = parents(oldHeader), newParents = parents(newHeader);
         const metadata = header => header.replace(/^parent [a-f0-9]+$/gm, 'parent');
-        // This includes the complete tree OID: path, mode and blob bytes match.
+        // Сравнение включает полный OID дерева: пути, режимы и байты blob должны совпасть.
         if (metadata(oldHeader) !== metadata(newHeader) || oldParents.length !== newParents.length) return reject();
         for (let i = 0; i < oldParents.length; i++) pending.push([oldParents[i], newParents[i]]);
         commits.add(newId);
@@ -218,8 +218,8 @@ function scanPush(root, input) {
     const peeled = git(root, ['rev-parse', `${local}^{}`]).trim();
     for (const id of [...outgoing, local, peeled]) {
       revisions.add(id);
-      // A successful existing ref cannot authorize the same content on a new
-      // or unproven ref in the same push. Every contributing ref must qualify.
+      // Проверенная существующая ref не разрешает то же содержимое для новой
+      // или непроверенной ref в том же push. Каждая использующая его ref должна пройти проверку.
       eligible.set(id, (eligible.get(id) ?? true) && proven.has(id));
     }
   }

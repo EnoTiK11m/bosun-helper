@@ -1,6 +1,6 @@
 'use strict';
 
-// Optional local engine verification; no network or production data is used.
+// Необязательная локальная проверка движка; сеть и рабочие данные не используются.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -43,7 +43,7 @@ assert.ok(interpolationResolution.ok, interpolationResolution.reason);
 const tests = [
   { expr: guard, eval_time: '10m', exp_samples: [sample('{name="alpha",zone="one"}', 2), sample('{name="beta",zone="two"}', 3)] },
   { expr: filter(guard, tags), eval_time: '10m', exp_samples: [sample('{name="alpha",zone="one"}', 2)] },
-  // Control reproduces the previous bug: restricting the inner global count empties it.
+  // Контроль воспроизводит прежний баг: ограничение внутреннего глобального count опустошает результат.
   { expr: guard.replaceAll('session_bound', 'session_bound{name="alpha",zone="one"}')
     .replace('{name="alpha",zone="one"}{account!~"retired|sandbox"}', '{name="alpha",zone="one",account!~"retired|sandbox"}'),
     eval_time: '10m', exp_samples: [] },
@@ -64,19 +64,19 @@ const tests = [
   ]) },
   { expr: filter(mergeResolution.query, { ...tags, kind: 'previous.day' }), eval_time: '10m',
     exp_samples: [sample('{name="alpha",zone="one",kind="previous.day"}', 1)] },
-  // Control: the same operands without a discriminator lose subsequent branches.
+  // Контроль: те же операнды без различающей метки теряют последующие ветви.
   { expr: mergeSources.map(query => `(\n${query}\n)`).join(' or '), eval_time: '10m',
     exp_samples: [sample('{name="alpha",zone="one"}', 2), sample('{name="beta",zone="two"}', 3)] },
   { expr: interpolationResolution.query, eval_time: '10m',
     exp_samples: [sample('{name="alpha",zone="one"}', 2), sample('{name="beta",zone="two"}', 3)] },
   { expr: filter(interpolationResolution.query, tags), eval_time: '10m',
     exp_samples: [sample('{name="alpha",zone="one"}', 2)] },
-  // Finite-value filtering removes NaN and infinities, but cannot reproduce
-  // Bosun's error when a complete input series becomes empty. Keep dropna closed.
+  // Фильтрация конечных значений убирает NaN и бесконечности, но не воспроизводит
+  // ошибку Bosun при опустошении всей входной серии. Поддержку dropna не включаем.
   { expr: '(finite_metric < +Inf) > -Inf', eval_time: '10m',
     exp_samples: [sample('finite_metric{kind="finite"}', 2)] },
   { expr: '(finite_metric{kind="nan"} < +Inf) > -Inf', eval_time: '10m', exp_samples: [] },
-  // This proves support on this local engine only, not the configured backend.
+  // Это подтверждает поддержку только этим локальным движком, а не настроенным backend.
   { expr: '{__name__="synthetic.metric",host="one"}', eval_time: '10m',
     exp_samples: [sample('{__name__="synthetic.metric",host="one"}', 7)] }
 ];
@@ -118,7 +118,7 @@ for (const fixture of legacyFixtures) {
     values: fixture.rate ? resetCounter : '5+0x40' });
   legacyInputs.push({ series: series(fixture.metric, { ...labels, instance: 'two' }),
     values: fixture.rate ? '0+30x40' : '7+0x40' });
-  // An underscore metric with a different value makes accidental renaming observable.
+  // Метрика с подчёркиванием и другим значением делает случайное переименование заметным.
   if (!legacyInputs.some(input => input.series === series(fixture.metric.replace(/\./g, '_'), labels))) {
     legacyInputs.push({ series: series(fixture.metric.replace(/\./g, '_'), labels), values: '999+0x40' });
   }
@@ -147,16 +147,16 @@ for (const [aggregation, expected] of [['sum', 12], ['avg', 6], ['min', 5], ['ma
     filter: 'env!="retired",zone!~"old.*|gone",kind=~".+Errors",team="ops"', step: '30s', start: '1h' });
   legacyTests.push({ expr: query, eval_time: '10m', exp_samples: [sample('{service="selected"}', expected)] });
 }
-// Rate extrapolation can differ by one floating-point mantissa bit from the
-// same rational computed in JS. Only new legacy tests use promtool's one-bit
-// comparison; the original 17 expressions retain strict comparison.
+// Экстраполяция rate может отличаться на один бит мантиссы от того же
+// рационального значения, вычисленного в JS. Только новые тесты старых вызовов используют допуск promtool в один бит;
+// исходные 17 выражений сохраняют строгое сравнение.
 const legacySpec = { evaluation_interval: '15s', fuzzy_compare: true,
   tests: [{ interval: '15s', input_series: legacyInputs, promql_expr_test: legacyTests }] };
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'bosun-promql-engine-'));
 const filename = path.join(directory, 'synthetic-rules.json');
 const legacyFilename = path.join(directory, 'synthetic-legacy-rules.json');
 try {
-  fs.writeFileSync(filename, JSON.stringify(spec)); // JSON is valid YAML.
+  fs.writeFileSync(filename, JSON.stringify(spec)); // JSON является допустимым YAML.
   fs.writeFileSync(legacyFilename, JSON.stringify(legacySpec));
   for (const file of [filename, legacyFilename]) {
     const result = spawnSync(executable, ['test', 'rules', file], { encoding: 'utf8' });
