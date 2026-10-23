@@ -149,7 +149,7 @@ function createScriptLoader(root) {
   return {
     readTestScript,
     instrumentContentSource(source) {
-      return `${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
+      return `${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
     }
   };
 }

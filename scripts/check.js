@@ -74,6 +74,7 @@ for (const provider of [
   'src/bosun/new-alert-tracker.js',
   'src/bosun/priority-alerts.js',
   'src/bosun/last-action.js',
+  'src/bosun/copy.js',
   'src/shared/refresh-coordinator.js'
 ]) {
   const providerIndex = bosunScripts.indexOf(provider);
