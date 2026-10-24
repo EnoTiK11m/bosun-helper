@@ -122,7 +122,8 @@ async function runPrimeMarkerStartupAssertions(client) {
       win.BosunHelperLocalConfig = { bosunHosts: [win.location.host] };
       await advance(810); win.eval(sources.content);
       const hooks = win.__BosunHelperBrowserTest;
-      const state = () => ({ ...hooks.startupState(), priority: doc.querySelectorAll('.bosun-priority-marker').length,
+      const state = () => ({ ...hooks.startupState(), indexGeneration: hooks.snapshotStateForTest().alertMarkerIndexGeneration,
+        priority: doc.querySelectorAll('.bosun-priority-marker').length,
         note: doc.querySelectorAll('.bosun-has-note-icon').length });
       if (scenario === 'route' || scenario === 'route-return') {
         win.history.pushState({}, '', '/action?type=note'); hooks.handleRouteChange();
@@ -131,7 +132,14 @@ async function runPrimeMarkerStartupAssertions(client) {
       if (scenario === 'pagehide') win.dispatchEvent(new win.PageTransitionEvent('pagehide', { persisted: false }));
       if (scenario === 'newer-snapshot') hooks.applyAlertsPayload({ Groups: { NeedAck: [], Acknowledged: [] } }, { source: 'follower' });
       if (!['late-settings', 'expired-settings'].includes(scenario)) { await advance(1020); releaseSettings(); await drain(); }
+      const guardedPayload = hooks.snapshotStateForTest().latestAlertsPayload;
+      const guardedIndexGeneration = hooks.snapshotStateForTest().alertMarkerIndexGeneration;
       await advance(1600); const beforeSettings = state();
+      const stalePrimeDiscarded = scenario !== 'newer-snapshot' || (
+        hooks.snapshotStateForTest().latestAlertsPayload === guardedPayload &&
+        hooks.snapshotStateForTest().alertMarkerIndexGeneration === guardedIndexGeneration &&
+        hooks.snapshotStateForTest().childHasNoteById.size === 0
+      );
       if (scenario === 'late-settings') { await advance(2000); releaseSettings(); await drain(); }
       if (scenario === 'expired-settings') { await advance(4900); releaseSettings(); await drain(); }
       if (scenario === 'expired-fetch') await advance(4910);
@@ -161,7 +169,7 @@ async function runPrimeMarkerStartupAssertions(client) {
         await advance(16000);
         if (old.getRole() !== 'leader' || state().role !== 'follower') throw Error('Prime must not steal an active peer lease');
       }
-      results[scenario] = { beforeSettings, early, earlyEffects, earlyRequests, leaseUnchanged,
+      results[scenario] = { beforeSettings, early, earlyEffects, earlyRequests, leaseUnchanged, stalePrimeDiscarded,
         afterRefresh: state(), requests: requests.slice(), effects: { ...effects } };
       old.stop(); win.dispatchEvent(new win.PageTransitionEvent('pagehide', { persisted: false })); frame.remove();
     }
@@ -177,6 +185,7 @@ async function runPrimeMarkerStartupAssertions(client) {
     assert.strictEqual(results[scenario].leaseUnchanged, true);
   }
   assert.strictEqual(results['late-settings'].beforeSettings.priority, 0);
+  assert.strictEqual(results['newer-snapshot'].stalePrimeDiscarded, true, 'A stale async prime must not rebuild indexes or replace the newer payload');
   assert.strictEqual(results.orphan.afterRefresh.priority, 4);
   assert.strictEqual(results.orphan.afterRefresh.note, 3);
   assert.strictEqual(results.orphan.afterRefresh.owner, true);
@@ -192,6 +201,7 @@ async function runPrimeMarkerStartupAssertions(client) {
   assert.strictEqual(results.ambiguous.early.priority, 1, 'Only the independent Acknowledged group remains Priority');
   assert.strictEqual(results.ambiguous.early.note, 1, 'Duplicate IDs fail closed; a malformed rule key must not change independent Note');
   console.log('Prime marker startup browser regression passed (1600ms instead of 15832ms)');
+  return results;
 }
 
   return runPrimeMarkerStartupAssertions;

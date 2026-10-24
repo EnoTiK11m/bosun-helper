@@ -21,7 +21,7 @@ const cacheMaps = ['childOldNoNoteById', 'childOldNoNoteByKey', 'childHasNoteByI
   'groupHasAnyUserCommentByKey', 'groupHasOldNoNoteBySubject', 'groupHasAnyNoteBySubject',
   'groupHasAnyUserCommentBySubject', 'groupHasStrongIdentityBySubject', 'groupCountBySubject'];
 
-function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8')) {
+function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8'), options = {}) {
   let fault = '', sequence = 0;
   const trace = [], storage = new Map(), timers = new Map();
   const context = {
@@ -31,7 +31,7 @@ function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/conte
     window: { location: { host: 'unused.invalid', hostname: 'unused.invalid', href: 'https://unused.invalid/', origin: 'https://unused.invalid', pathname: '/' },
       sessionStorage: { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) } },
     document: { readyState: 'loading', addEventListener() {}, querySelector: () => null, querySelectorAll: () => [], getElementById: () => null },
-    __phase(name) { trace.push(name); if (fault === name) throw Error('synthetic ' + name); },
+    __phase(name) { trace.push(name); options.onPhase?.(name, context.__snapshotTest); if (fault === name) throw Error('synthetic ' + name); },
     BosunHelperPriorityAlerts: { buildRuleIdentityIndex(payload) { context.__phase('rule'); return { id: payload.id || 'empty' }; } },
     BosunHelperGroupIdentity: { buildSnapshotIndexes(payload) { context.__phase('model'); return { id: payload.id || 'empty' }; } },
     BosunSilenceHiderAlertsData: { createAlertsData: () => ({ rebuildAlertDataIndex(payload, helpers, section = 'NeedAck') {
@@ -46,7 +46,8 @@ function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/conte
       return result;
     } }) }
   };
-  for (const file of ['snapshot-state', 'alert-marker-cache']) {
+  options.configureContext?.(context);
+  for (const file of ['snapshot-index', 'snapshot-state', 'alert-marker-cache']) {
     vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/' + file + '.js'), 'utf8'), context);
   }
   const stateName = source.includes('const snapshotState =') ? 'snapshotState.' : '';
@@ -61,6 +62,8 @@ function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/conte
       read() { return { ${scalars.map(name => name + ': ' + stateName + name).join(', ')},
         ruleGraphLifecycleGeneration, visualTrackerLifecycleGeneration, markerPresentationLifecycle }; },
       enablePriority(value) { settingsSnapshot.features.priorityAlerts = value; },
+      settingsForTest: () => settingsSnapshot,
+      replaceSettings(value) { settingsSnapshot = value; },
       settingsRebuild() { rebuildAlertDataIndex(${stateName}latestAlertsPayload); }
     };
   `;
@@ -203,6 +206,90 @@ function runCacheAdapterContract(source) {
   return records;
 }
 
+function runRebuildContract(source) {
+  const records = [];
+  {
+    let api; const seen = [], samples = [];
+    const h = createHarness(source, { configureContext(context) {
+      context.BosunHelperPriorityAlerts.getRuleAlertName = () => 'synthetic';
+      context.BosunHelperPriorityAlerts.classify = (identity, settings) => {
+        seen.push(settings); return { priority: settings.revision === 2 };
+      };
+      const create = context.BosunSilenceHiderAlertsData.createAlertsData;
+      context.BosunSilenceHiderAlertsData.createAlertsData = () => {
+        const domain = create(), rebuild = domain.rebuildAlertDataIndex;
+        domain.rebuildAlertDataIndex = (payload, helpers, section) => {
+          samples.push(helpers.classifyPriorityChild({}, {}));
+          const current = api.settingsForTest();
+          api.replaceSettings({ ...current, revision: 2, features: { ...current.features, priorityAlerts: false } });
+          samples.push(helpers.classifyPriorityChild({}, {}));
+          assert.deepStrictEqual(plain(helpers.normalizeNeedAckChildren(null)), []);
+          assert.deepStrictEqual(plain(helpers.normalizeNeedAckChildren({ id: 1 })), [{ id: 1 }]);
+          return rebuild(payload, helpers, section);
+        };
+        return domain;
+      };
+    } });
+    api = h.api; api.enablePriority(true);
+    const previous = api.settingsForTest();
+    api.rebuildAlertDataIndex({ id: 'live' });
+    assert.deepStrictEqual(samples, [false, true]);
+    assert.strictEqual(seen[0], previous);
+    assert.strictEqual(seen[1], api.settingsForTest());
+    assert.ok(!h.trace.includes('domain:Acknowledged'), 'Feature flag must be checked after NeedAck processing');
+    assert.strictEqual(api.read().acknowledgedPriorityIndex, null);
+    h.assertReferences(); records.push({ trace: h.trace, state: h.read(), samples });
+  }
+  {
+    const h = createHarness(source); h.api.enablePriority(true);
+    h.api.rebuildAlertDataIndex({ id: 'skip' }, { skipGrafanaQueryIndex: true });
+    assert.deepStrictEqual(h.trace, ['rule', 'domain:NeedAck', 'domain:Acknowledged', 'model']);
+    h.trace.length = 0;
+    assert.throws(() => h.api.rebuildAlertDataIndex({ id: 'null-options' }, null), /skipGrafanaQueryIndex/);
+    assert.strictEqual(h.api.read().alertMarkerIndexGeneration, 2);
+    assert.strictEqual(h.api.read().modelGroupSnapshotIndexes.id, 'null-options');
+    assert.deepStrictEqual(h.trace, ['rule', 'domain:NeedAck', 'domain:Acknowledged', 'model']);
+    const options = { get skipGrafanaQueryIndex() {
+      assert.strictEqual(h.api.read().alertMarkerIndexGeneration, 3);
+      assert.strictEqual(h.api.read().modelGroupSnapshotIndexes.id, 'late-options');
+      throw Error('synthetic options getter');
+    } };
+    assert.throws(() => h.api.rebuildAlertDataIndex({ id: 'late-options' }, options), /synthetic options getter/);
+    h.assertReferences(); records.push(h.read());
+  }
+  {
+    const h = createHarness(source); h.api.enablePriority(true);
+    h.api.rebuildAlertDataIndex({ id: 'old' });
+    const map = h.api.collections.childHasNoteByKey, clear = map.clear;
+    map.clear = () => { throw Error('synthetic clear'); };
+    assert.throws(() => h.api.rebuildAlertDataIndex({ id: 'next' }), /synthetic clear/);
+    assert.strictEqual(h.api.collections.childOldNoNoteById.size, 0);
+    assert.strictEqual(h.api.collections.childHasNoteById.size, 0);
+    assert.strictEqual(map.size, 1);
+    assert.strictEqual(h.api.collections.groupHasAnyNoteByKey.size, 1);
+    assert.strictEqual(h.api.read().alertMarkerIndexGeneration, 1);
+    h.assertReferences(); records.push(h.read());
+    map.clear = clear; h.api.rebuildAlertDataIndex({ id: 'recovered' }); h.assertReferences();
+  }
+  {
+    const h = createHarness(source, { configureContext(context) {
+      context.BosunSilenceHiderAlertsData = null;
+      context.BosunHelperPriorityAlerts = null;
+      context.BosunHelperGroupIdentity = null;
+    } });
+    h.api.enablePriority(true);
+    assert.strictEqual(h.api.rebuildAlertDataIndex({ id: 'fallback' }), undefined);
+    const state = h.api.read();
+    assert.strictEqual(state.alertDataIndexReady, true);
+    assert.strictEqual(state.alertMarkerIndexGeneration, 1);
+    assert.strictEqual(state.modelGroupSnapshotIndexes, null);
+    assert.strictEqual(state.acknowledgedPriorityIndex, null);
+    for (const map of Object.values(h.api.collections)) assert.strictEqual(map.size, 0);
+    h.assertReferences(); records.push(h.read());
+  }
+  return records;
+}
+
 if (require.main === module) {
   const context = {}; vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/snapshot-state.js'), 'utf8'), context);
   const create = context.BosunHelperSnapshotState.createSnapshotState;
@@ -233,7 +320,8 @@ if (require.main === module) {
   assert.ok(!entries[0].all_frames);
   runContract();
   runCacheAdapterContract();
+  runRebuildContract();
   console.log('Snapshot state tests passed (references, independent generations, repeated updates, restore/cleanup and six error stages).');
 }
 
-module.exports = { createHarness, runContract, runCacheAdapterContract, collections, scalars, cacheMaps };
+module.exports = { createHarness, runContract, runCacheAdapterContract, runRebuildContract, collections, scalars, cacheMaps };

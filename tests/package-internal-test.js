@@ -70,7 +70,7 @@ try {
   for (const [name, data] of expected.files) assert.deepStrictEqual(entries.get(`bosun-helper/${name}`), data);
   assert.ok(!entries.get('bosun-helper/config.js').toString().includes('private-comment-canary'));
   assert.ok(entries.get('bosun-helper/config.js').toString().includes('synthetic-bosun.internal'));
-  for (const name of ['src/bosun/snapshot-state.js', 'src/bosun/alert-marker-cache.js', 'src/bosun/toolbar-status.js', 'src/bosun/toolbar.js', 'src/bosun/copy.js', 'src/bosun/last-action.js', 'src/bosun/group-identity.js', 'src/bosun/group-identity-page.js',
+  for (const name of ['src/bosun/snapshot-index.js', 'src/bosun/snapshot-state.js', 'src/bosun/alert-marker-cache.js', 'src/bosun/toolbar-status.js', 'src/bosun/toolbar.js', 'src/bosun/copy.js', 'src/bosun/last-action.js', 'src/bosun/group-identity.js', 'src/bosun/group-identity-page.js',
     'src/grafana/grafana-page.js', 'assets/sounds/bosun_notification_soft_chime.wav']) {
     assert.ok(entries.has(`bosun-helper/${name}`));
   }
