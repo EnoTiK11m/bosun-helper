@@ -42,5 +42,24 @@
     return state;
   }
 
-  globalThis.BosunHelperSnapshotState = Object.freeze({ createSnapshotState });
+  function getAlertMarkerCacheMaps(state) {
+    return {
+      childOldNoNoteById: state.childOldNoNoteById,
+      childOldNoNoteByKey: state.childOldNoNoteByKey,
+      childHasNoteById: state.childHasNoteById,
+      childHasNoteByKey: state.childHasNoteByKey,
+      childHasUserCommentById: state.childHasUserCommentById,
+      childHasUserCommentByKey: state.childHasUserCommentByKey,
+      groupHasOldNoNoteByKey: state.groupHasOldNoNoteByKey,
+      groupHasAnyNoteByKey: state.groupHasAnyNoteByKey,
+      groupHasAnyUserCommentByKey: state.groupHasAnyUserCommentByKey,
+      groupHasOldNoNoteBySubject: state.groupHasOldNoNoteBySubject,
+      groupHasAnyNoteBySubject: state.groupHasAnyNoteBySubject,
+      groupHasAnyUserCommentBySubject: state.groupHasAnyUserCommentBySubject,
+      groupHasStrongIdentityBySubject: state.groupHasStrongIdentityBySubject,
+      groupCountBySubject: state.groupCountBySubject
+    };
+  }
+
+  globalThis.BosunHelperSnapshotState = Object.freeze({ createSnapshotState, getAlertMarkerCacheMaps });
 })();

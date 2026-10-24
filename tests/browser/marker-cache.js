@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const { evaluate } = require('./harness/cdp-client');
+const { cacheMaps } = require('../snapshot-state-test');
 
 module.exports = async function runMarkerCacheAssertions({ client, contentSource }) {
   const results = await evaluate(client, `(async () => {
@@ -29,6 +30,9 @@ module.exports = async function runMarkerCacheAssertions({ client, contentSource
           win.eval(${JSON.stringify(contentSource)});
           const hooks = win.__BosunHelperBrowserTest;
           const maps = hooks.markerCacheMaps();
+          const keys = Object.keys(maps);
+          const freshContainer = maps !== hooks.markerCacheMaps();
+          const ownerReferences = Object.entries(maps).every(([name, map]) => hooks.snapshotStateForTest()[name] === map);
           for (const name of Object.keys(maps)) payload.maps[name] = [];
           payload.maps.childHasNoteById = [['cached-alert', true]];
           sessionStorage.setItem(key, JSON.stringify(payload));
@@ -44,7 +48,8 @@ module.exports = async function runMarkerCacheAssertions({ client, contentSource
           }
           const saved = JSON.parse(sessionStorage.getItem(key));
           const pendingAfterTransition = timers.size;
-          const sameReference = hooks.markerCacheMaps().childHasNoteById === reference;
+          const sameReference = hooks.markerCacheMaps().childHasNoteById === reference &&
+            Object.entries(maps).every(([name, map]) => hooks.markerCacheMaps()[name] === map);
           const beforeRepeat = sessionStorage.getItem(key);
           if (transition !== 'route') win.dispatchEvent(new win.PageTransitionEvent('pagehide', { persisted: transition === 'persisted' }));
           const repeatedHideIsInert = transition === 'route' || beforeRepeat === sessionStorage.getItem(key);
@@ -56,7 +61,7 @@ module.exports = async function runMarkerCacheAssertions({ client, contentSource
             timers.delete(id); now += timer.delay; timer.callback();
             resumed = JSON.parse(sessionStorage.getItem(key)).maps.childHasNoteById.some(([id]) => id === 'after-restore');
           }
-          results.push({ transition, restore, cacheTimers, savedNote: saved.maps.childHasNoteById,
+          results.push({ transition, keys, savedKeys: Object.keys(saved.maps), freshContainer, ownerReferences, restore, cacheTimers, savedNote: saved.maps.childHasNoteById,
             pendingAfterTransition, sameReference, repeatedHideIsInert, resumed });
         } finally { frame.remove(); }
         const fresh = document.createElement('iframe'); fresh.src = '/';
@@ -78,6 +83,10 @@ module.exports = async function runMarkerCacheAssertions({ client, contentSource
     return results;
   })()`);
   for (const result of results) {
+    assert.deepStrictEqual(result.keys, cacheMaps);
+    assert.deepStrictEqual(result.savedKeys, cacheMaps);
+    assert.strictEqual(result.freshContainer, true);
+    assert.strictEqual(result.ownerReferences, true);
     assert.deepStrictEqual(result.restore, { restored: true, note: true, warning: false });
     assert.strictEqual(result.cacheTimers, 1, result.transition + ': duplicate delayed persistence');
     assert.deepStrictEqual(result.savedNote, [['cached-alert', true], ['late-result', true]], result.transition + ': cleanup must flush current data before clearing indexes');

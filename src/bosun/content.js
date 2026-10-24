@@ -37,7 +37,8 @@
   const SOUND_FILE_SOFT = 'assets/sounds/bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
   const PRIORITY_ACTION_CLASS = 'bosun-priority-action';
-  const snapshotState = globalThis.BosunHelperSnapshotState.createSnapshotState({ Map, Set });
+  const snapshotStateApi = globalThis.BosunHelperSnapshotState;
+  const snapshotState = snapshotStateApi.createSnapshotState({ Map, Set });
   let priorityRuleUpdatePending = false;
   const COPY_ALL_BUTTON_CLASS = 'bosun-copy-all-alerts-btn';
   const COPY_LAST_ACTION_BUTTON_CLASS = 'bosun-copy-last-action-btn';
@@ -1375,22 +1376,7 @@
   }
 
   function getAlertMarkerCacheMaps() {
-    return {
-      childOldNoNoteById,
-      childOldNoNoteByKey,
-      childHasNoteById,
-      childHasNoteByKey,
-      childHasUserCommentById,
-      childHasUserCommentByKey,
-      groupHasOldNoNoteByKey,
-      groupHasAnyNoteByKey,
-      groupHasAnyUserCommentByKey,
-      groupHasOldNoNoteBySubject,
-      groupHasAnyNoteBySubject,
-      groupHasAnyUserCommentBySubject,
-      groupHasStrongIdentityBySubject,
-      groupCountBySubject
-    };
+    return snapshotStateApi.getAlertMarkerCacheMaps(snapshotState);
   }
 
   function serializeAlertMarkerMap(map) {

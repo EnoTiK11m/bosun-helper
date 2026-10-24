@@ -16,6 +16,10 @@ const collections = ['childOldNoNoteById', 'childOldNoNoteByKey', 'childHasNoteB
   'groupHasStrongIdentityBySubject', 'groupCountBySubject', 'grafanaQueryById', 'grafanaQueryByKey',
   'ambiguousGrafanaIds', 'ambiguousGrafanaKeys'];
 const plain = value => JSON.parse(JSON.stringify(value));
+const cacheMaps = ['childOldNoNoteById', 'childOldNoNoteByKey', 'childHasNoteById', 'childHasNoteByKey',
+  'childHasUserCommentById', 'childHasUserCommentByKey', 'groupHasOldNoNoteByKey', 'groupHasAnyNoteByKey',
+  'groupHasAnyUserCommentByKey', 'groupHasOldNoNoteBySubject', 'groupHasAnyNoteBySubject',
+  'groupHasAnyUserCommentBySubject', 'groupHasStrongIdentityBySubject', 'groupCountBySubject'];
 
 function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/content.js'), 'utf8')) {
   let fault = '', sequence = 0;
@@ -52,6 +56,7 @@ function createHarness(source = fs.readFileSync(path.join(root, 'src/bosun/conte
     globalThis.__snapshotTest = {
       rebuildAlertDataIndex, applyAlertsPayload, clearAlertDerivedState, restoreAlertMarkerCacheFromSession,
       flushAlertMarkerCacheToSession,
+      getAlertMarkerCacheMaps,
       collections: { ${collections.join(', ')} },
       read() { return { ${scalars.map(name => name + ': ' + stateName + name).join(', ')},
         ruleGraphLifecycleGeneration, visualTrackerLifecycleGeneration, markerPresentationLifecycle }; },
@@ -147,6 +152,57 @@ function runContract(source) {
   return traces;
 }
 
+function runCacheAdapterContract(source) {
+  const h = createHarness(source), api = h.api, records = [];
+  const first = api.getAlertMarkerCacheMaps();
+  function checkReferences() {
+    const current = api.getAlertMarkerCacheMaps();
+    assert.deepStrictEqual(Object.keys(current), cacheMaps);
+    assert.notStrictEqual(current, first, 'Each getter call must return a fresh container');
+    for (const name of cacheMaps) {
+      assert.strictEqual(current[name], first[name], name + ': cache map reference changed');
+      assert.strictEqual(current[name], api.collections[name], name + ': cache map diverged from the consumer alias');
+    }
+    h.assertReferences();
+  }
+  checkReferences();
+  for (let i = 0; i < 2010; i++) first.childHasNoteById.set('synthetic-' + i, true);
+  first.childHasNoteById.set('x'.repeat(1001), true);
+  api.collections.childPriorityById.set('not-cached', true);
+  api.flushAlertMarkerCacheToSession();
+  const key = 'bosunAlertMarkerCacheV1', cached = JSON.parse(h.storage.get(key));
+  assert.deepStrictEqual(Object.keys(cached.maps), cacheMaps);
+  assert.strictEqual(cached.maps.childHasNoteById.length, 2000);
+  for (const map of Object.values(first)) map.clear();
+  assert.strictEqual(api.restoreAlertMarkerCacheFromSession(), true);
+  assert.strictEqual(first.childHasNoteById.size, 2000);
+  assert.strictEqual(api.collections.childPriorityById.get('not-cached'), true, 'Non-cache indexes must not be restored or cleared');
+  checkReferences(); records.push(h.read());
+  for (const corrupt of [
+    { ...cached, savedAt: Date.now() - 600001 },
+    { ...cached, savedAt: Date.now() + 60000 },
+    { ...cached, maps: { ...cached.maps, groupCountBySubject: null } },
+    { ...cached, maps: { ...cached.maps, groupCountBySubject: [['x'.repeat(1001), 2]] } }
+  ]) {
+    const before = h.read(); h.storage.set(key, JSON.stringify(corrupt));
+    assert.strictEqual(api.restoreAlertMarkerCacheFromSession(), false);
+    assert.deepStrictEqual(h.read(), before, 'Rejected cache must leave every live index and generation untouched');
+    assert.strictEqual(h.storage.has(key), false);
+    checkReferences();
+  }
+  h.storage.set(key, 'x'.repeat(5 * 1024 * 1024 + 1));
+  const before = h.read();
+  assert.strictEqual(api.restoreAlertMarkerCacheFromSession(), false);
+  assert.deepStrictEqual(h.read(), before); checkReferences();
+  api.applyAlertsPayload({ id: 'pending' }, { source: 'follower' });
+  assert.strictEqual(h.timers.size, 1);
+  api.clearAlertDerivedState();
+  assert.strictEqual(h.timers.size, 0);
+  assert.deepStrictEqual(JSON.parse(h.storage.get(key)).maps.childHasNoteById, [['pending', true]], 'Cleanup must persist before rebuilding empty indexes');
+  checkReferences(); records.push(h.read());
+  return records;
+}
+
 if (require.main === module) {
   const context = {}; vm.runInNewContext(fs.readFileSync(path.join(root, 'src/bosun/snapshot-state.js'), 'utf8'), context);
   const create = context.BosunHelperSnapshotState.createSnapshotState;
@@ -159,6 +215,15 @@ if (require.main === module) {
   first.alertsPayloadApplyVersion++;
   assert.strictEqual(first.alertMarkerIndexGeneration, 0);
   assert.strictEqual(second.alertsPayloadApplyVersion, 0);
+  const getCacheMaps = context.BosunHelperSnapshotState.getAlertMarkerCacheMaps;
+  const firstMaps = getCacheMaps(first), secondMaps = getCacheMaps(second);
+  assert.deepStrictEqual(Object.keys(firstMaps), cacheMaps);
+  assert.notStrictEqual(firstMaps, getCacheMaps(first));
+  for (const name of cacheMaps) {
+    assert.strictEqual(firstMaps[name], first[name]);
+    assert.strictEqual(secondMaps[name], second[name]);
+    assert.notStrictEqual(firstMaps[name], secondMaps[name], 'State instances must not share cache maps');
+  }
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   const file = 'src/bosun/snapshot-state.js', entries = manifest.content_scripts.filter(entry => entry.js?.includes(file));
   assert.strictEqual(entries.length, 1);
@@ -167,7 +232,8 @@ if (require.main === module) {
   assert.strictEqual(entries[0].run_at, 'document_end');
   assert.ok(!entries[0].all_frames);
   runContract();
+  runCacheAdapterContract();
   console.log('Snapshot state tests passed (references, independent generations, repeated updates, restore/cleanup and six error stages).');
 }
 
-module.exports = { createHarness, runContract, collections, scalars };
+module.exports = { createHarness, runContract, runCacheAdapterContract, collections, scalars, cacheMaps };
