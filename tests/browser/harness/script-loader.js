@@ -44,10 +44,11 @@ function instrumentContentSource(source) {
     runDomRefreshPass,
     getLastActionMessageText,
     applyAlertsPayload,
-    startupState: () => ({ version: alertsPayloadApplyVersion, ready: alertDataIndexReady,
-      owner: latestAlertsTrackerOwner, role: refreshCoordinatorApi?.getRole?.() }),
+    startupState: () => ({ version: snapshotState.alertsPayloadApplyVersion, ready: snapshotState.alertDataIndexReady,
+      owner: snapshotState.latestAlertsTrackerOwner, role: refreshCoordinatorApi?.getRole?.() }),
     applySettingsSnapshot,
     rebuildAlertDataIndex,
+    snapshotStateForTest: () => snapshotState,
     resolveChildState,
     resolveGroupState,
     resolveChildIndexedState,
@@ -118,12 +119,12 @@ function instrumentContentSource(source) {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
       if (state === 'note') childHasNoteById.set(id, true);
       if (state === 'warning') childOldNoNoteById.set(id, true);
-      alertDataIndexReady = true;
+      snapshotState.alertDataIndexReady = true;
       flushAlertMarkerCacheToSession();
     },
     clearMarkerState() {
       for (const map of Object.values(getAlertMarkerCacheMaps())) map.clear();
-      alertDataIndexReady = false;
+      snapshotState.alertDataIndexReady = false;
     },
     scheduleMarkerCache: persistAlertMarkerCacheToSession,
     markerCacheMaps: getAlertMarkerCacheMaps,
@@ -137,7 +138,7 @@ function instrumentContentSource(source) {
     },
     markerState() {
       return {
-        ready: alertDataIndexReady,
+        ready: snapshotState.alertDataIndexReady,
         note: childHasNoteById.get('cached-alert') === true
       };
     },
@@ -156,7 +157,7 @@ function createScriptLoader(root) {
   return {
     readTestScript,
     instrumentContentSource(source) {
-      return `${readTestScript('src/bosun/alert-marker-cache.js')}\n${readTestScript('src/bosun/toolbar-status.js')}\n${readTestScript('src/bosun/toolbar.js')}\n${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
+      return `${readTestScript('src/bosun/snapshot-state.js')}\n${readTestScript('src/bosun/alert-marker-cache.js')}\n${readTestScript('src/bosun/toolbar-status.js')}\n${readTestScript('src/bosun/toolbar.js')}\n${readTestScript('src/bosun/copy.js')}\n${readTestScript('src/bosun/last-action.js')}\n${instrumentContentSource(source)}`;
     }
   };
 }

@@ -37,7 +37,7 @@
   const SOUND_FILE_SOFT = 'assets/sounds/bosun_notification_soft_chime.wav';
   const COPY_BUTTON_CLASS = 'bosun-copy-alert-btn';
   const PRIORITY_ACTION_CLASS = 'bosun-priority-action';
-  let priorityRuleIdentityIndex = null;
+  const snapshotState = globalThis.BosunHelperSnapshotState.createSnapshotState({ Map, Set });
   let priorityRuleUpdatePending = false;
   const COPY_ALL_BUTTON_CLASS = 'bosun-copy-all-alerts-btn';
   const COPY_LAST_ACTION_BUTTON_CLASS = 'bosun-copy-last-action-btn';
@@ -129,7 +129,6 @@
   let pendingPrimePresentation = null;
   let markerPresentationLifecycle = 0;
   let markerSettingsReady = false;
-  let alertsPayloadApplyVersion = 0;
   let autoRefreshEnabled = true;
   let autoRefreshIdleSeconds = AUTO_REFRESH_DEFAULT_IDLE_SECONDS;
   let lastUserActivityTs = Date.now();
@@ -178,46 +177,25 @@
   let toolbarStatusMessage = '';
   let toolbarStatusTitle = '';
   let toolbarStatusTimer = null;
-  let alertDataIndexReady = false;
-  let alertMarkerIndexGeneration = 0;
   let newAlertNoticeCounts = { warning: 0, critical: 0, unknown: 0 };
   let newAlertTrackerMutationAllowed = true;
-  let latestAlertsPayload = null;
   const groupIdentityApi = globalThis.BosunHelperGroupIdentity || null;
-  let modelGroupSnapshotIndexes = null;
-  let latestAlertsTrackerOwner = false;
   let visualTrackerLifecycleGeneration = 0;
   let ruleGraphLifecycleGeneration = 0;
   const DIAGNOSTICS_LOG_MAX_ENTRIES = 750;
 
-  // карты дочерних элементов
-  const childOldNoNoteById = new Map();
-  const childOldNoNoteByKey = new Map();
-  const childHasNoteById = new Map();
-  const childHasNoteByKey = new Map();
-  const childHasUserCommentById = new Map();
-  const childHasUserCommentByKey = new Map();
-  const childPriorityById = new Map();
-  const childPriorityByKey = new Map();
-  const ambiguousChildIds = new Set();
-  const ambiguousChildKeys = new Set();
+  // Коллекции snapshot/index state сохраняют прежние экземпляры.
+  const {
+    childOldNoNoteById, childOldNoNoteByKey, childHasNoteById,
+    childHasNoteByKey, childHasUserCommentById, childHasUserCommentByKey,
+    childPriorityById, childPriorityByKey, ambiguousChildIds,
+    ambiguousChildKeys, groupHasOldNoNoteByKey, groupHasAnyNoteByKey,
+    groupHasPriorityByKey, groupHasAnyUserCommentByKey, groupHasOldNoNoteBySubject,
+    groupHasAnyNoteBySubject, groupHasPriorityBySubject, groupHasAnyUserCommentBySubject,
+    groupHasStrongIdentityBySubject, groupCountBySubject, grafanaQueryById,
+    grafanaQueryByKey, ambiguousGrafanaIds, ambiguousGrafanaKeys
+  } = snapshotState;
 
-  // карты групп
-  const groupHasOldNoNoteByKey = new Map();
-  const groupHasAnyNoteByKey = new Map();
-  const groupHasPriorityByKey = new Map();
-  const groupHasAnyUserCommentByKey = new Map();
-  const groupHasOldNoNoteBySubject = new Map();
-  const groupHasAnyNoteBySubject = new Map();
-  const groupHasPriorityBySubject = new Map();
-  const groupHasAnyUserCommentBySubject = new Map();
-  const groupHasStrongIdentityBySubject = new Map();
-  const groupCountBySubject = new Map();
-  let acknowledgedPriorityIndex = null;
-  const grafanaQueryById = new Map();
-  const grafanaQueryByKey = new Map();
-  const ambiguousGrafanaIds = new Set();
-  const ambiguousGrafanaKeys = new Set();
   const expectedExtensionClassStates = new WeakMap();
   const expectedExtensionClassNodes = new Set();
   const sharedUtils = globalThis.BosunSilenceHiderSharedUtils || null;
@@ -533,7 +511,7 @@
 
   const alertMarkerCacheApi = globalThis.BosunHelperAlertMarkerCache.createAlertMarkerCache({
     window, Date, setTimeout, clearTimeout, getAlertMarkerCacheMaps, reportDiagnostics,
-    onRestored: () => { alertDataIndexReady = true; }
+    onRestored: () => { snapshotState.alertDataIndexReady = true; }
   });
 
   const toolbarStatusApi = globalThis.BosunHelperToolbarStatus?.createToolbarStatus?.({
@@ -814,19 +792,19 @@
 
   function clearAlertDerivedState() {
     invalidatePrimePresentation();
-    alertsPayloadApplyVersion += 1;
+    snapshotState.alertsPayloadApplyVersion += 1;
     ruleGraphLifecycleGeneration += 1;
     ruleGraphResolver?.stop?.();
-    latestAlertsPayload = null;
-    modelGroupSnapshotIndexes = null;
-    latestAlertsTrackerOwner = false;
+    snapshotState.latestAlertsPayload = null;
+    snapshotState.modelGroupSnapshotIndexes = null;
+    snapshotState.latestAlertsTrackerOwner = false;
     try { primedAlertsPayload?.controller?.abort?.(); } catch (_) {}
     primedAlertsPayload = null;
     alertMarkerCacheApi.flushPending();
     rebuildAlertDataIndex({ Groups: {} });
     singleAlertAgeApi?.clear?.();
     clearOwnedClass(PRIORITY_ROW_CLASS);
-    alertDataIndexReady = false;
+    snapshotState.alertDataIndexReady = false;
     document.querySelectorAll(
       `.${GRAFANA_QUERY_BUTTON_CLASS}, .${OLD_NO_NOTE_ICON_CLASS}, .${HAS_NOTE_ICON_CLASS}, .${PRIORITY_MARKER_CLASS}, .${PRIORITY_ACTION_CLASS}`
     ).forEach((element) => element.remove());
@@ -858,7 +836,7 @@
 
   function handleRouteChange() {
     if (isDashboardEnhancementsPage()) {
-      if (!alertDataIndexReady) restoreAlertMarkerCacheFromSession();
+      if (!snapshotState.alertDataIndexReady) restoreAlertMarkerCacheFromSession();
       scheduleTopBarMount();
       refreshCoordinatorApi?.start?.();
       refreshCoordinatorApi?.requestRefresh?.('route-change');
@@ -1008,18 +986,18 @@
     // Отсутствие маркера Priority не доказывает обычный статус панели. Для скрытия
     // нужны полный состав, глобально уникальные ID и ключи снимка и существующие
     // разрешение имени и сопоставление Priority. При любом отказе панель остаётся видимой.
-    if (!alertDataIndexReady || !acknowledgedPriorityIndex || !modelGroupSnapshotIndexes ||
-      !priorityRuleIdentityIndex || !isFeatureEnabled('priorityAlerts')) return null;
+    if (!snapshotState.alertDataIndexReady || !snapshotState.acknowledgedPriorityIndex || !snapshotState.modelGroupSnapshotIndexes ||
+      !snapshotState.priorityRuleIdentityIndex || !isFeatureEnabled('priorityAlerts')) return null;
     const root = getAcknowledgedRoot(), heading = getPanelHeading(panel);
-    const payload = latestAlertsPayload, settings = settingsSnapshot;
-    const generation = alertsPayloadApplyVersion, indexGeneration = alertMarkerIndexGeneration;
-    const indexes = modelGroupSnapshotIndexes, children = getGroupChildPanels(panel);
+    const payload = snapshotState.latestAlertsPayload, settings = settingsSnapshot;
+    const generation = snapshotState.alertsPayloadApplyVersion, indexGeneration = snapshotState.alertMarkerIndexGeneration;
+    const indexes = snapshotState.modelGroupSnapshotIndexes, children = getGroupChildPanels(panel);
     const current = () => root?.isConnected && panel.isConnected && root === getAcknowledgedRoot() &&
       document.querySelectorAll('[ts-ack-group="schedule.Groups.Acknowledged"]').length === 1 &&
       panel.closest('[ts-ack-group]') === root && getPanelHeading(panel) === heading &&
-      latestAlertsPayload === payload && settingsSnapshot === settings &&
-      generation === alertsPayloadApplyVersion && indexGeneration === alertMarkerIndexGeneration &&
-      indexes === modelGroupSnapshotIndexes;
+      snapshotState.latestAlertsPayload === payload && settingsSnapshot === settings &&
+      generation === snapshotState.alertsPayloadApplyVersion && indexGeneration === snapshotState.alertMarkerIndexGeneration &&
+      indexes === snapshotState.modelGroupSnapshotIndexes;
     if (!current()) return null;
     let rows, priorities;
     if (children.length) {
@@ -1027,7 +1005,7 @@
       for (const child of children) {
         if (findParentGroupPanelForChild(child) !== panel) return null;
         const name = resolvePriorityActionName(child, root, 'Acknowledged', counts);
-        const state = resolveChildIndexedState(child, panel, acknowledgedPriorityIndex);
+        const state = resolveChildIndexedState(child, panel, snapshotState.acknowledgedPriorityIndex);
         const id = getPanelIdFromHeading(getChildHeading(child));
         if (!name || !state || !id) return null;
         const priority = priorityApi?.classify?.({ identity: 'resolved', alertName: name }, settings)?.priority;
@@ -1048,7 +1026,7 @@
     if (!children.length) {
       if (rows.some(row => !record.children.some(expected => expected.id === row.id && expected.key === row.key))) return null;
       priorities = rows.map(row => {
-        const name = priorityRuleIdentityIndex.childrenBySection.get('Acknowledged')?.get(row.id)?.name;
+        const name = snapshotState.priorityRuleIdentityIndex.childrenBySection.get('Acknowledged')?.get(row.id)?.name;
         return name ? priorityApi?.classify?.({ identity: 'resolved', alertName: name }, settings)?.priority : null;
       });
     }
@@ -1144,7 +1122,7 @@
   }
 
   function shouldShowAlertByUserCommentFilter(panel, parentGroupPanel = null) {
-    if (!userCommentFilterEnabled || !alertDataIndexReady) return true;
+    if (!userCommentFilterEnabled || !snapshotState.alertDataIndexReady) return true;
     return !resolveChildHasUserComment(panel, parentGroupPanel);
   }
 
@@ -1152,7 +1130,7 @@
     const needsAckRoot = getNeedsAckRoot();
     if (!needsAckRoot) return;
 
-    if (!isFeatureEnabled('noCommentFilter') || !userCommentFilterEnabled || !alertDataIndexReady) {
+    if (!isFeatureEnabled('noCommentFilter') || !userCommentFilterEnabled || !snapshotState.alertDataIndexReady) {
       needsAckRoot.querySelectorAll(`.${USER_COMMENT_FILTER_HIDDEN_CLASS}`).forEach((panel) => {
         setExtensionClass(panel, USER_COMMENT_FILTER_HIDDEN_CLASS, false);
       });
@@ -1184,7 +1162,7 @@
 
       // Быстрая локальная перерисовка по текущим картам индексов,
       // но без удаления значков, если DOM ещё не устаканился.
-      if (isDashboardEnhancementsPage() && !alertDataIndexReady) {
+      if (isDashboardEnhancementsPage() && !snapshotState.alertDataIndexReady) {
         restoreAlertMarkerCacheFromSession();
       }
       runDomRefreshPass({
@@ -1520,9 +1498,9 @@
         if (
           generation !== visualTrackerLifecycleGeneration ||
           !isFeatureEnabled('visualNewAlertNotifications') ||
-          !canReconcileAlertTracker(latestAlertsPayload)
+          !canReconcileAlertTracker(snapshotState.latestAlertsPayload)
         ) return;
-        const payload = latestAlertsPayload;
+        const payload = snapshotState.latestAlertsPayload;
         return newAlertTrackerApi?.reconcile?.(payload, () => canReconcileAlertTracker(payload));
       }).catch((error) => {
         reportDiagnostics('new-alert-tracker-start-failed', error?.message || 'unknown-error');
@@ -1534,10 +1512,10 @@
       startAutoRefreshLoop();
     }
     if (name === 'actionTemplates') actionTemplatesApi?.refresh?.();
-    if (name === 'grafanaIntegration' && latestAlertsPayload) {
-      rebuildGrafanaQueryIndex(latestAlertsPayload);
+    if (name === 'grafanaIntegration' && snapshotState.latestAlertsPayload) {
+      rebuildGrafanaQueryIndex(snapshotState.latestAlertsPayload);
       ensureGrafanaQueryButtons();
-      refreshRuleGraphDefinitions(latestAlertsPayload);
+      refreshRuleGraphDefinitions(snapshotState.latestAlertsPayload);
     }
     if (!initial) {
       scheduleTopBarMount();
@@ -1603,7 +1581,7 @@
       'features.priorityAlerts',
       'priorityRules.exactAlertNames'
     ].some((path) => changedPaths.includes(path))) {
-      if (latestAlertsPayload) rebuildAlertDataIndex(latestAlertsPayload, { skipGrafanaQueryIndex: true });
+      if (snapshotState.latestAlertsPayload) rebuildAlertDataIndex(snapshotState.latestAlertsPayload, { skipGrafanaQueryIndex: true });
       applyPriorityMarkers();
     }
     if (changedPaths.includes('preferences.priorityRuleAction')) ensurePriorityActions();
@@ -2180,11 +2158,11 @@
 
   function handleRuleGraphInvalidation() {
     if (
-      !latestAlertsPayload ||
+      !snapshotState.latestAlertsPayload ||
       !isDashboardEnhancementsPage() ||
       !isFeatureEnabled('grafanaIntegration')
     ) return;
-    rebuildGrafanaQueryIndex(latestAlertsPayload);
+    rebuildGrafanaQueryIndex(snapshotState.latestAlertsPayload);
     ensureGrafanaQueryButtons();
   }
 
@@ -2200,11 +2178,11 @@
     ruleGraphResolver.refresh(names).then((sourceState) => {
       if (
         generation !== ruleGraphLifecycleGeneration ||
-        !latestAlertsPayload ||
+        !snapshotState.latestAlertsPayload ||
         !isDashboardEnhancementsPage() ||
         !isFeatureEnabled('grafanaIntegration')
       ) return;
-      rebuildGrafanaQueryIndex(latestAlertsPayload);
+      rebuildGrafanaQueryIndex(snapshotState.latestAlertsPayload);
       ensureGrafanaQueryButtons();
       if (sourceState?.available) reportRuleGraphRejections(names);
       if (!sourceState?.available) {
@@ -2212,7 +2190,7 @@
       }
     }).catch(() => {
       if (generation !== ruleGraphLifecycleGeneration) return;
-      rebuildGrafanaQueryIndex(latestAlertsPayload);
+      rebuildGrafanaQueryIndex(snapshotState.latestAlertsPayload);
       ensureGrafanaQueryButtons();
       reportDiagnostics('grafana-rule-source-unavailable', 'config_unavailable');
     });
@@ -2301,7 +2279,7 @@
   }
 
   function rebuildAlertDataIndex(payload, options = {}) {
-    priorityRuleIdentityIndex = priorityApi?.buildRuleIdentityIndex?.(payload) || null;
+    snapshotState.priorityRuleIdentityIndex = priorityApi?.buildRuleIdentityIndex?.(payload) || null;
     const helpers = {
       buildChildMarkerKeyFromData,
       buildGroupMarkerKeyFromData,
@@ -2383,12 +2361,12 @@
       groupHasStrongIdentityBySubject.set(key, value);
     }
     for (const [key, value] of nextIndex.groupCountBySubject || []) groupCountBySubject.set(key, value);
-    acknowledgedPriorityIndex = isFeatureEnabled('priorityAlerts')
+    snapshotState.acknowledgedPriorityIndex = isFeatureEnabled('priorityAlerts')
       ? alertsDataApi?.rebuildAlertDataIndex?.(payload, helpers, 'Acknowledged') || null
       : null;
-    alertDataIndexReady = true;
-    alertMarkerIndexGeneration += 1;
-    modelGroupSnapshotIndexes = groupIdentityApi?.buildSnapshotIndexes(payload, buildGroupMarkerKeyFromData) || null;
+    snapshotState.alertDataIndexReady = true;
+    snapshotState.alertMarkerIndexGeneration += 1;
+    snapshotState.modelGroupSnapshotIndexes = groupIdentityApi?.buildSnapshotIndexes(payload, buildGroupMarkerKeyFromData) || null;
     if (!options.skipGrafanaQueryIndex) rebuildGrafanaQueryIndex(payload);
   }
 
@@ -2627,9 +2605,9 @@
     if (typeof groupIdentityApi?.read !== 'function') { diagnostic?.modelReader?.(panel, 'reader-unavailable'); return null; }
     const rootForSection = () => section === 'NeedAck' ? getNeedsAckRoot() : getAcknowledgedRoot();
     const root = rootForSection(), heading = getPanelHeading(panel);
-    const generation = alertsPayloadApplyVersion, settings = settingsSnapshot;
+    const generation = snapshotState.alertsPayloadApplyVersion, settings = settingsSnapshot;
     const subjectNode = getGroupSubjectNode(panel), subject = getGroupSubjectFromPanel(panel);
-    const current = () => payload === latestAlertsPayload && alertsPayloadApplyVersion === generation &&
+    const current = () => payload === snapshotState.latestAlertsPayload && snapshotState.alertsPayloadApplyVersion === generation &&
       settingsSnapshot === settings && isFeatureEnabled('singleAlertAge') && isDashboardEnhancementsPage() &&
       panel.isConnected && root?.isConnected && rootForSection() === root && root.contains(panel) &&
       panel.closest('[ts-ack-group]') === root && root.getAttribute('ts-ack-group') === 'schedule.Groups.' + section &&
@@ -2660,12 +2638,12 @@
     }
     const rootForSection = () => section === 'NeedAck' ? getNeedsAckRoot() : getAcknowledgedRoot();
     const root = rootForSection(), heading = getPanelHeading(panel);
-    const generation = alertsPayloadApplyVersion, settings = settingsSnapshot;
+    const generation = snapshotState.alertsPayloadApplyVersion, settings = settingsSnapshot;
     const subjectNode = getGroupSubjectNode(panel), subject = getGroupSubjectFromPanel(panel);
     const children = getGroupChildPanels(panel), child = children.length === 1 ? children[0] : null;
     const childHeading = child ? getChildHeading(child) : null;
     const groupKey = buildGroupMarkerKeyFromDom(panel);
-    const current = () => payload === latestAlertsPayload && alertsPayloadApplyVersion === generation &&
+    const current = () => payload === snapshotState.latestAlertsPayload && snapshotState.alertsPayloadApplyVersion === generation &&
       settingsSnapshot === settings && isFeatureEnabled('singleAlertAge') && isDashboardEnhancementsPage() &&
       panel.isConnected && root?.isConnected && rootForSection() === root && root.contains(panel) &&
       panel.closest('[ts-ack-group]') === root && root.getAttribute('ts-ack-group') === 'schedule.Groups.' + section &&
@@ -2692,23 +2670,23 @@
   }
 
   function resolveModelGroupPriority(panel, index) {
-    if (!alertDataIndexReady || !groupIdentityApi || !modelGroupSnapshotIndexes) return null;
+    if (!snapshotState.alertDataIndexReady || !groupIdentityApi || !snapshotState.modelGroupSnapshotIndexes) return null;
     const section = index ? 'Acknowledged' : 'NeedAck';
     const root = index ? getAcknowledgedRoot() : getNeedsAckRoot();
     const heading = getPanelHeading(panel);
-    const payload = latestAlertsPayload, settings = settingsSnapshot;
-    const snapshotGeneration = alertsPayloadApplyVersion, indexGeneration = alertMarkerIndexGeneration;
-    const snapshotIndexes = modelGroupSnapshotIndexes;
-    if (!root?.contains(panel) || !heading || (index && index !== acknowledgedPriorityIndex)) return false;
+    const payload = snapshotState.latestAlertsPayload, settings = settingsSnapshot;
+    const snapshotGeneration = snapshotState.alertsPayloadApplyVersion, indexGeneration = snapshotState.alertMarkerIndexGeneration;
+    const snapshotIndexes = snapshotState.modelGroupSnapshotIndexes;
+    if (!root?.contains(panel) || !heading || (index && index !== snapshotState.acknowledgedPriorityIndex)) return false;
     const identity = groupIdentityApi.read(panel);
     if (!identity) return null; // Читатель недоступен: новые способы определения идентичности не добавляем.
     // Повторяем проверку после вызова кода страницы, даже при синхронном мосте.
-    if (identity.rejected || identity.section !== section || latestAlertsPayload !== payload || settingsSnapshot !== settings ||
-      alertsPayloadApplyVersion !== snapshotGeneration || alertMarkerIndexGeneration !== indexGeneration ||
-      modelGroupSnapshotIndexes !== snapshotIndexes || !panel.isConnected || !root.isConnected ||
+    if (identity.rejected || identity.section !== section || snapshotState.latestAlertsPayload !== payload || settingsSnapshot !== settings ||
+      snapshotState.alertsPayloadApplyVersion !== snapshotGeneration || snapshotState.alertMarkerIndexGeneration !== indexGeneration ||
+      snapshotState.modelGroupSnapshotIndexes !== snapshotIndexes || !panel.isConnected || !root.isConnected ||
       (index ? getAcknowledgedRoot() : getNeedsAckRoot()) !== root ||
       !root.contains(panel) || getPanelHeading(panel) !== heading || getGroupChildPanels(panel).length ||
-      (index && index !== acknowledgedPriorityIndex)) return false;
+      (index && index !== snapshotState.acknowledgedPriorityIndex)) return false;
     const signature = identity.children.map(row => row.id).sort().join(',');
     const record = snapshotIndexes[section]?.get(signature);
     if (!record || record.children.length !== identity.children.length || identity.children.some(row =>
@@ -2743,7 +2721,7 @@
     const heading = getChildHeading(panel);
     const id = getPanelIdFromHeading(heading);
     if (!id || heading.querySelectorAll('span[ng-show="state.Id"]').length !== 1 || counts.get(id) !== 1) return '';
-    const record = priorityRuleIdentityIndex?.childrenBySection.get(section)?.get(id);
+    const record = snapshotState.priorityRuleIdentityIndex?.childrenBySection.get(section)?.get(id);
     // Отсутствие или конфликт сильного ID не разрешает поиск по Subject либо в другой секции.
     return record && record.subjects.includes(getPanelSubjectFromHeading(heading)) ? record.name : '';
   }
@@ -2805,7 +2783,7 @@
         const heading = getChildHeading(panel);
         const subject = getChildSubjectNode(panel);
         const buttons = Array.from(heading?.querySelectorAll(`.${PRIORITY_ACTION_CLASS}`) || []);
-        const name = settingsStore?.update && alertDataIndexReady && subject
+        const name = settingsStore?.update && snapshotState.alertDataIndexReady && subject
           ? resolvePriorityActionName(panel, root, section, counts) : '';
         if (!name) { buttons.forEach((button) => button.remove()); continue; }
         let button = buttons.shift();
@@ -2836,13 +2814,13 @@
 
   function applyPriorityMarkers() {
     ensurePriorityActions();
-    const enabled = isFeatureEnabled('priorityAlerts') && alertDataIndexReady;
+    const enabled = isFeatureEnabled('priorityAlerts') && snapshotState.alertDataIndexReady;
     for (const { root, index, show } of [
       { root: getNeedsAckRoot(), index: null, show: enabled },
       {
         root: getAcknowledgedRoot(),
-        index: acknowledgedPriorityIndex,
-        show: enabled && Boolean(acknowledgedPriorityIndex)
+        index: snapshotState.acknowledgedPriorityIndex,
+        show: enabled && Boolean(snapshotState.acknowledgedPriorityIndex)
       }
     ]) {
       const childPanels = getChildAlertPanels(root), domIdCounts = new Map();
@@ -2938,7 +2916,7 @@
     if (!markerSettingsReady || !entry?.payload) return;
     const age = Date.now() - entry.startedAt;
     if (!isDashboardEnhancementsPage() || entry.lifecycle !== markerPresentationLifecycle ||
-      entry.controller?.signal.aborted || entry.applyVersion !== alertsPayloadApplyVersion ||
+      entry.controller?.signal.aborted || entry.applyVersion !== snapshotState.alertsPayloadApplyVersion ||
       age < 0 || age > DATA_REFRESH_MS) {
       pendingPrimePresentation = null;
       return;
@@ -2956,9 +2934,9 @@
     pendingPrimePresentation = null;
     // Первичное свежее отображение не является снимком, полученным координатором. В частности,
     // не обрабатываем базу уведомлений, звук и трекер и не публикуем снимок.
-    latestAlertsPayload = payload;
-    latestAlertsTrackerOwner = false;
-    alertsPayloadApplyVersion += 1;
+    snapshotState.latestAlertsPayload = payload;
+    snapshotState.latestAlertsTrackerOwner = false;
+    snapshotState.alertsPayloadApplyVersion += 1;
     rebuildAlertDataIndex(payload, { skipGrafanaQueryIndex: true });
     applyNeedsAckMarkersFromData();
   }
@@ -2968,7 +2946,7 @@
     const controller = typeof AbortController === 'function' ? new AbortController() : null;
     const entry = {
       startedAt: Date.now(),
-      applyVersion: alertsPayloadApplyVersion,
+      applyVersion: snapshotState.alertsPayloadApplyVersion,
       lifecycle: markerPresentationLifecycle,
       controller,
       promise: fetchAlertsPayload({ signal: controller?.signal }, 'prime')
@@ -2977,9 +2955,9 @@
     pendingPrimePresentation = entry;
     entry.promise.then((payload) => {
       entry.payload = payload;
-      if (isDashboardEnhancementsPage() && alertsPayloadApplyVersion === entry.applyVersion &&
+      if (isDashboardEnhancementsPage() && snapshotState.alertsPayloadApplyVersion === entry.applyVersion &&
         entry.lifecycle === markerPresentationLifecycle && !entry.controller?.signal.aborted) {
-        singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now(), previousPayload: latestAlertsPayload });
+        singleAlertAgeApi?.update?.(payload, { source: 'prime', fetchedAt: Date.now(), previousPayload: snapshotState.latestAlertsPayload });
         if (isFeatureEnabled('singleAlertAge')) singleAlertAgeApi?.refresh?.();
       }
       applyPrimeMarkerPresentation();
@@ -3002,7 +2980,7 @@
   }
 
   function canReconcileAlertTracker(payload) {
-    return Boolean(payload && payload === latestAlertsPayload && latestAlertsTrackerOwner &&
+    return Boolean(payload && payload === snapshotState.latestAlertsPayload && snapshotState.latestAlertsTrackerOwner &&
       isFeatureEnabled('visualNewAlertNotifications') &&
       (!refreshCoordinatorApi || refreshCoordinatorApi.ownsSnapshot?.(payload) === true));
   }
@@ -3011,10 +2989,10 @@
     if (metadata?.source === 'follower') singleAlertAgeApi?.diagnostics?.received?.(payload, 'follower');
     if (!isDashboardEnhancementsPage()) return;
     pendingPrimePresentation = null;
-    const previousAlertsPayload = latestAlertsPayload;
-    latestAlertsPayload = payload;
-    latestAlertsTrackerOwner = metadata?.source !== 'follower';
-    alertsPayloadApplyVersion += 1;
+    const previousAlertsPayload = snapshotState.latestAlertsPayload;
+    snapshotState.latestAlertsPayload = payload;
+    snapshotState.latestAlertsTrackerOwner = metadata?.source !== 'follower';
+    snapshotState.alertsPayloadApplyVersion += 1;
     singleAlertAgeApi?.update?.(payload, {
       source: metadata?.source || 'direct',
       previousPayload: previousAlertsPayload,

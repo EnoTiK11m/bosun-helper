@@ -1204,6 +1204,7 @@ async function testActionTemplatesFollowTextareaRemount() {
   runFiles(harness, [
     'src/settings/settings.js',
     'src/bosun/action-templates.js',
+    'src/bosun/snapshot-state.js',
     'src/bosun/alert-marker-cache.js',
     'src/bosun/content.js'
   ]);

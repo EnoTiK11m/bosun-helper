@@ -57,6 +57,7 @@
         "src/bosun/toolbar.js",
         "src/bosun/copy.js",
         "src/bosun/last-action.js",
+        "src/bosun/snapshot-state.js",
         "src/bosun/alert-marker-cache.js",
         "src/bosun/content.js"
       ],

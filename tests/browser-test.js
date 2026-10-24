@@ -24,6 +24,7 @@ const runAccessibilityCopyScenarios = require('./browser/accessibility-copy');
 const runCopyAssertions = require('./browser/copy');
 const runToolbarAssertions = require('./browser/toolbar');
 const runMarkerCacheAssertions = require('./browser/marker-cache');
+const runSnapshotStateAssertions = require('./browser/snapshot-state');
 const runGrafanaEditorHandoffScenarios = require('./browser/grafana-editor-handoff');
 
 selection('test:browser', process.env, process.argv.slice(2));
@@ -124,6 +125,7 @@ async function runBrowserAssertions(client) {
   await runCopyAssertions({ client, copySource: readTestScript('src/bosun/copy.js') });
   await runToolbarAssertions({ client, contentSource });
   await runMarkerCacheAssertions({ client, contentSource });
+  await runSnapshotStateAssertions({ client, contentSource, alertsDataSource });
 
   await runGrafanaEditorHandoffScenarios({ client, handoffSource, grafanaPageSource, legacyFixtures, stateExprFallbackResult, expectedMergeQueries });
 }

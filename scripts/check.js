@@ -76,6 +76,7 @@ for (const provider of [
   'src/bosun/last-action.js',
   'src/bosun/copy.js',
   'src/bosun/toolbar-status.js',
+  'src/bosun/snapshot-state.js',
   'src/bosun/alert-marker-cache.js',
   'src/bosun/toolbar.js',
   'src/shared/refresh-coordinator.js'
